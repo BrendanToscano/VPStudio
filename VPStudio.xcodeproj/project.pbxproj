@@ -1,0 +1,541 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		AA000001AAAA000100000001 /* GRDB in Frameworks */ = {isa = PBXBuildFile; productRef = AA000001AAAA000100000002 /* GRDB */; };
+		AA000001AAAA000100000003 /* KSPlayer in Frameworks */ = {isa = PBXBuildFile; productRef = AA000001AAAA000100000004 /* KSPlayer */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		C626B55F2F47E177008624B6 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = C626B53A2F47E175008624B6 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = C626B5412F47E175008624B6;
+			remoteInfo = VPStudio;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		C626B5422F47E175008624B6 /* VPStudio.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = VPStudio.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		C626B55E2F47E177008624B6 /* VPStudioTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = VPStudioTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		C626B5442F47E175008624B6 /* VPStudio */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = VPStudio;
+			sourceTree = "<group>";
+		};
+		C626B5612F47E177008624B6 /* VPStudioTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = VPStudioTests;
+			sourceTree = "<group>";
+		};
+/* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		C626B53F2F47E175008624B6 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				AA000001AAAA000100000001 /* GRDB in Frameworks */,
+				AA000001AAAA000100000003 /* KSPlayer in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C626B55B2F47E177008624B6 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		C626B5392F47E175008624B6 = {
+			isa = PBXGroup;
+			children = (
+				C626B5442F47E175008624B6 /* VPStudio */,
+				C626B5452F47E175008624B6 /* Packages */,
+				C626B5612F47E177008624B6 /* VPStudioTests */,
+				C626B5432F47E175008624B6 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		C626B5432F47E175008624B6 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				C626B5422F47E175008624B6 /* VPStudio.app */,
+				C626B55E2F47E177008624B6 /* VPStudioTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		C626B5452F47E175008624B6 /* Packages */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			path = Packages;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		C626B5412F47E175008624B6 /* VPStudio */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = C626B5652F47E177008624B6 /* Build configuration list for PBXNativeTarget "VPStudio" */;
+			buildPhases = (
+				C626B53E2F47E175008624B6 /* Sources */,
+				C626B53F2F47E175008624B6 /* Frameworks */,
+				C626B5402F47E175008624B6 /* Resources */,
+				AA000002BBBB000200000001 /* Fix KSPlayer Framework Bundle IDs */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				C626B5442F47E175008624B6 /* VPStudio */,
+			);
+			name = VPStudio;
+			packageProductDependencies = (
+				AA000001AAAA000100000002 /* GRDB */,
+				AA000001AAAA000100000004 /* KSPlayer */,
+			);
+			productName = VPStudio;
+			productReference = C626B5422F47E175008624B6 /* VPStudio.app */;
+			productType = "com.apple.product-type.application";
+		};
+		C626B55D2F47E177008624B6 /* VPStudioTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = C626B56A2F47E177008624B6 /* Build configuration list for PBXNativeTarget "VPStudioTests" */;
+			buildPhases = (
+				C626B55A2F47E177008624B6 /* Sources */,
+				C626B55B2F47E177008624B6 /* Frameworks */,
+				C626B55C2F47E177008624B6 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				C626B5602F47E177008624B6 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				C626B5612F47E177008624B6 /* VPStudioTests */,
+			);
+			name = VPStudioTests;
+			productName = VPStudioTests;
+			productReference = C626B55E2F47E177008624B6 /* VPStudioTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		C626B53A2F47E175008624B6 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2610;
+				LastUpgradeCheck = 2610;
+				TargetAttributes = {
+					C626B5412F47E175008624B6 = {
+						CreatedOnToolsVersion = 26.1.1;
+					};
+					C626B55D2F47E177008624B6 = {
+						CreatedOnToolsVersion = 26.1.1;
+						TestTargetID = C626B5412F47E175008624B6;
+					};
+				};
+			};
+			buildConfigurationList = C626B53D2F47E175008624B6 /* Build configuration list for PBXProject "VPStudio" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = C626B5392F47E175008624B6;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				AA000001AAAA000100000005 /* XCRemoteSwiftPackageReference "GRDB" */,
+				AA000001AAAA000100000006 /* XCRemoteSwiftPackageReference "KSPlayer" */,
+			);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = C626B5432F47E175008624B6 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				C626B5412F47E175008624B6 /* VPStudio */,
+				C626B55D2F47E177008624B6 /* VPStudioTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		C626B5402F47E175008624B6 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C626B55C2F47E177008624B6 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		AA000002BBBB000200000001 /* Fix KSPlayer Framework Bundle IDs */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+			);
+			name = "Fix KSPlayer Framework Bundle IDs";
+			outputPaths = (
+				"$(DERIVED_FILE_DIR)/ksplayer_bundleid_fix.stamp",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "# Fix invalid CFBundleIdentifier in KSPlayer frameworks (underscores not allowed)\n# Fix at source package level so Xcode embeds the corrected version\nSRC_DIR=\"${BUILD_DIR}/../../SourcePackages/checkouts/FFmpegKit/Sources\"\nif [ -d \"$SRC_DIR\" ]; then\n    find \"$SRC_DIR\" -name Info.plist -path '*.framework/*' | while read plist; do\n        BUNDLE_ID=$(/usr/libexec/PlistBuddy -c \"Print :CFBundleIdentifier\" \"$plist\" 2>/dev/null || true)\n        if echo \"$BUNDLE_ID\" | grep -q '_'; then\n            FIXED_ID=$(echo \"$BUNDLE_ID\" | sed 's/_/-/g')\n            chmod u+w \"$plist\" 2>/dev/null || true\n            /usr/libexec/PlistBuddy -c \"Set :CFBundleIdentifier $FIXED_ID\" \"$plist\" 2>/dev/null || true\n            echo \"Fixed source: $BUNDLE_ID -> $FIXED_ID\"\n        fi\n    done\nfi\n# Also fix in built products\nFRAMEWORKS_DIR=\"${BUILT_PRODUCTS_DIR}/${FRAMEWORKS_FOLDER_PATH}\"\nif [ -d \"$FRAMEWORKS_DIR\" ]; then\n    for fw in \"$FRAMEWORKS_DIR\"/*.framework; do\n        if [ -f \"$fw/Info.plist\" ]; then\n            BUNDLE_ID=$(/usr/libexec/PlistBuddy -c \"Print :CFBundleIdentifier\" \"$fw/Info.plist\" 2>/dev/null || true)\n            if echo \"$BUNDLE_ID\" | grep -q '_'; then\n                FIXED_ID=$(echo \"$BUNDLE_ID\" | sed 's/_/-/g')\n                /usr/libexec/PlistBuddy -c \"Set :CFBundleIdentifier $FIXED_ID\" \"$fw/Info.plist\"\n                echo \"Fixed product: $BUNDLE_ID -> $FIXED_ID\"\n            fi\n        fi\n    done\nfi\nSTAMP_FILE=\"${DERIVED_FILE_DIR}/ksplayer_bundleid_fix.stamp\"\nmkdir -p \"${DERIVED_FILE_DIR}\"\nprintf \"fixed at %s\\n\" \"$(date -u '+%Y-%m-%dT%H:%M:%SZ')\" > \"$STAMP_FILE\"\n";
+		};
+/* End PBXShellScriptBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		C626B53E2F47E175008624B6 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C626B55A2F47E177008624B6 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		C626B5602F47E177008624B6 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = C626B5412F47E175008624B6 /* VPStudio */;
+			targetProxy = C626B55F2F47E177008624B6 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		C626B5662F47E177008624B6 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = H2Q3F2444J;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Info.plist;
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsMultipleScenes = YES;
+				INFOPLIST_KEY_UIBackgroundModes = audio;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.tgk30.VPStudio;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SUPPORTED_PLATFORMS = "xros xrsimulator";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = nonisolated;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 7;
+			};
+			name = Debug;
+		};
+		C626B5672F47E177008624B6 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = H2Q3F2444J;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Info.plist;
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsMultipleScenes = YES;
+				INFOPLIST_KEY_UIBackgroundModes = audio;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.tgk30.VPStudio;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SUPPORTED_PLATFORMS = "xros xrsimulator";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = nonisolated;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 7;
+			};
+			name = Release;
+		};
+		C626B5682F47E177008624B6 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = H2Q3F2444J;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = xros;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				XROS_DEPLOYMENT_TARGET = 26.1;
+			};
+			name = Debug;
+		};
+		C626B5692F47E177008624B6 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = H2Q3F2444J;
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SDKROOT = xros;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				VALIDATE_PRODUCT = YES;
+				XROS_DEPLOYMENT_TARGET = 26.1;
+			};
+			name = Release;
+		};
+		C626B56B2F47E177008624B6 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = H2Q3F2444J;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Info.plist;
+				INFOPLIST_KEY_UIBackgroundModes = audio;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.tgk30.VPStudioTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SUPPORTED_PLATFORMS = "xros xrsimulator";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 7;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/VPStudio.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/VPStudio";
+				XROS_DEPLOYMENT_TARGET = 26.1;
+			};
+			name = Debug;
+		};
+		C626B56C2F47E177008624B6 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = H2Q3F2444J;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Info.plist;
+				INFOPLIST_KEY_UIBackgroundModes = audio;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.tgk30.VPStudioTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SUPPORTED_PLATFORMS = "xros xrsimulator";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 7;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/VPStudio.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/VPStudio";
+				XROS_DEPLOYMENT_TARGET = 26.1;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		C626B53D2F47E175008624B6 /* Build configuration list for PBXProject "VPStudio" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C626B5682F47E177008624B6 /* Debug */,
+				C626B5692F47E177008624B6 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		C626B5652F47E177008624B6 /* Build configuration list for PBXNativeTarget "VPStudio" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C626B5662F47E177008624B6 /* Debug */,
+				C626B5672F47E177008624B6 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		C626B56A2F47E177008624B6 /* Build configuration list for PBXNativeTarget "VPStudioTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C626B56B2F47E177008624B6 /* Debug */,
+				C626B56C2F47E177008624B6 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		AA000001AAAA000100000005 /* XCRemoteSwiftPackageReference "GRDB" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/groue/GRDB.swift";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 7.0.0;
+			};
+		};
+		AA000001AAAA000100000006 /* XCRemoteSwiftPackageReference "KSPlayer" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/kingslay/KSPlayer";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.0.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		AA000001AAAA000100000002 /* GRDB */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AA000001AAAA000100000005 /* XCRemoteSwiftPackageReference "GRDB" */;
+			productName = GRDB;
+		};
+		AA000001AAAA000100000004 /* KSPlayer */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AA000001AAAA000100000006 /* XCRemoteSwiftPackageReference "KSPlayer" */;
+			productName = KSPlayer;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = C626B53A2F47E175008624B6 /* Project object */;
+}
