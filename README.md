@@ -56,8 +56,8 @@ If you prefer Git:
 2. Run:
 
 ```bash
-git clone <paste-repo-https-url>
-cd <repo-folder>
+git clone https://github.com/BrendanToscano/VPStudio.git
+cd VPStudio
 open VPStudio.xcodeproj
 ```
 
@@ -76,7 +76,7 @@ For full streaming behavior, configure at least a TMDB API key and one debrid pr
 - TMDB API keys are free for personal/development use.
 - Debrid providers are typically paid subscriptions.
 - Hosted AI providers (OpenAI/Anthropic) are paid; local Ollama can be run without API billing.
-- Trakt/Simkl sync requires your own account credentials, configured in Settings.
+- Trakt/Simkl sync requires your own account credentials (but mostly free), configured in Settings.
 
 ### Troubleshooting
 
