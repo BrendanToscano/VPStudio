@@ -377,6 +377,53 @@ actor EnvironmentCatalogManager {
         return nil
     }
 
+    /// Validates that an environment asset exists and is accessible.
+    /// Returns nil if the asset is invalid, or a description of the issue if validation fails.
+    func validateAsset(_ asset: EnvironmentAsset) -> String? {
+        // Check for empty or invalid asset path
+        guard !asset.assetPath.isEmpty else {
+            return "Asset path is empty"
+        }
+
+        // Handle bundle resources
+        if asset.assetPath.hasPrefix("bundle://") {
+            let relative = String(asset.assetPath.dropFirst("bundle://".count))
+            guard Self.urlInResourceBundle(relativePath: relative) != nil else {
+                return "Bundle resource not found: \(relative)"
+            }
+            return nil
+        }
+
+        // Check file existence for imported assets
+        let fileURL = URL(fileURLWithPath: asset.assetPath)
+        guard fileManager.fileExists(atPath: fileURL.path) else {
+            return "File not found: \(fileURL.lastPathComponent)"
+        }
+
+        // Check file is readable
+        guard fileManager.isReadableFile(atPath: fileURL.path) else {
+            return "File is not readable: \(fileURL.lastPathComponent)"
+        }
+
+        // Check file is not empty
+        do {
+            let attributes = try fileManager.attributesOfItem(atPath: fileURL.path)
+            if let fileSize = attributes[.size] as? Int, fileSize == 0 {
+                return "File is empty: \(fileURL.lastPathComponent)"
+            }
+        } catch {
+            return "Could not read file attributes: \(error.localizedDescription)"
+        }
+
+        // Validate file extension
+        let ext = fileURL.pathExtension.lowercased()
+        guard Self.supportedExtensions.contains(ext) else {
+            return "Unsupported file type: \(ext)"
+        }
+
+        return nil
+    }
+
     private static func urlInResourceBundle(relativePath: String) -> URL? {
         let relative = relativePath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         let parts = relative.split(separator: "/").map(String.init)
