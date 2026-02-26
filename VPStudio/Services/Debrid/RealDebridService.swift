@@ -30,11 +30,14 @@ actor RealDebridService: DebridServiceProtocol {
 
     /// Validates that a string looks like a hex info-hash (40 or 64 hex chars).
     /// Prevents path-traversal or URL corruption when hashes are embedded in URL paths.
-    private static let hexHashPattern = try! NSRegularExpression(pattern: "^[0-9a-fA-F]{40,64}$")
+    private static var hexHashPattern: NSRegularExpression? {
+        try? NSRegularExpression(pattern: "^[0-9a-fA-F]{40,64}$")
+    }
 
     private static func isValidHexHash(_ hash: String) -> Bool {
+        guard let pattern = hexHashPattern else { return false }
         let range = NSRange(hash.startIndex..<hash.endIndex, in: hash)
-        return hexHashPattern.firstMatch(in: hash, range: range) != nil
+        return pattern.firstMatch(in: hash, range: range) != nil
     }
 
     func checkCache(hashes: [String]) async throws -> [String: CacheStatus] {
