@@ -150,11 +150,14 @@ final class HeadTracker {
                     var mat = simd_float4x4(finalRot)
                     mat.columns.3 = SIMD4<Float>(finalPos.x, finalPos.y, finalPos.z, 1)
 
-                    await MainActor.run {
-                        guard let self else { return }
-                        self.headTransform = mat
-                        if self.initialHeadTransform == nil {
-                            self.initialHeadTransform = mat
+                    // Capture values for Swift 6 safety
+                    let headTransform = mat
+                    let hasInitial = self.initialHeadTransform == nil
+
+                    await MainActor.run { [self] in
+                        self.headTransform = headTransform
+                        if hasInitial {
+                            self.initialHeadTransform = headTransform
                         }
                         if !self.isTracking {
                             self.isTracking = true
