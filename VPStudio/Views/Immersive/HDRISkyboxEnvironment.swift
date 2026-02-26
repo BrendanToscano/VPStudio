@@ -442,6 +442,12 @@ struct HDRISkyboxEnvironment: View {
             return nil
         }
 
+        // Verify source contains at least one image before attempting to decode.
+        guard CGImageSourceGetCount(source) > 0 else {
+            logger.error("Image source is empty: \(url.lastPathComponent, privacy: .public)")
+            return nil
+        }
+
         let options: [CFString: Any] = [
             kCGImageSourceShouldCache: false,
             kCGImageSourceShouldAllowFloat: true,

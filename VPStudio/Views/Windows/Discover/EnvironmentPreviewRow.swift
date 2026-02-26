@@ -416,6 +416,9 @@ struct EnvironmentPreviewCard: View {
     nonisolated private static func loadHDRThumbnail(from url: URL, maxDimension: Int) -> CGImage? {
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
 
+        // Verify source contains at least one image before attempting to load.
+        guard CGImageSourceGetCount(source) > 0 else { return nil }
+
         let thumbOptions: [CFString: Any] = [
             kCGImageSourceShouldCache: false,
             kCGImageSourceShouldAllowFloat: true,
