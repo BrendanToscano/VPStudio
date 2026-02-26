@@ -325,9 +325,11 @@ final class AppState {
     func configureAIProviders() async {
         let anthropicKey = (try? await settingsManager.getString(key: SettingsKeys.anthropicApiKey)) ?? ""
         let openAIKey = (try? await settingsManager.getString(key: SettingsKeys.openAIApiKey)) ?? ""
+        let geminiKey = (try? await settingsManager.getString(key: SettingsKeys.geminiApiKey)) ?? ""
         let ollamaURL = (try? await settingsManager.getString(key: SettingsKeys.ollamaEndpoint)) ?? "http://localhost:11434"
         let anthropicModel = try? await settingsManager.getString(key: SettingsKeys.anthropicModelPreset)
         let openAIModel = try? await settingsManager.getString(key: SettingsKeys.openAIModelPreset)
+        let geminiModel = try? await settingsManager.getString(key: SettingsKeys.geminiModelPreset)
         let ollamaModel = try? await settingsManager.getString(key: SettingsKeys.ollamaModelPreset)
 
         let manager = aiAssistantManager
@@ -339,9 +341,12 @@ final class AppState {
         if !openAIKey.isEmpty {
             await manager.configure(provider: .openAI, apiKey: openAIKey, model: openAIModel)
         }
+        if !geminiKey.isEmpty {
+            await manager.configure(provider: .gemini, apiKey: geminiKey, model: geminiModel)
+        }
         // Only register Ollama if no cloud provider is available,
         // to avoid connection-refused errors to localhost when Ollama isn't running.
-        let hasCloudProvider = !anthropicKey.isEmpty || !openAIKey.isEmpty
+        let hasCloudProvider = !anthropicKey.isEmpty || !openAIKey.isEmpty || !geminiKey.isEmpty
         if !hasCloudProvider {
             await manager.configure(provider: .ollama, apiKey: "", baseURL: ollamaURL, model: ollamaModel)
         }
