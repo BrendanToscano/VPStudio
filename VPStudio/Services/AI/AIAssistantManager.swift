@@ -443,7 +443,7 @@ actor AIAssistantManager {
             requestType: requestType
         )
         let database = self.database
-        Task.detached {
+        Task.detached { [database] in
             try? await database.saveAIUsageRecord(record)
         }
     }
