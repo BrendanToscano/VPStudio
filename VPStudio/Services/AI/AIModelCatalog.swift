@@ -152,12 +152,45 @@ enum AIModelCatalog {
         isDefault: false
     )
 
+    // MARK: Gemini Models
+
+    static let gemini20Flash = AIModelDefinition(
+        id: "gemini-2.0-flash",
+        displayName: "Gemini 2.0 Flash",
+        provider: .gemini,
+        inputCostPer1MTokens: 0,
+        outputCostPer1MTokens: 0,
+        maxContextTokens: 1_000_000,
+        isDefault: true
+    )
+
+    static let gemini25Pro = AIModelDefinition(
+        id: "gemini-2.5-pro",
+        displayName: "Gemini 2.5 Pro",
+        provider: .gemini,
+        inputCostPer1MTokens: 0,
+        outputCostPer1MTokens: 0,
+        maxContextTokens: 2_000_000,
+        isDefault: false
+    )
+
+    static let gemini15Flash = AIModelDefinition(
+        id: "gemini-1.5-flash",
+        displayName: "Gemini 1.5 Flash",
+        provider: .gemini,
+        inputCostPer1MTokens: 0,
+        outputCostPer1MTokens: 0,
+        maxContextTokens: 1_000_000,
+        isDefault: false
+    )
+
     // MARK: All Models
 
     static let allModels: [AIModelDefinition] = [
         claudeOpus46, claudeSonnet46, claudeOpus4, claudeSonnet4, claudeHaiku35,
         gpt52, gpt5, gpt4o, gpt4oMini, o1,
         llama31, llama32, mistral,
+        gemini20Flash, gemini25Pro, gemini15Flash,
     ]
 
     // MARK: Lookup
