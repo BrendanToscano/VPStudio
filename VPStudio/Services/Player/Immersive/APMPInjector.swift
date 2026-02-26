@@ -31,6 +31,7 @@ final class APMPInjector {
     private(set) var displayLayer: AVSampleBufferDisplayLayer?
 
     private var displayLink: CADisplayLink?
+    private var displayLinkTarget: DisplayLinkTarget?
     private var videoOutput: AVPlayerItemVideoOutput?
     private weak var weakPlayer: AVPlayer?
     /// Strong reference to the player item that owns our `videoOutput`.
@@ -64,12 +65,14 @@ final class APMPInjector {
         let link = CADisplayLink(target: target, selector: #selector(DisplayLinkTarget.tick(_:)))
         link.add(to: .main, forMode: .common)
         displayLink = link
+        displayLinkTarget = target
         isActive = true
     }
 
     func stop() {
         displayLink?.invalidate()
         displayLink = nil
+        displayLinkTarget = nil
         if let item = trackedItem, let output = videoOutput {
             item.remove(output)
         }
