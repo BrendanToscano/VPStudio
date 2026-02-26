@@ -259,7 +259,7 @@ final class DetailViewModel {
         cacheEnrichmentTask?.cancel()
         beginLoading(.torrentSearch)
 
-        searchTask = Task {
+        searchTask = Task { [weak self] in
             do {
                 try Task.checkCancellation()
                 try await indexerManager.initialize()

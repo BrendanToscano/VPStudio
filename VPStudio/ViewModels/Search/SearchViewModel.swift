@@ -702,18 +702,18 @@ final class SearchViewModel {
     }
 
     func loadRecentSearches(from settingsManager: SettingsManager) {
-        Task {
+        Task { [weak self] in
             guard let json = try? await settingsManager.getString(key: SettingsKeys.recentSearches),
                   let data = json.data(using: .utf8),
                   let decoded = try? JSONDecoder().decode([String].self, from: data)
             else { return }
-            self.recentSearches = decoded
+            self?.recentSearches = decoded
         }
     }
 
     func saveRecentSearches(to settingsManager: SettingsManager) {
         let searches = recentSearches
-        Task {
+        Task { [weak self] in
             guard let data = try? JSONEncoder().encode(searches),
                   let json = String(data: data, encoding: .utf8)
             else { return }

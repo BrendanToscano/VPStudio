@@ -122,8 +122,8 @@ actor DownloadManager {
     private func startJob(for id: String) {
         guard jobs[id] == nil else { return }
 
-        jobs[id] = Task {
-            await self.processDownload(id: id)
+        jobs[id] = Task { [weak self] in
+            await self?.processDownload(id: id)
         }
     }
 
