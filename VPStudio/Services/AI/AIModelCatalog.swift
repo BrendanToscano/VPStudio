@@ -323,6 +323,41 @@ enum AIModelFetcher {
         .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
     }
 
+    /// Fetches available models from the Google Gemini API.
+    static func fetchGeminiModels(apiKey: String) async -> [AIModelDefinition] {
+        guard !apiKey.isEmpty else { return [] }
+        var request = URLRequest(url: URL(string: "https://generativelanguage.googleapis.com/v1beta/models?pageSize=50")!)
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.timeoutInterval = 15
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              let http = response as? HTTPURLResponse, http.statusCode == 200 else { return [] }
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let models = json["models"] as? [[String: Any]] else { return [] }
+
+        // Filter for Gemini models (gemini-1.5 and gemini-2.0 series)
+        let geminiPrefixes = ["gemini-2.0", "gemini-1.5"]
+        return models.compactMap { item -> AIModelDefinition? in
+            guard let name = item["name"] as? String else { return nil }
+            // Extract model ID from full path (e.g., "models/gemini-2.0-flash" -> "gemini-2.0-flash")
+            let modelID = name.hasPrefix("models/") ? String(name.dropFirst(7)) : name
+            let lower = modelID.lowercased()
+            guard geminiPrefixes.contains(where: { lower.hasPrefix($0) }) else { return nil }
+            let catalogMatch = AIModelCatalog.model(byID: modelID)
+            // Use displayName from API if available, otherwise format the ID
+            let displayName = item["displayName"] as? String ?? formatModelID(modelID)
+            return AIModelDefinition(
+                id: modelID,
+                displayName: catalogMatch?.displayName ?? displayName,
+                provider: .gemini,
+                inputCostPer1MTokens: catalogMatch?.inputCostPer1MTokens ?? 0,
+                outputCostPer1MTokens: catalogMatch?.outputCostPer1MTokens ?? 0,
+                maxContextTokens: catalogMatch?.maxContextTokens ?? 1_000_000,
+                isDefault: catalogMatch?.isDefault ?? false
+            )
+        }
+        .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+    }
+
     /// Formats a raw model ID into a human-readable display name.
     private static func formatModelID(_ id: String) -> String {
         id.replacingOccurrences(of: "-", with: " ")
