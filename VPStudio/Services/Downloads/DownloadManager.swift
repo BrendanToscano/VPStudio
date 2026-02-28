@@ -122,8 +122,8 @@ actor DownloadManager {
     private func startJob(for id: String) {
         guard jobs[id] == nil else { return }
 
-        jobs[id] = Task {
-            await self.processDownload(id: id)
+        jobs[id] = Task { [weak self] in
+            await self?.processDownload(id: id)
         }
     }
 
@@ -166,16 +166,14 @@ actor DownloadManager {
                             ? Double(totalBytesWritten) / Double(totalBytesExpected)
                             : 0.0
                         let db = self.database
-                        Task {
-                            try? await db.updateDownloadTaskProgress(
-                                id: id,
-                                progress: min(progress, 0.99),
-                                bytesWritten: totalBytesWritten,
-                                totalBytes: totalBytesExpected > 0 ? totalBytesExpected : nil,
-                                destinationPath: nil
-                            )
-                            self.notifyDownloadsChanged()
-                        }
+                        try? await db.updateDownloadTaskProgress(
+                            id: id,
+                            progress: min(progress, 0.99),
+                            bytesWritten: totalBytesWritten,
+                            totalBytes: totalBytesExpected > 0 ? totalBytesExpected : nil,
+                            destinationPath: nil
+                        )
+                        self.notifyDownloadsChanged()
                     }
                 },
                 onCancel: {}
