@@ -15,16 +15,41 @@ struct CustomEnvironmentView: View {
     @State private var controlsAnchor: Entity?
     @State private var lastMaterialSourceID: ObjectIdentifier?
     @State private var autoDismissTask: Task<Void, Never>?
+    @State private var loadingState: LoadingState = .loading
+
+    private enum LoadingState: Equatable {
+        case loading
+        case loaded
+        case failed(String)
+    }
 
     var body: some View {
         RealityView { content, attachments in
+            // MARK: Placeholder (dark gradient while loading)
+            let placeholderMesh = MeshResource.generateSphere(radius: 999)
+            var placeholderMat = UnlitMaterial()
+            placeholderMat.color = .init(tint: .init(red: 0.02, green: 0.02, blue: 0.04, alpha: 1))
+            let placeholder = ModelEntity(mesh: placeholderMesh, materials: [placeholderMat])
+            placeholder.scale *= SIMD3<Float>(x: -1, y: 1, z: 1)
+            placeholder.name = "custom-env-placeholder"
+            content.add(placeholder)
+
             guard let selected = appState.selectedEnvironmentAsset else {
-                logger.warning("No selectedEnvironmentAsset — space opened prematurely?")
+                placeholder.removeFromParent()
+                loadingState = .failed("No environment selected")
                 return
             }
 
             guard let url = await appState.environmentCatalogManager.resolvedAssetURL(for: selected) else {
-                logger.warning("resolvedAssetURL returned nil for asset — file missing?")
+                placeholder.removeFromParent()
+                loadingState = .failed("Environment file not found: \(selected.name)")
+                return
+            }
+
+            // Validate file exists before attempting to load
+            guard FileManager.default.fileExists(atPath: url.path) else {
+                placeholder.removeFromParent()
+                loadingState = .failed("Environment file is missing: \(url.lastPathComponent)")
                 return
             }
 
@@ -32,7 +57,13 @@ struct CustomEnvironmentView: View {
                 let entity = try await Entity(contentsOf: url)
                 content.add(entity)
                 cinemaScreen = findScreenEntity(in: entity)
+
+                // Remove placeholder on success
+                placeholder.removeFromParent()
+                loadingState = .loaded
             } catch {
+                placeholder.removeFromParent()
+                loadingState = .failed("Could not load environment: \(error.localizedDescription)")
                 logger.error("Entity(contentsOf:) failed — \(error.localizedDescription, privacy: .public)")
             }
 
@@ -96,6 +127,17 @@ struct CustomEnvironmentView: View {
                         .transition(.opacity.combined(with: .scale(0.92)))
                 }
             }
+
+            Attachment(id: "loadingIndicator") {
+                switch loadingState {
+                case .loading:
+                    loadingView
+                case .failed(let message):
+                    errorView(message: message)
+                case .loaded:
+                    EmptyView()
+                }
+            }
         }
         .gesture(
             TapGesture()
@@ -130,6 +172,7 @@ struct CustomEnvironmentView: View {
             scheduleAutoDismiss()
         }
         .onAppear {
+            loadingState = .loading
             appState.immersiveSpaceDidAppear(.customEnvironment)
             headTracker.start()
         }
@@ -143,6 +186,7 @@ struct CustomEnvironmentView: View {
             cinemaScreen = nil
             controlsAnchor = nil
             lastMaterialSourceID = nil
+            loadingState = .loading
         }
     }
 
@@ -158,6 +202,51 @@ struct CustomEnvironmentView: View {
             }
             headTracker.isIdle = true
         }
+    }
+
+    // MARK: - Loading / Error Views
+
+    private var loadingView: some View {
+        VStack(spacing: 12) {
+            ProgressView()
+                .tint(.white)
+            Text("Loading environment…")
+                .font(.callout)
+                .foregroundStyle(.white.opacity(0.7))
+        }
+        .padding(24)
+        .glassBackgroundEffect()
+    }
+
+    private func errorView(message: String) -> some View {
+        VStack(spacing: 12) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.title2)
+                .foregroundStyle(.yellow)
+            Text("Failed to load environment")
+                .font(.callout.weight(.semibold))
+                .foregroundStyle(.white)
+            Text(message)
+                .font(.caption)
+                .foregroundStyle(.white.opacity(0.6))
+                .multilineTextAlignment(.center)
+            Button {
+                NotificationCenter.default.post(name: .immersiveControlDismiss, object: nil)
+            } label: {
+                Text("Close")
+                    .font(.callout.weight(.medium))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 8)
+                    .background(.ultraThinMaterial, in: Capsule())
+            }
+            .buttonStyle(.plain)
+            .hoverEffect(.highlight)
+            .padding(.top, 4)
+        }
+        .padding(24)
+        .frame(maxWidth: 300)
+        .glassBackgroundEffect()
     }
 
     /// Recursively scan the USDZ hierarchy to find the mesh intended to be the movie screen.

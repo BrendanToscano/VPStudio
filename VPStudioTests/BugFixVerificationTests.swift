@@ -304,4 +304,37 @@ struct BugFixVerificationTests {
             vm.playFile(task)
         }
     }
+
+    // MARK: - Fix 16: Gemini UI
+
+    @Suite("Fix 16 — Gemini UI")
+    struct GeminiUITests {
+
+        @Test("AIModelCatalog includes Gemini models")
+        func aiModelCatalogGeminiModels() {
+            // Verify Gemini models are in the catalog
+            let allModels = AIModelCatalog.allModels
+            let geminiModels = allModels.filter { $0.provider == .gemini }
+
+            #expect(geminiModels.count >= 3)
+            #expect(geminiModels.contains { $0.id == "gemini-2.0-flash" })
+            #expect(geminiModels.contains { $0.id == "gemini-1.5-flash" })
+        }
+
+        @Test("AIModelFetcher can fetch Gemini models")
+        func aiModelFetcherGemini() async {
+            // Test with empty API key - should return empty array
+            let models = await AIModelFetcher.fetchGeminiModels(apiKey: "")
+            #expect(models.isEmpty)
+        }
+
+        @Test("AIProviderKind includes Gemini in all cases")
+        func aiProviderKindAllCases() {
+            let allCases = AIProviderKind.allCases
+            #expect(allCases.contains(.openAI))
+            #expect(allCases.contains(.anthropic))
+            #expect(allCases.contains(.ollama))
+            #expect(allCases.contains(.gemini))
+        }
+    }
 }
