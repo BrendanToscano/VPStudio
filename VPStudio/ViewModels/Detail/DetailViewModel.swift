@@ -259,7 +259,7 @@ final class DetailViewModel {
         cacheEnrichmentTask?.cancel()
         beginLoading(.torrentSearch)
 
-        searchTask = Task {
+        searchTask = Task { [weak self] in
             do {
                 try Task.checkCancellation()
                 try await indexerManager.initialize()
@@ -309,15 +309,16 @@ final class DetailViewModel {
                     episode: item.type == .series ? selectedEpisode?.episodeNumber : nil
                 )
                 guard latestContext == contextKey else { return }
-                torrentSearch.setSearchResults(results, initialBatchSize: Self.torrentResultBatchSize)
-                torrentSearch.markCompletedSearch(episodeId: searchedEpisodeId, contextKey: contextKey)
-                markLoaded()
+                guard let self else { return }
+                self.torrentSearch.setSearchResults(results, initialBatchSize: Self.torrentResultBatchSize)
+                self.torrentSearch.markCompletedSearch(episodeId: searchedEpisodeId, contextKey: contextKey)
+                self.markLoaded()
 
                 self.startCacheEnrichment(contextKey: contextKey)
             } catch is CancellationError {
                 // Silently discard cancelled search — a newer search is in progress.
             } catch {
-                setError(error, fallback: .indexer(.queryFailed(error.localizedDescription)))
+                self?.setError(error, fallback: .indexer(.queryFailed(error.localizedDescription)))
             }
         }
         await searchTask?.value

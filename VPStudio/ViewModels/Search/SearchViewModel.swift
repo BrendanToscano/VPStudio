@@ -702,12 +702,12 @@ final class SearchViewModel {
     }
 
     func loadRecentSearches(from settingsManager: SettingsManager) {
-        Task {
+        Task { [weak self] in
             guard let json = try? await settingsManager.getString(key: SettingsKeys.recentSearches),
                   let data = json.data(using: .utf8),
                   let decoded = try? JSONDecoder().decode([String].self, from: data)
             else { return }
-            self.recentSearches = decoded
+            self?.recentSearches = decoded
         }
     }
 
