@@ -304,4 +304,27 @@ struct BugFixVerificationTests {
             vm.playFile(task)
         }
     }
+
+    // MARK: - Fix 12: Metadata concurrency (Swift 6)
+
+    @Suite("Fix 12 — Metadata concurrency")
+    struct MetadataConcurrencyTests {
+
+        @Test("TMDBError conforms to Sendable")
+        func tmdbErrorSendable() {
+            // Verify TMDBError is Sendable for Swift 6 concurrency
+            let error1 = TMDBError.notFound("tt123")
+            let error2 = TMDBError.rateLimited
+            let error3 = TMDBError.httpError(500, "Server error")
+
+            // These should be safe to pass across actors
+            func acceptSendable<T: Sendable>(_ value: T) -> T { value }
+            _ = acceptSendable(error1)
+            _ = acceptSendable(error2)
+            _ = acceptSendable(error3)
+
+            #expect(error1 == TMDBError.notFound("tt123"))
+            #expect(error2 == TMDBError.rateLimited)
+        }
+    }
 }
