@@ -216,7 +216,7 @@ struct SearchView: View {
                 Image(systemName: "slider.horizontal.3")
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(.primary)
-                    .frame(width: 40, height: 40)
+                    .frame(width: 44, height: 44)  // Increased for better Vision Pro touch target
                     .background(.ultraThinMaterial, in: Circle())
                     .overlay {
                         Circle()
@@ -246,6 +246,10 @@ struct SearchView: View {
             .animation(.spring(response: 0.3, dampingFraction: 0.7), value: viewModel.activeFilterCount)
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(viewModel.activeFilterCount > 0 
+            ? "Filters, \(viewModel.activeFilterCount) active" 
+            : "Filters")
+        .accessibilityAddTraits(.isButton)
         #if os(visionOS)
         .hoverEffect(.lift)
         #endif
@@ -502,16 +506,18 @@ struct SearchView: View {
 
     // MARK: - Type Filter
 
+    @State private var selectedTypeOption: TypeFilterOption = .all
+
     private var typeFilterSection: some View {
-        Picker("Type", selection: Bindable(viewModel).selectedType) {
-            Text("All").tag(nil as MediaType?)
-            Text("Movies").tag(MediaType.movie as MediaType?)
-            Text("TV Shows").tag(MediaType.series as MediaType?)
-        }
-        .pickerStyle(.segmented)
+        GlassPillPicker(
+            options: TypeFilterOption.allCases,
+            selection: $selectedTypeOption,
+            accessibilityLabels: TypeFilterOption.accessibilityMap
+        )
         .padding(.horizontal, 24)
         .padding(.bottom, 4)
-        .onChange(of: viewModel.selectedType) { _, _ in
+        .onChange(of: selectedTypeOption) { _, newValue in
+            viewModel.selectedType = newValue.mediaType
             if let card = viewModel.activeMoodCard {
                 // Re-select the mood card so genre IDs are re-derived for the new type
                 viewModel.selectMoodCard(card)
@@ -520,6 +526,14 @@ struct SearchView: View {
                 viewModel.selectGenre(viewModel.selectedGenre)
             } else {
                 viewModel.requery()
+            }
+        }
+        .onAppear {
+            // Sync initial state
+            if let mediaType = viewModel.selectedType {
+                selectedTypeOption = TypeFilterOption.allCases.first { $0.mediaType == mediaType } ?? .all
+            } else {
+                selectedTypeOption = .all
             }
         }
     }
@@ -824,6 +838,8 @@ struct InlineFilterChip: View {
     var symbol: String?
     var isActive: Bool = false
     var tint: Color = .accentColor
+    /// Optional accessibility label for VoiceOver
+    var accessibilityLabel: String?
 
     var body: some View {
         HStack(spacing: 4) {
@@ -852,6 +868,8 @@ struct InlineFilterChip: View {
                 )
         }
         .foregroundStyle(isActive ? tint : .primary)
+        .accessibilityLabel(accessibilityLabel ?? (isActive ? "\(text), tap to remove" : text))
+        .accessibilityAddTraits(.isButton)
         #if os(visionOS)
         .hoverEffect(.highlight)
         #endif
@@ -863,6 +881,42 @@ struct InlineFilterChip: View {
         } else {
             AnyShapeStyle(.ultraThinMaterial)
         }
+    }
+}
+
+// MARK: - Type Filter Options
+
+enum TypeFilterOption: Hashable, CustomStringConvertible, CaseIterable {
+    case all
+    case movies
+    case tvShows
+
+    var description: String {
+        switch self {
+        case .all: return "All"
+        case .movies: return "Movies"
+        case .tvShows: return "TV Shows"
+        }
+    }
+
+    var mediaType: MediaType? {
+        switch self {
+        case .all: return nil
+        case .movies: return .movie
+        case .tvShows: return .series
+        }
+    }
+
+    static var allCases: [TypeFilterOption] {
+        [.all, .movies, .tvShows]
+    }
+
+    static var accessibilityMap: [TypeFilterOption: String] {
+        [
+            .all: "Show all content types",
+            .movies: "Show only movies",
+            .tvShows: "Show only TV shows"
+        ]
     }
 }
 

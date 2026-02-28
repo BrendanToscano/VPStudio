@@ -3,8 +3,8 @@ import SwiftUI
 enum PillPickerAnimationPolicy {
     static let springResponse: Double = 0.35
     static let springDamping: Double = 0.82
-    static let pillHeight: CGFloat = 36
-    static let horizontalPadding: CGFloat = 16
+    static let pillHeight: CGFloat = 44  // Increased for better Vision Pro touch targets
+    static let horizontalPadding: CGFloat = 20  // Increased padding for touch friendliness
 }
 
 /// A glass-morphism segmented picker with a sliding indicator.
@@ -14,6 +14,9 @@ enum PillPickerAnimationPolicy {
 struct GlassPillPicker<SelectionType: Hashable & CustomStringConvertible>: View {
     let options: [SelectionType]
     @Binding var selection: SelectionType
+
+    /// Optional accessibility labels for each option
+    var accessibilityLabels: [SelectionType: String]?
 
     @Namespace private var pillNamespace
 
@@ -42,6 +45,8 @@ struct GlassPillPicker<SelectionType: Hashable & CustomStringConvertible>: View 
 
     private func pillButton(for option: SelectionType) -> some View {
         let isSelected = selection == option
+        let label = accessibilityLabels?[option] ?? "Select \(option.description)"
+        
         return Button {
             withAnimation(
                 .spring(
@@ -68,6 +73,8 @@ struct GlassPillPicker<SelectionType: Hashable & CustomStringConvertible>: View 
                 .foregroundStyle(isSelected ? .white : .primary)
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(label)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
         #if os(visionOS)
         .hoverEffect(.highlight)
         #endif

@@ -11,6 +11,7 @@ struct ExploreGenreGrid: View {
             Label("Browse by Genre & Mood", systemImage: "sparkle.magnifyingglass")
                 .font(.headline)
                 .foregroundStyle(.secondary)
+                .accessibilityAddTraits(.isHeader)
 
             LazyVGrid(columns: columns, spacing: 14) {
                 ForEach(cards) { card in
@@ -18,6 +19,8 @@ struct ExploreGenreGrid: View {
                         ExploreMoodCardView(card: card)
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel("Browse \(card.title): \(card.subtitle)")
+                    .accessibilityAddTraits(.isButton)
                 }
             }
         }

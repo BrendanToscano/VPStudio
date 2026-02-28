@@ -20,18 +20,23 @@ struct ExploreFilterSheet: View {
             Form {
                 // Genre
                 if !genres.isEmpty {
-                    Section("Genre") {
+                    Section {
                         Picker("Genre", selection: $selectedGenre) {
                             Text("All Genres").tag(nil as Genre?)
                             ForEach(genres) { genre in
                                 Text(genre.name).tag(genre as Genre?)
                             }
                         }
+                        .pickerStyle(.menu)
+                        .accessibilityLabel("Filter by genre")
+                    } header: {
+                        Label("Genre", systemImage: "theatermasks")
+                            .font(.headline)
                     }
                 }
 
                 // Sort
-                Section("Sort By") {
+                Section {
                     Picker("Sort", selection: $sortOption) {
                         ForEach(displayedSortOptions, id: \.self) { option in
                             Text(option.displayName).tag(option)
@@ -39,21 +44,36 @@ struct ExploreFilterSheet: View {
                     }
                     .pickerStyle(.inline)
                     .labelsHidden()
+                    .accessibilityLabel("Sort results by")
+                } header: {
+                    Label("Sort By", systemImage: "arrow.up.arrow.down")
+                        .font(.headline)
                 }
 
                 // Year
-                Section("Release Year") {
+                Section {
                     Picker("Year", selection: $selectedYear) {
                         Text("Any Year").tag(nil as Int?)
                         ForEach(Self.yearRange, id: \.self) { year in
                             Text(String(year)).tag(year as Int?)
                         }
                     }
+                    .pickerStyle(.menu)
+                    .accessibilityLabel("Filter by release year")
+                } header: {
+                    Label("Release Year", systemImage: "calendar")
+                        .font(.headline)
                 }
 
                 // Language (multi-select)
-                Section("Languages") {
+                Section {
                     languageRows
+                } header: {
+                    Label("Languages", systemImage: "globe")
+                        .font(.headline)
+                } footer: {
+                    Text("Select one or more content languages")
+                        .font(.caption)
                 }
             }
             .navigationTitle("Filters")
@@ -66,9 +86,11 @@ struct ExploreFilterSheet: View {
                         onApply()
                         dismiss()
                     }
+                    .accessibilityLabel("Apply filters")
                 }
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
+                        .accessibilityLabel("Cancel and close filters")
                 }
             }
         }
@@ -78,12 +100,13 @@ struct ExploreFilterSheet: View {
     }
 
     private var languageRows: some View {
-        ForEach(SearchLanguageOption.common, id: \SearchLanguageOption.Option.code) { option in
+        ForEach(SearchLanguageOption.common, id: \.code) { option in
             LanguageToggleRow(
                 name: option.name,
                 isSelected: selectedLanguages.contains(option.code),
                 onTap: { toggleLanguage(option.code) }
             )
+            .accessibilityLabel("\(option.name), \(selectedLanguages.contains(option.code) ? "selected" : "not selected")")
         }
     }
 
@@ -115,5 +138,6 @@ private struct LanguageToggleRow: View {
             }
         }
         .buttonStyle(.plain)
+        .contentShape(Rectangle())
     }
 }
