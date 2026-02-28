@@ -247,14 +247,15 @@ struct LibraryView: View {
         .onChange(of: sortOption) { _, _ in
             scheduleReload()
         }
-        .onReceive(NotificationCenter.default.publisher(for: .libraryDidChange)) { _ in
-            scheduleReload()
+        .onReceive(NotificationCenter.default.publisher(for: .libraryDidChange)) { [weak self] _ in
+            self?.scheduleReload()
         }
         .task {
             await loadUserRatings()
         }
-        .onReceive(NotificationCenter.default.publisher(for: .tasteProfileDidChange)) { _ in
-            Task { await loadUserRatings() }
+        .onReceive(NotificationCenter.default.publisher(for: .tasteProfileDidChange)) { [weak self] _ in
+            guard let self = self else { return }
+            Task { await self.loadUserRatings() }
         }
     }
 

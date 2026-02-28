@@ -79,8 +79,8 @@ struct EnvironmentSettingsView: View {
         .onChange(of: autoOpenEnvironment) { _, newValue in
             Task { try? await appState.settingsManager.setBool(key: SettingsKeys.autoOpenEnvironment, value: newValue) }
         }
-        .onReceive(NotificationCenter.default.publisher(for: .environmentsDidChange)) { _ in
-            scheduleAssetLoad()
+        .onReceive(NotificationCenter.default.publisher(for: .environmentsDidChange)) { [weak self] _ in
+            self?.scheduleAssetLoad()
         }
         .onDisappear {
             assetLoadTask?.cancel()
