@@ -33,7 +33,7 @@ actor DatabaseManager {
         dbPool = try DatabasePool(path: dbPath, configuration: config)
     }
 
-    func migrate() throws {
+    func migrate() async throws {
         var migrator = DatabaseMigrator()
 
         migrator.registerMigration("v1_initial") { db in
@@ -337,7 +337,15 @@ actor DatabaseManager {
             )
         }
 
-        try migrator.migrate(dbPool)
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            migrator.asyncMigrate(dbPool) { _, error in
+                if let error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume()
+                }
+            }
+        }
     }
 
     // MARK: - Media Cache
