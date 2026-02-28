@@ -235,6 +235,7 @@ final class SearchViewModel {
     }
 
     /// Immediately executes a search, cancelling any pending debounce and prior in-flight search.
+    /// When filters are active (sort, genre, year range), applies client-side filtering and sorting.
     func search() {
         debounceTask?.cancel()
         debounceTask = nil
@@ -252,14 +253,67 @@ final class SearchViewModel {
         isSearching = true
         error = nil
         currentPage = 1
-        let selectedType = selectedType
+
+        // Check if we should apply client-side filters (sort, year range preset)
+        // vs pure text search without filters
+        let useFilteredSearch = hasActiveFilters || selectedGenre != nil
+
+        if useFilteredSearch {
+            // Use search API with available filters (year, language) then apply client-side sorting/filtering
+            performFilteredSearch(trimmed: trimmed, generation: generation)
+        } else {
+            // Pure text search without filters
+            let selectedType = self.selectedType
+            let year = yearFilter
+            let language = primaryLanguage
+            searchTask = Task { [weak self] in
+                do {
+                    let result = try await service.search(query: trimmed, type: selectedType, page: 1, year: year, language: language)
+                    guard !Task.isCancelled, let self, self.searchGeneration == generation else { return }
+                    self.results = result.items
+                    self.totalPages = result.totalPages
+                    self.isSearching = false
+                } catch {
+                    guard !Task.isCancelled, let self, self.searchGeneration == generation else { return }
+                    self.results = []
+                    self.error = AppError(error, fallback: .network(.transport("Search failed.")))
+                    self.isSearching = false
+                }
+            }
+        }
+    }
+
+    /// Performs a filtered search using the search API, then applies client-side sorting and filtering.
+    /// Note: TMDB search API doesn't support all filter options, so we apply them client-side.
+    private func performFilteredSearch(trimmed: String, generation: Int) {
+        guard let service = metadataService else { return }
+
+        let type = selectedType ?? .movie
         let year = yearFilter
         let language = primaryLanguage
+        let sort = sortOption
+        let yearRangePreset = self.yearRangePreset
+
         searchTask = Task { [weak self] in
             do {
-                let result = try await service.search(query: trimmed, type: selectedType, page: 1, year: year, language: language)
+                let result = try await service.search(query: trimmed, type: type, page: 1, year: year, language: language)
                 guard !Task.isCancelled, let self, self.searchGeneration == generation else { return }
-                self.results = result.items
+
+                // Apply client-side sorting if not using default popularity sort
+                var items = result.items
+                if sort != .popularityDesc {
+                    items = self.applySorting(to: items, by: sort)
+                }
+
+                // Apply year range preset filter if set
+                if let preset = yearRangePreset {
+                    items = items.filter { item in
+                        guard let itemYear = item.year else { return false }
+                        return preset.contains(year: itemYear)
+                    }
+                }
+
+                self.results = items
                 self.totalPages = result.totalPages
                 self.isSearching = false
             } catch {
@@ -268,6 +322,26 @@ final class SearchViewModel {
                 self.error = AppError(error, fallback: .network(.transport("Search failed.")))
                 self.isSearching = false
             }
+        }
+    }
+
+    /// Applies client-side sorting to search results based on sort option.
+    private func applySorting(to items: [MediaPreview], by sort: DiscoverFilters.SortOption) -> [MediaPreview] {
+        switch sort {
+        case .popularityDesc:
+            return items // Default from API
+        case .popularityAsc:
+            return items.sorted { ($0.imdbRating ?? 0) < ($1.imdbRating ?? 0) }
+        case .ratingDesc:
+            return items.sorted { ($0.imdbRating ?? 0) > ($1.imdbRating ?? 0) }
+        case .ratingAsc:
+            return items.sorted { ($0.imdbRating ?? 0) < ($1.imdbRating ?? 0) }
+        case .releaseDateDesc:
+            return items.sorted { ($0.year ?? 0) > ($1.year ?? 0) }
+        case .releaseDateAsc:
+            return items.sorted { ($0.year ?? 0) < ($1.year ?? 0) }
+        case .titleAsc:
+            return items.sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
         }
     }
 
@@ -347,6 +421,8 @@ final class SearchViewModel {
         let selectedType = selectedType
         let year = yearFilter
         let language = primaryLanguage
+        let sort = sortOption
+        let yearRangePreset = self.yearRangePreset
         let generation = searchGeneration
 
         isLoadingMore = true
@@ -357,9 +433,25 @@ final class SearchViewModel {
                 let result = try await service.search(query: expectedQuery, type: selectedType, page: nextPage, year: year, language: language)
                 guard !Task.isCancelled, let self, self.searchGeneration == generation else { return }
                 guard self.query.trimmingCharacters(in: .whitespaces) == expectedQuery else { return }
+
+                var newItems = result.items
+
+                // Apply client-side sorting if not using default popularity sort
+                if sort != .popularityDesc {
+                    newItems = self.applySorting(to: newItems, by: sort)
+                }
+
+                // Apply year range preset filter if set
+                if let preset = yearRangePreset {
+                    newItems = newItems.filter { item in
+                        guard let itemYear = item.year else { return false }
+                        return preset.contains(year: itemYear)
+                    }
+                }
+
                 let existingIDs = Set(self.results.map(\.id))
-                let newItems = result.items.filter { !existingIDs.contains($0.id) }
-                self.results.append(contentsOf: newItems)
+                let filteredNewItems = newItems.filter { !existingIDs.contains($0.id) }
+                self.results.append(contentsOf: filteredNewItems)
                 self.currentPage = nextPage
                 self.totalPages = result.totalPages
             } catch {
