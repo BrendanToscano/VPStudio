@@ -1712,7 +1712,13 @@ struct PlayerView: View {
         guard let windowScene = playerWindowScene else { return }
 
         let ratio = detectedVideoRatio ?? (16.0 / 9.0)
-        let currentWidth = max(windowScene.coordinateSpace.bounds.width, 1400)
+        // Use window frame directly - coordinateSpace is deprecated in visionOS 26+
+        let currentWidth: CGFloat
+        if let window = windowScene.windows.first {
+            currentWidth = max(window.frame.width, 1400)
+        } else {
+            currentWidth = 1400
+        }
         let targetHeight = currentWidth / ratio
         let targetSize = CGSize(width: currentWidth, height: targetHeight)
 
