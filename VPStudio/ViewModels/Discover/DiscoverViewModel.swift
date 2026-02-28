@@ -10,6 +10,8 @@ final class DiscoverViewModel {
     var popularMovies: [MediaPreview] = []
     var topRatedMovies: [MediaPreview] = []
     var nowPlayingMovies: [MediaPreview] = []
+    var upcomingMovies: [MediaPreview] = []  // Future releases (release date > today)
+    var newReleaseMovies: [MediaPreview] = []  // Recent releases (release date <= today, last 90 days)
     var featuredBackdrops: [MediaPreview] = []
     var isLoading = true
     var error: AppError?
@@ -78,12 +80,26 @@ final class DiscoverViewModel {
         async let popularResult = fetchResult { try await service.getCategory(.popular, type: .movie, page: 1) }
         async let topRatedResult = fetchResult { try await service.getCategory(.topRated, type: .movie, page: 1) }
         async let nowPlayingResult = fetchResult { try await service.getCategory(.nowPlaying, type: .movie, page: 1) }
+        async let upcomingResult = fetchResult { try await service.getCategory(.upcoming, type: .movie, page: 1) }
 
-        let (moviesResult, showsResult, popularResultValue, topRatedResultValue, nowPlayingResultValue) = await (
-            trendingMoviesResult, trendingShowsResult, popularResult, topRatedResult, nowPlayingResult
+        // New Releases: movies from the last 90 days (using discover with date filter)
+        let newReleasesDateGte = DiscoverFilters.dateString(daysFromNow: -90)
+        let newReleasesDateLte = DiscoverFilters.todayString()
+        async let newReleasesResult = fetchResult {
+            let filters = DiscoverFilters(
+                sortBy: .releaseDateDesc,
+                page: 1,
+                releaseDateGte: newReleasesDateGte,
+                releaseDateLte: newReleasesDateLte
+            )
+            return try await service.discover(type: .movie, filters: filters)
+        }
+
+        let (moviesResult, showsResult, popularResultValue, topRatedResultValue, nowPlayingResultValue, upcomingResultValue, newReleasesResultValue) = await (
+            trendingMoviesResult, trendingShowsResult, popularResult, topRatedResult, nowPlayingResult, upcomingResult, newReleasesResult
         )
 
-        let results = [moviesResult, showsResult, popularResultValue, topRatedResultValue, nowPlayingResultValue]
+        let results = [moviesResult, showsResult, popularResultValue, topRatedResultValue, nowPlayingResultValue, upcomingResultValue, newReleasesResultValue]
         let firstFailure = results.compactMap { result -> Error? in
             guard case .failure(let error) = result else { return nil }
             return error
@@ -97,12 +113,16 @@ final class DiscoverViewModel {
         if case .success(let popular) = popularResultValue { popularMovies = popular.items }
         if case .success(let topRated) = topRatedResultValue { topRatedMovies = topRated.items }
         if case .success(let nowPlaying) = nowPlayingResultValue { nowPlayingMovies = nowPlaying.items }
+        if case .success(let upcoming) = upcomingResultValue { upcomingMovies = upcoming.items }
+        if case .success(let newReleases) = newReleasesResultValue { newReleaseMovies = newReleases.items }
 
         if trendingMovies.isEmpty,
            trendingShows.isEmpty,
            popularMovies.isEmpty,
            topRatedMovies.isEmpty,
            nowPlayingMovies.isEmpty,
+           upcomingMovies.isEmpty,
+           newReleaseMovies.isEmpty,
            let firstFailure {
             error = AppError(firstFailure, fallback: .network(.transport("Failed to load discover content.")))
         }

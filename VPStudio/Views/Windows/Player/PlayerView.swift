@@ -1258,7 +1258,7 @@ struct PlayerView: View {
                     avSubtitleGroup = nil
                     selectedAVAudioID = nil
                     selectedAVSubtitleID = nil
-                    hydrateFallbackAudioTrack(for: stream)
+                    // Don't call hydrateFallbackAudioTrack here - load tracks first
                     playbackState = .preparing
                     playbackMessage = "Trying KSPlayer..."
 
@@ -1274,6 +1274,14 @@ struct PlayerView: View {
                         failureMessage: { playbackError }
                     )
                     try Task.checkCancellation()
+
+                    // Load audio/subtitle track info from the stream using AVAsset
+                    await loadTracksFromAsset(url: currentStream.streamURL)
+
+                    // Fallback: if no tracks found, create auto track from stream info
+                    if avAudioOptions.isEmpty {
+                        hydrateFallbackAudioTrack(for: stream)
+                    }
 
                     if let resumeTarget {
                         coordinator.seek(time: resumeTarget)
@@ -2053,6 +2061,73 @@ struct PlayerView: View {
         }
     }
 
+    /// Loads audio and subtitle tracks from a stream URL using AVAsset.
+    /// Used for KSPlayer sessions where we need to discover track info separately.
+    @MainActor
+    private func loadTracksFromAsset(url: URL) async {
+        let asset = AVURLAsset(url: url, options: [AVURLAssetPreferPreciseDurationAndTimingKey: true])
+
+        do {
+            // Load audio tracks
+            let audioTracks = try await asset.loadTracks(withMediaType: .audio)
+            if !audioTracks.isEmpty {
+                // Try media selection group first
+                if let audioGroup = try? await asset.loadMediaSelectionGroup(for: .audible) {
+                    avAudioGroup = audioGroup
+                    avAudioOptions = audioGroup.options.enumerated().map { index, option in
+                        AVTrackOption(
+                            id: avOptionID(option, index: index),
+                            name: option.displayName,
+                            language: option.locale?.identifier ?? option.extendedLanguageTag,
+                            option: option
+                        )
+                    }
+                } else {
+                    // No media selection group, create from tracks
+                    avAudioGroup = nil
+                    avAudioOptions = audioTracks.enumerated().map { index, track in
+                        let languageName = track.languageCode.flatMap { Locale.current.localizedString(forLanguageCode: $0) }
+                        return AVTrackOption(
+                            id: "track-\(index)",
+                            name: languageName ?? "Audio \(index + 1)",
+                            language: track.languageCode,
+                            option: AVMediaSelectionOption()
+                        )
+                    }
+                }
+            }
+
+            // Load subtitle tracks
+            let subtitleTracks = try await asset.loadTracks(withMediaType: .subtitle)
+            if !subtitleTracks.isEmpty {
+                if let subtitleGroup = try? await asset.loadMediaSelectionGroup(for: .legible) {
+                    avSubtitleGroup = subtitleGroup
+                    avSubtitleOptions = subtitleGroup.options.enumerated().map { index, option in
+                        AVTrackOption(
+                            id: avOptionID(option, index: index),
+                            name: option.displayName,
+                            language: option.locale?.identifier ?? option.extendedLanguageTag,
+                            option: option
+                        )
+                    }
+                } else {
+                    avSubtitleGroup = nil
+                    avSubtitleOptions = subtitleTracks.enumerated().map { index, track in
+                        let languageName = track.languageCode.flatMap { Locale.current.localizedString(forLanguageCode: $0) }
+                        return AVTrackOption(
+                            id: "track-\(index)",
+                            name: languageName ?? "Subtitle \(index + 1)",
+                            language: track.languageCode,
+                            option: AVMediaSelectionOption()
+                        )
+                    }
+                }
+            }
+        } catch {
+            // Failed to load tracks - leave existing options
+        }
+    }
+
     @MainActor
     private func refreshAVMediaOptions(for player: AVPlayer) async {
         guard let item = player.currentItem else {
@@ -2065,48 +2140,132 @@ struct PlayerView: View {
             return
         }
 
-        if let audioGroup = try? await item.asset.loadMediaSelectionGroup(for: .audible) {
-            avAudioGroup = audioGroup
-            avAudioOptions = audioGroup.options.enumerated().map { index, option in
-                AVTrackOption(
-                    id: avOptionID(option, index: index),
-                    name: option.displayName,
-                    language: option.locale?.identifier ?? option.extendedLanguageTag,
-                    option: option
-                )
-            }
-            if let selected = item.currentMediaSelection.selectedMediaOption(in: audioGroup),
-               let selectedIndex = audioGroup.options.firstIndex(of: selected) {
-                selectedAVAudioID = avOptionID(selected, index: selectedIndex)
+        let asset = item.asset
+
+        // First, load the audio tracks from the asset to ensure they're available
+        // before trying to get media selection groups
+        do {
+            let audioTracks = try await asset.loadTracks(withMediaType: .audio)
+            if !audioTracks.isEmpty {
+                // Asset has audio tracks, now try to get media selection group
+                if let audioGroup = try? await asset.loadMediaSelectionGroup(for: .audible) {
+                    avAudioGroup = audioGroup
+                    avAudioOptions = audioGroup.options.enumerated().map { index, option in
+                        AVTrackOption(
+                            id: avOptionID(option, index: index),
+                            name: option.displayName,
+                            language: option.locale?.identifier ?? option.extendedLanguageTag,
+                            option: option
+                        )
+                    }
+                    if let selected = item.currentMediaSelection.selectedMediaOption(in: audioGroup),
+                       let selectedIndex = audioGroup.options.firstIndex(of: selected) {
+                        selectedAVAudioID = avOptionID(selected, index: selectedIndex)
+                    } else {
+                        selectedAVAudioID = nil
+                    }
+                } else {
+                    // No media selection group, but we have tracks - create options from tracks
+                    avAudioGroup = nil
+                    avAudioOptions = audioTracks.enumerated().map { index, track in
+                        AVTrackOption(
+                            id: "track-\(index)",
+                            name: track.languageCode.map { Locale.current.localizedString(forLanguageCode: $0) ?? $0 } ?? "Audio \(index + 1)",
+                            language: track.languageCode,
+                            option: AVMediaSelectionOption()
+                        )
+                    }
+                    selectedAVAudioID = nil
+                }
             } else {
+                avAudioGroup = nil
+                avAudioOptions = []
                 selectedAVAudioID = nil
             }
-        } else {
-            avAudioGroup = nil
-            avAudioOptions = []
-            selectedAVAudioID = nil
+        } catch {
+            // Failed to load audio tracks, try media selection group directly
+            if let audioGroup = try? await asset.loadMediaSelectionGroup(for: .audible) {
+                avAudioGroup = audioGroup
+                avAudioOptions = audioGroup.options.enumerated().map { index, option in
+                    AVTrackOption(
+                        id: avOptionID(option, index: index),
+                        name: option.displayName,
+                        language: option.locale?.identifier ?? option.extendedLanguageTag,
+                        option: option
+                    )
+                }
+                if let selected = item.currentMediaSelection.selectedMediaOption(in: audioGroup),
+                   let selectedIndex = audioGroup.options.firstIndex(of: selected) {
+                    selectedAVAudioID = avOptionID(selected, index: selectedIndex)
+                } else {
+                    selectedAVAudioID = nil
+                }
+            } else {
+                avAudioGroup = nil
+                avAudioOptions = []
+                selectedAVAudioID = nil
+            }
         }
 
-        if let subtitleGroup = try? await item.asset.loadMediaSelectionGroup(for: .legible) {
-            avSubtitleGroup = subtitleGroup
-            avSubtitleOptions = subtitleGroup.options.enumerated().map { index, option in
-                AVTrackOption(
-                    id: avOptionID(option, index: index),
-                    name: option.displayName,
-                    language: option.locale?.identifier ?? option.extendedLanguageTag,
-                    option: option
-                )
-            }
-            if let selected = item.currentMediaSelection.selectedMediaOption(in: subtitleGroup),
-               let selectedIndex = subtitleGroup.options.firstIndex(of: selected) {
-                selectedAVSubtitleID = avOptionID(selected, index: selectedIndex)
+        // Same approach for subtitles
+        do {
+            let subtitleTracks = try await asset.loadTracks(withMediaType: .subtitle)
+            if !subtitleTracks.isEmpty {
+                if let subtitleGroup = try? await asset.loadMediaSelectionGroup(for: .legible) {
+                    avSubtitleGroup = subtitleGroup
+                    avSubtitleOptions = subtitleGroup.options.enumerated().map { index, option in
+                        AVTrackOption(
+                            id: avOptionID(option, index: index),
+                            name: option.displayName,
+                            language: option.locale?.identifier ?? option.extendedLanguageTag,
+                            option: option
+                        )
+                    }
+                    if let selected = item.currentMediaSelection.selectedMediaOption(in: subtitleGroup),
+                       let selectedIndex = subtitleGroup.options.firstIndex(of: selected) {
+                        selectedAVSubtitleID = avOptionID(selected, index: selectedIndex)
+                    } else {
+                        selectedAVSubtitleID = nil
+                    }
+                } else {
+                    avSubtitleGroup = nil
+                    avSubtitleOptions = subtitleTracks.enumerated().map { index, track in
+                        AVTrackOption(
+                            id: "track-\(index)",
+                            name: track.languageCode.map { Locale.current.localizedString(forLanguageCode: $0) ?? $0 } ?? "Subtitle \(index + 1)",
+                            language: track.languageCode,
+                            option: AVMediaSelectionOption()
+                        )
+                    }
+                    selectedAVSubtitleID = nil
+                }
             } else {
+                avSubtitleGroup = nil
+                avSubtitleOptions = []
                 selectedAVSubtitleID = nil
             }
-        } else {
-            avSubtitleGroup = nil
-            avSubtitleOptions = []
-            selectedAVSubtitleID = nil
+        } catch {
+            if let subtitleGroup = try? await asset.loadMediaSelectionGroup(for: .legible) {
+                avSubtitleGroup = subtitleGroup
+                avSubtitleOptions = subtitleGroup.options.enumerated().map { index, option in
+                    AVTrackOption(
+                        id: avOptionID(option, index: index),
+                        name: option.displayName,
+                        language: option.locale?.identifier ?? option.extendedLanguageTag,
+                        option: option
+                    )
+                }
+                if let selected = item.currentMediaSelection.selectedMediaOption(in: subtitleGroup),
+                   let selectedIndex = subtitleGroup.options.firstIndex(of: selected) {
+                    selectedAVSubtitleID = avOptionID(selected, index: selectedIndex)
+                } else {
+                    selectedAVSubtitleID = nil
+                }
+            } else {
+                avSubtitleGroup = nil
+                avSubtitleOptions = []
+                selectedAVSubtitleID = nil
+            }
         }
     }
 
