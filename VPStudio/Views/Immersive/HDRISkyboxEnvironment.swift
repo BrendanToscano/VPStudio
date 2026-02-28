@@ -336,6 +336,8 @@ struct HDRISkyboxEnvironment: View {
             controlsAnchor = nil
             lastMaterialSourceID = nil
             didAnchorScreenToHead = false
+            immersivePlayer = nil
+            immersiveVideoRenderer = nil
         }
     }
 

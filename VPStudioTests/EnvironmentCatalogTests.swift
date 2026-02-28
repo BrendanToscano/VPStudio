@@ -689,6 +689,79 @@ struct EnvironmentCatalogTests {
         try await database.migrate()
         return (database, rootDir)
     }
+
+    @Test func environmentAssetCountReflectsImportedAssets() async throws {
+        let (database, rootDir) = try await makeDatabase(named: "environment-catalog-count.sqlite")
+        defer { try? FileManager.default.removeItem(at: rootDir) }
+
+        let manager = EnvironmentCatalogManager(
+            database: database,
+            environmentsDirectory: rootDir.appendingPathComponent("env", isDirectory: true),
+            assetValidator: { _ in true }
+        )
+
+        // Initially should be empty
+        var assets = try await manager.fetchAssets()
+        #expect(assets.count == 0)
+
+        // Import one asset
+        let source1 = rootDir.appendingPathComponent("cinema1.hdr")
+        try Data("fake-hdr-1".utf8).write(to: source1)
+        _ = try await manager.importEnvironment(from: source1)
+
+        assets = try await manager.fetchAssets()
+        #expect(assets.count == 1)
+
+        // Import second asset
+        let source2 = rootDir.appendingPathComponent("cinema2.hdr")
+        try Data("fake-hdr-2".utf8).write(to: source2)
+        _ = try await manager.importEnvironment(from: source2)
+
+        assets = try await manager.fetchAssets()
+        #expect(assets.count == 2)
+    }
+
+    @Test func importingCuratedPresetNotifiesEnvironmentsChanged() async throws {
+        let (database, rootDir) = try await makeDatabase(named: "environment-catalog-notify.sqlite")
+        defer { try? FileManager.default.removeItem(at: rootDir) }
+
+        var notificationReceived = false
+        let observer = NotificationCenter.default.addObserver(
+            forName: .environmentsDidChange,
+            object: nil,
+            queue: .main
+        ) { _ in
+            notificationReceived = true
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+
+        let manager = EnvironmentCatalogManager(
+            database: database,
+            environmentsDirectory: rootDir.appendingPathComponent("env", isDirectory: true),
+            assetValidator: { _ in true },
+            remoteDataFetcher: { url in
+                let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+                return (Data("fake-hdr".utf8), response)
+            }
+        )
+
+        let preset = CuratedEnvironmentPreset(
+            id: "test-preset",
+            name: "Test Cinema",
+            description: "Test preset",
+            provider: .polyHaven,
+            downloadURL: URL(string: "https://example.com/test.hdr")!,
+            sourceAttributionURL: "https://example.com",
+            licenseName: "CC0"
+        )
+
+        _ = try await manager.importCuratedPreset(preset)
+
+        // Allow time for notification to propagate
+        try await Task.sleep(for: .milliseconds(100))
+
+        #expect(notificationReceived, "Notification should be sent after importing preset")
+    }
 }
 
 private actor ValidationGate {
