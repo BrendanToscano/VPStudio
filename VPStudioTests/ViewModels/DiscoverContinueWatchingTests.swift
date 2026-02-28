@@ -74,13 +74,24 @@ struct DiscoverContinueWatchingTests {
 
     @Test func continueWatchingExcludesBarelyScrubbed() async throws {
         let db = try await makeDB()
-        // 1% progress — should be excluded (<2% threshold)
+        // 1% progress (72/7200) — should be excluded (<5% threshold)
         try await seedHistory(db: db, mediaId: "tt3333333", title: "Barely Started", progress: 72, duration: 7200, completed: false)
 
         let vm = DiscoverViewModel(database: db)
         await vm.loadContinueWatching()
 
         #expect(vm.continueWatching.isEmpty)
+    }
+
+    @Test func continueWatchingIncludesAt5Percent() async throws {
+        let db = try await makeDB()
+        // 5% progress (360/7200) — should be included (>=5% threshold)
+        try await seedHistory(db: db, mediaId: "tt4444444", title: "Just Started", progress: 360, duration: 7200, completed: false)
+
+        let vm = DiscoverViewModel(database: db)
+        await vm.loadContinueWatching()
+
+        #expect(vm.continueWatching.count == 1)
     }
 
     @Test func continueWatchingEmptyWhenNoHistory() async throws {

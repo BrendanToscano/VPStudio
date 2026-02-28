@@ -119,7 +119,7 @@ final class DiscoverViewModel {
         guard let database else { return }
         do {
             let recentHistory = try await database.fetchWatchHistory(limit: 20)
-            let inProgress = recentHistory.filter { !$0.isCompleted && $0.progressPercent > 0.02 && $0.progressPercent < 0.95 }
+            let inProgress = recentHistory.filter { !$0.isCompleted && $0.progressPercent > 0.05 && $0.progressPercent < 0.95 }
             var items: [(history: WatchHistory, preview: MediaPreview)] = []
             for entry in inProgress.prefix(10) {
                 if let cached = try? await database.fetchMediaItem(id: entry.mediaId) {

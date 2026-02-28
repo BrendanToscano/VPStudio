@@ -564,10 +564,60 @@ struct LibraryView: View {
         let missingIDs = uniqueIDs.filter { mediaItems[$0] == nil }
         guard !missingIDs.isEmpty else { return }
 
+        // First, try to fetch from database
         await withTaskGroup(of: (String, MediaItem?).self) { group in
             for id in missingIDs {
                 group.addTask {
                     (id, try? await database.fetchMediaItem(id: id))
+                }
+            }
+
+            for await (id, item) in group {
+                if let item {
+                    mediaItems[id] = item
+                }
+            }
+        }
+
+        // Now fetch metadata from TMDB for items missing posterPath
+        await fetchMissingMetadata(ids: uniqueIDs)
+    }
+
+    private func fetchMissingMetadata(ids: [String]) async {
+        let database = appState.database
+        let settingsManager = appState.settingsManager
+
+        // Get API key
+        guard let apiKey = try? await settingsManager.getString(key: SettingsKeys.tmdbApiKey),
+              !apiKey.isEmpty else { return }
+
+        let tmdbService = TMDBService(apiKey: apiKey)
+
+        // Find items that need metadata (no item or no posterPath)
+        let itemsNeedingMetadata = ids.filter { id in
+            guard let item = mediaItems[id] else { return true }
+            return item.posterPath == nil || item.posterPath?.isEmpty == true
+        }
+
+        guard !itemsNeedingMetadata.isEmpty else { return }
+
+        // Fetch metadata for each item that needs it
+        await withTaskGroup(of: (String, MediaItem?).self) { group in
+            for id in itemsNeedingMetadata {
+                group.addTask {
+                    do {
+                        // Determine media type from ID prefix
+                        let mediaType: MediaType = id.hasPrefix("tmdb-") ?
+                            (id.contains("movie") ? .movie : .series) :
+                            .movie // Default to movie for IMDb IDs
+
+                        let mediaItem = try await tmdbService.getDetail(id: id, type: mediaType)
+                        // Save to database for future use
+                        try? await database.saveMediaItem(mediaItem)
+                        return (id, mediaItem)
+                    } catch {
+                        return (id, nil)
+                    }
                 }
             }
 
