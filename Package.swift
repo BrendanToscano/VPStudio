@@ -14,6 +14,7 @@ let package = Package(
     dependencies: [
         .package(url: "https://github.com/groue/GRDB.swift", from: "7.0.0"),
         .package(url: "https://github.com/kingslay/KSPlayer", from: "2.2.0"),
+        .package(url: "https://github.com/onevcat/Kingfisher", from: "8.0.0"),
     ],
     targets: [
         .target(
@@ -27,6 +28,7 @@ let package = Package(
                 "RealityKitContent",
                 .product(name: "GRDB", package: "GRDB.swift"),
                 .product(name: "KSPlayer", package: "KSPlayer"),
+                .product(name: "Kingfisher", package: "Kingfisher"),
             ],
             path: "VPStudio",
             exclude: [

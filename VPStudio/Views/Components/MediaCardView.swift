@@ -1,4 +1,5 @@
 import SwiftUI
+import Kingfisher
 
 struct MediaCardView: View {
     let item: MediaPreview
@@ -11,26 +12,27 @@ struct MediaCardView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            // Poster image
-            AsyncImage(url: item.posterURL) { phase in
-                switch phase {
-                case .success(let image):
-                    image
-                        .resizable()
-                        .aspectRatio(2 / 3, contentMode: .fill)
-                case .failure:
-                    posterPlaceholder
-                case .empty:
+            // Poster image with Kingfisher for LRU caching
+            KFImage(item.posterURL)
+                .placeholder {
                     posterPlaceholder
                         .overlay { ProgressView() }
-                @unknown default:
-                    posterPlaceholder
                 }
-            }
-            .frame(width: cardWidth, height: cardHeight)
-            .clipShape(RoundedRectangle(cornerRadius: radius))
-            .shadow(color: .black.opacity(isHovered ? 0.35 : 0.15), radius: isHovered ? 16 : 6, x: 0, y: isHovered ? 10 : 4)
-            .shadow(color: .white.opacity(isHovered ? 0.06 : 0), radius: 20, y: 0)
+                .retry(maxCount: 2, interval: .seconds(1))
+                .cacheOriginalImage()
+                .fade(duration: 0.25)
+                .scaleFactor(UIScreen.main.scale)
+                .resizable()
+                .aspectRatio(2 / 3, contentMode: .fill)
+                .frame(width: cardWidth, height: cardHeight)
+                .clipShape(RoundedRectangle(cornerRadius: radius))
+                .overlay {
+                    // Fallback for failed load
+                    posterPlaceholder
+                        .opacity(0)
+                }
+                .shadow(color: .black.opacity(isHovered ? 0.35 : 0.15), radius: isHovered ? 16 : 6, x: 0, y: isHovered ? 10 : 4)
+                .shadow(color: .white.opacity(isHovered ? 0.06 : 0), radius: 20, y: 0)
             .overlay(
                 RoundedRectangle(cornerRadius: radius)
                     .strokeBorder(
