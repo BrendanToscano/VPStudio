@@ -16,10 +16,10 @@ struct EnvironmentSettingsView: View {
 
     var body: some View {
         List {
-            Section("Curated Environments") {
+            Section("Built-in Environments") {
                 let bundled = assets.filter { $0.sourceType == .bundled }
                 if bundled.isEmpty {
-                    Text("Import a .hdr, .exr, .usdz, or .reality asset to customize.")
+                    Text("No built-in environments. Download from Online Presets below.")
                         .foregroundStyle(.secondary)
                 } else {
                     ForEach(bundled) { asset in
@@ -33,7 +33,7 @@ struct EnvironmentSettingsView: View {
                     onlinePresetRow(preset)
                 }
 
-                Text("Use one-click import for curated sources, then activate from Imported Environments.")
+                Text("One-click import for high-quality cinema environments from Poly Haven.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

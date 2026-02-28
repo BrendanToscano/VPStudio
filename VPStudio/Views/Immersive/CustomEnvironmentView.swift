@@ -2,6 +2,7 @@
 import os
 import SwiftUI
 import RealityKit
+import AVFoundation
 
 private let logger = Logger(subsystem: "com.vpstudio.app", category: "CustomEnvironment")
 
@@ -15,6 +16,13 @@ struct CustomEnvironmentView: View {
     @State private var controlsAnchor: Entity?
     @State private var lastMaterialSourceID: ObjectIdentifier?
     @State private var autoDismissTask: Task<Void, Never>?
+
+    /// Strong reference to the AVPlayer to prevent it from being deallocated
+    /// when the PlayerView's weak reference is cleared.
+    @State private var immersivePlayer: AVPlayer?
+
+    /// Strong reference to the video renderer for immersive playback.
+    @State private var immersiveVideoRenderer: AVSampleBufferVideoRenderer?
 
     var body: some View {
         RealityView { content, attachments in
@@ -57,18 +65,26 @@ struct CustomEnvironmentView: View {
             }
 
         } update: { content, attachments in
+            // MARK: Sync player references from AppState (weak) to local (strong)
+            if immersivePlayer === nil || immersivePlayer !== appState.activeAVPlayer {
+                immersivePlayer = appState.activeAVPlayer
+            }
+            if immersiveVideoRenderer === nil || immersiveVideoRenderer !== appState.activeVideoRenderer {
+                immersiveVideoRenderer = appState.activeVideoRenderer
+            }
+
             // MARK: Cinema screen material (cached)
             if let screen = cinemaScreen {
                 let currentSourceID: ObjectIdentifier? = {
-                    if let r = appState.activeVideoRenderer { return ObjectIdentifier(r) }
-                    if let p = appState.activeAVPlayer { return ObjectIdentifier(p) }
+                    if let r = immersiveVideoRenderer { return ObjectIdentifier(r) }
+                    if let p = immersivePlayer { return ObjectIdentifier(p) }
                     return nil
                 }()
 
                 if currentSourceID != lastMaterialSourceID {
-                    if let renderer = appState.activeVideoRenderer {
+                    if let renderer = immersiveVideoRenderer {
                         screen.model?.materials = [VideoMaterial(videoRenderer: renderer)]
-                    } else if let player = appState.activeAVPlayer {
+                    } else if let player = immersivePlayer {
                         screen.model?.materials = [VideoMaterial(avPlayer: player)]
                     } else {
                         screen.model?.materials = [SimpleMaterial(color: .black, isMetallic: false)]
@@ -143,6 +159,8 @@ struct CustomEnvironmentView: View {
             cinemaScreen = nil
             controlsAnchor = nil
             lastMaterialSourceID = nil
+            immersivePlayer = nil
+            immersiveVideoRenderer = nil
         }
     }
 

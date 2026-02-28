@@ -169,6 +169,9 @@ struct SettingsView: View {
         .refreshable {
             await refreshStatuses()
         }
+        .onReceive(NotificationCenter.default.publisher(for: .environmentsDidChange)) { _ in
+            Task { await refreshStatuses() }
+        }
         .onChange(of: query) { _, newValue in
             persistedSearchQuery = newValue
         }
