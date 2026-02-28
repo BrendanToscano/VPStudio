@@ -91,6 +91,32 @@ struct DiscoverView: View {
                     ) { item in
                         selectedItem = item
                     }
+
+                    // New Releases (last 90 days, up to today)
+                    if !viewModel.newReleaseMovies.isEmpty {
+                        MediaRow(
+                            title: "New Releases",
+                            symbol: "flame.fill",
+                            items: viewModel.newReleaseMovies,
+                            userRatings: userRatings,
+                            animationDelay: 0.40
+                        ) { item in
+                            selectedItem = item
+                        }
+                    }
+
+                    // Upcoming / Future Releases (release date > today)
+                    if !viewModel.upcomingMovies.isEmpty {
+                        MediaRow(
+                            title: "Coming Soon",
+                            symbol: "calendar.badge.clock",
+                            items: viewModel.upcomingMovies,
+                            userRatings: userRatings,
+                            animationDelay: 0.47
+                        ) { item in
+                            selectedItem = item
+                        }
+                    }
                 }
             }
             .animation(.easeInOut(duration: 0.45), value: viewModel.isLoading)

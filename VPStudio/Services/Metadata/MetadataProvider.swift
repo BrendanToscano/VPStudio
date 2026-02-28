@@ -2,6 +2,7 @@ import Foundation
 
 struct DiscoverFilters: Sendable {
     var genreId: Int?
+    var query: String?
     var year: Int?
     var minRating: Double?
     var sortBy: SortOption
@@ -11,8 +12,9 @@ struct DiscoverFilters: Sendable {
     var releaseDateLte: String?
     var originalLanguage: String?
 
-    init(genreId: Int? = nil, year: Int? = nil, minRating: Double? = nil, sortBy: SortOption = .popularityDesc, page: Int = 1, language: String? = nil, releaseDateGte: String? = nil, releaseDateLte: String? = nil, originalLanguage: String? = nil) {
+    init(genreId: Int? = nil, query: String? = nil, year: Int? = nil, minRating: Double? = nil, sortBy: SortOption = .popularityDesc, page: Int = 1, language: String? = nil, releaseDateGte: String? = nil, releaseDateLte: String? = nil, originalLanguage: String? = nil) {
         self.genreId = genreId
+        self.query = query
         self.year = year
         self.minRating = minRating
         self.sortBy = sortBy
