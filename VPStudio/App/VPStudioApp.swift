@@ -7,6 +7,7 @@ import AppKit
 #endif
 
 import AVFoundation
+import Kingfisher
 
 // MARK: - macOS App Delegate
 
@@ -38,6 +39,22 @@ struct VPStudioApp: App {
             print("Failed to configure AVAudioSession: \(error)")
         }
         #endif
+        
+        // Configure Kingfisher image cache with LRU and bounded memory limits
+        configureKingfisherCache()
+    }
+    
+    private func configureKingfisherCache() {
+        // Configure memory cache: 100MB limit, LRU eviction
+        ImageCache.default.memoryStorage.config.totalCostLimit = 100 * 1024 * 1024
+        ImageCache.default.memoryStorage.config.countLimit = 150
+        
+        // Configure disk cache: 500MB limit, 7-day expiration
+        ImageCache.default.diskStorage.config.sizeLimit = 500 * 1024 * 1024
+        ImageCache.default.diskStorage.config.expiration = .days(7)
+        
+        // Enable memory cache compression for better memory efficiency
+        ImageCache.default.memoryStorage.config.compression = true
     }
 
     @State private var appState = AppState()
