@@ -194,9 +194,13 @@ final class AppState {
             clientId: clientId,
             clientSecret: clientSecret,
             onTokensRefreshed: { [settingsManager] access, refresh in
-                try? await settingsManager.setString(key: SettingsKeys.traktAccessToken, value: access)
-                if let refresh {
-                    try? await settingsManager.setString(key: SettingsKeys.traktRefreshToken, value: refresh)
+                do {
+                    try await settingsManager.setString(key: SettingsKeys.traktAccessToken, value: access)
+                    if let refresh {
+                        try await settingsManager.setString(key: SettingsKeys.traktRefreshToken, value: refresh)
+                    }
+                } catch {
+                    Self.logger.error("Failed to persist refreshed Trakt tokens: \(error.localizedDescription, privacy: .public)")
                 }
             }
         )
@@ -339,10 +343,13 @@ final class AppState {
         if !openAIKey.isEmpty {
             await manager.configure(provider: .openAI, apiKey: openAIKey, model: openAIModel)
         }
-        // Only register Ollama if no cloud provider is available,
-        // to avoid connection-refused errors to localhost when Ollama isn't running.
-        let hasCloudProvider = !anthropicKey.isEmpty || !openAIKey.isEmpty
-        if !hasCloudProvider {
+        // Register Ollama if the user has explicitly configured a model preset,
+        // regardless of whether cloud providers are present. This lets power users
+        // run Ollama alongside cloud providers. Ollama is never selected as the
+        // default when a cloud provider is available (provider selection order
+        // is determined by AIAssistantManager's sorted fallback logic).
+        let hasOllamaModel = ollamaModel != nil && !(ollamaModel?.isEmpty ?? true)
+        if hasOllamaModel {
             await manager.configure(provider: .ollama, apiKey: "", baseURL: ollamaURL, model: ollamaModel)
         }
     }
