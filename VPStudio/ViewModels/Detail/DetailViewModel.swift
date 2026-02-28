@@ -259,7 +259,7 @@ final class DetailViewModel {
         cacheEnrichmentTask?.cancel()
         beginLoading(.torrentSearch)
 
-        searchTask = Task {
+        searchTask = Task { [weak self] in
             do {
                 try Task.checkCancellation()
                 try await indexerManager.initialize()
@@ -593,7 +593,7 @@ final class DetailViewModel {
                 title: item.title,
                 year: item.year,
                 type: item.type,
-                genres: item.genres ?? [],
+                genres: item.genres,
                 overview: item.overview
             )
             aiAnalysis = analysis
