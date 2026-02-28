@@ -271,12 +271,12 @@ struct PlayerView: View {
             scheduleMainWindowRestoreIfNeeded()
             #endif
         }
-        .onReceive(NotificationCenter.default.publisher(for: .mainWindowDidActivate)) { _ in
-            closePlayer()
+        .onReceive(NotificationCenter.default.publisher(for: .mainWindowDidActivate)) { [weak self] _ in
+            self?.closePlayer()
         }
-        .onReceive(NotificationCenter.default.publisher(for: .environmentsDidChange)) { _ in
-            environmentLoadTask?.cancel()
-            environmentLoadTask = Task { await loadEnvironmentAssets() }
+        .onReceive(NotificationCenter.default.publisher(for: .environmentsDidChange)) { [weak self] _ in
+            self?.environmentLoadTask?.cancel()
+            self?.environmentLoadTask = Task { await self?.loadEnvironmentAssets() ?? [] }
         }
         #if os(visionOS)
         .onChange(of: scenePhase) { _, phase in
@@ -533,6 +533,22 @@ struct PlayerView: View {
                     }
                 }
                 #endif
+
+                // Aspect Ratio Selection
+                Section("Aspect Ratio") {
+                    ForEach(AspectRatioSelection.allCases) { selection in
+                        Button {
+                            aspectRatioSelection = selection
+                        } label: {
+                            HStack {
+                                Label(selection.label, systemImage: selection.icon)
+                                if aspectRatioSelection == selection {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+                    }
+                }
 
                 #if os(visionOS)
                 Section("Environment") {
@@ -1454,24 +1470,27 @@ struct PlayerView: View {
             timeObserverPlayer = nil
         }
 
+        // Use [weak self] in the time observer to prevent retain cycles
         let interval = CMTime(seconds: 1.0, preferredTimescale: 600)
-        timeObserverToken = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { time in
-            Task { @MainActor in
+        timeObserverToken = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
+            guard let self = self else { return }
+            Task { @MainActor [weak self] in
+                guard let self = self else { return }
                 let seconds = time.seconds
                 let newTime = seconds.isFinite ? max(0, seconds) : 0
-                if engine.currentTime != newTime {
-                    engine.currentTime = newTime
-                    engine.updateSubtitleText(at: newTime)
+                if self.engine.currentTime != newTime {
+                    self.engine.currentTime = newTime
+                    self.engine.updateSubtitleText(at: newTime)
                 }
 
                 if let duration = player.currentItem?.duration.seconds, duration.isFinite, duration > 0,
-                   engine.duration != duration {
-                    engine.duration = duration
+                   self.engine.duration != duration {
+                    self.engine.duration = duration
                 }
 
                 // Trigger async video size detection once
-                if detectedVideoRatio == nil, let asset = player.currentItem?.asset {
-                    Task { await detectVideoRatio(from: asset) }
+                if self.detectedVideoRatio == nil, let asset = player.currentItem?.asset {
+                    await self.detectVideoRatio(from: asset)
                 }
 
                 // Buffered range
@@ -1480,19 +1499,19 @@ struct PlayerView: View {
                    itemDuration.isFinite, itemDuration > 0 {
                     let bufferedEnd = (loadedRange.start + loadedRange.duration).seconds
                     let newBuffered = min(1.0, bufferedEnd / itemDuration)
-                    if abs(engine.bufferedPercent - newBuffered) > 0.01 {
-                        engine.bufferedPercent = newBuffered
+                    if abs(self.engine.bufferedPercent - newBuffered) > 0.01 {
+                        self.engine.bufferedPercent = newBuffered
                     }
                 }
 
                 let nowPlaying = player.timeControlStatus == .playing
                 let nowBuffering = player.timeControlStatus == .waitingToPlayAtSpecifiedRate
-                if engine.isPlaying != nowPlaying { engine.isPlaying = nowPlaying }
-                if engine.isBuffering != nowBuffering { engine.isBuffering = nowBuffering }
-                if nowPlaying && playbackState != .playing {
-                    playbackState = .playing
-                } else if nowBuffering && playbackState != .buffering {
-                    playbackState = .buffering
+                if self.engine.isPlaying != nowPlaying { self.engine.isPlaying = nowPlaying }
+                if self.engine.isBuffering != nowBuffering { self.engine.isBuffering = nowBuffering }
+                if nowPlaying && self.playbackState != .playing {
+                    self.playbackState = .playing
+                } else if nowBuffering && self.playbackState != .buffering {
+                    self.playbackState = .buffering
                 }
             }
         }
