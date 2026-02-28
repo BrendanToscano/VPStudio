@@ -1712,7 +1712,7 @@ struct PlayerView: View {
         guard let windowScene = playerWindowScene else { return }
 
         let ratio = detectedVideoRatio ?? (16.0 / 9.0)
-        let currentWidth = max(windowScene.coordinateSpace.bounds.width, 1400)
+        let currentWidth = max(windowScene.windows.first?.frame.width ?? 1400, 1400)
         let targetHeight = currentWidth / ratio
         let targetSize = CGSize(width: currentWidth, height: targetHeight)
 

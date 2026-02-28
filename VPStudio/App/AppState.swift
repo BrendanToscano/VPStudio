@@ -304,18 +304,51 @@ final class AppState {
             Self.logger.error("Bootstrap error: \(error.localizedDescription, privacy: .public)")
             isShowingSetup = true
         }
-            // Auto-sync with Trakt on launch if credentials are available
-            Task.detached { [weak self] in
-                guard let self else { return }
-                let orchestrator = await self.makeTraktSyncOrchestrator()
-                guard let orchestrator else { return }
-                let result = await orchestrator.sync()
-                if result.totalPulled + result.totalPushed > 0 {
-                    await MainActor.run {
-                        NotificationCenter.default.post(name: .tasteProfileDidChange, object: nil)
+        // Auto-sync with Trakt on launch if credentials are available
+        Task.detached { [weak self] in
+            guard let self else { return }
+            // Capture needed data from @MainActor context before entering detached task
+            let traktClientId = try? await self.settingsManager.getString(key: SettingsKeys.traktClientId)
+            let traktClientSecret = try? await self.settingsManager.getString(key: SettingsKeys.traktSecret)
+            let database = self.database
+            let settingsManager = self.settingsManager
+
+            // Now create orchestrator off main actor using captured data
+            guard let creds = TraktDefaults.resolvedCredentials(
+                userClientId: traktClientId,
+                userClientSecret: traktClientSecret
+            ) else { return }
+
+            let service = TraktSyncService(
+                clientId: creds.clientId,
+                clientSecret: creds.clientSecret,
+                onTokensRefreshed: { [settingsManager] access, refresh in
+                    try? await settingsManager.setString(key: SettingsKeys.traktAccessToken, value: access)
+                    if let refresh {
+                        try? await settingsManager.setString(key: SettingsKeys.traktRefreshToken, value: refresh)
                     }
                 }
+            )
+
+            if let accessToken = try? await settingsManager.getString(key: SettingsKeys.traktAccessToken),
+               !accessToken.isEmpty {
+                let refreshToken = try? await settingsManager.getString(key: SettingsKeys.traktRefreshToken)
+                await service.setTokens(access: accessToken, refresh: refreshToken)
             }
+
+            let orchestrator = TraktSyncOrchestrator(
+                traktService: service,
+                database: database,
+                settingsManager: settingsManager
+            )
+
+            let result = await orchestrator.sync()
+            if result.totalPulled + result.totalPushed > 0 {
+                await MainActor.run {
+                    NotificationCenter.default.post(name: .tasteProfileDidChange, object: nil)
+                }
+            }
+        }
 
         isBootstrapping = false
     }
@@ -325,9 +358,11 @@ final class AppState {
     func configureAIProviders() async {
         let anthropicKey = (try? await settingsManager.getString(key: SettingsKeys.anthropicApiKey)) ?? ""
         let openAIKey = (try? await settingsManager.getString(key: SettingsKeys.openAIApiKey)) ?? ""
+        let geminiKey = (try? await settingsManager.getString(key: SettingsKeys.geminiApiKey)) ?? ""
         let ollamaURL = (try? await settingsManager.getString(key: SettingsKeys.ollamaEndpoint)) ?? "http://localhost:11434"
         let anthropicModel = try? await settingsManager.getString(key: SettingsKeys.anthropicModelPreset)
         let openAIModel = try? await settingsManager.getString(key: SettingsKeys.openAIModelPreset)
+        let geminiModel = try? await settingsManager.getString(key: SettingsKeys.geminiModelPreset)
         let ollamaModel = try? await settingsManager.getString(key: SettingsKeys.ollamaModelPreset)
 
         let manager = aiAssistantManager
@@ -339,9 +374,12 @@ final class AppState {
         if !openAIKey.isEmpty {
             await manager.configure(provider: .openAI, apiKey: openAIKey, model: openAIModel)
         }
+        if !geminiKey.isEmpty {
+            await manager.configure(provider: .gemini, apiKey: geminiKey, model: geminiModel)
+        }
         // Only register Ollama if no cloud provider is available,
         // to avoid connection-refused errors to localhost when Ollama isn't running.
-        let hasCloudProvider = !anthropicKey.isEmpty || !openAIKey.isEmpty
+        let hasCloudProvider = !anthropicKey.isEmpty || !openAIKey.isEmpty || !geminiKey.isEmpty
         if !hasCloudProvider {
             await manager.configure(provider: .ollama, apiKey: "", baseURL: ollamaURL, model: ollamaModel)
         }

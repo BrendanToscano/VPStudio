@@ -129,6 +129,12 @@ struct HDRISkyboxEnvironment: View {
                 return
             }
 
+            // Validate file exists before attempting to load HDRI
+            guard FileManager.default.fileExists(atPath: url.path) else {
+                loadingState = .failed("HDRI file not found: \(url.lastPathComponent)")
+                return
+            }
+
             guard let cgImage = await Task.detached(priority: .userInitiated, operation: {
                 Self.loadHDRImage(from: url)
             }).value else {
