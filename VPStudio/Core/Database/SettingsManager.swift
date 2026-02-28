@@ -96,6 +96,22 @@ actor SettingsManager {
         return quality
     }
 
+    func getContentLanguage() async throws -> String {
+        try await getValue(forKey: SettingsKeys.contentLanguage) ?? "en-US"
+    }
+
+    func setContentLanguage(_ language: String) async throws {
+        try await setValue(language, forKey: SettingsKeys.contentLanguage)
+    }
+
+    func getAudioLanguage() async throws -> String {
+        try await getValue(forKey: SettingsKeys.audioLanguage) ?? "en"
+    }
+
+    func setAudioLanguage(_ language: String) async throws {
+        try await setValue(language, forKey: SettingsKeys.audioLanguage)
+    }
+
     func getFeedbackScaleMode() async throws -> FeedbackScaleMode {
         let raw = try await getValue(forKey: SettingsKeys.feedbackScaleMode)
         return FeedbackScaleMode.fromStoredValue(raw)
@@ -115,6 +131,8 @@ enum SettingsKeys {
     nonisolated static let tmdbApiKey = "tmdb_api_key"
     nonisolated static let preferredQuality = "preferred_quality"
     nonisolated static let subtitleLanguage = "subtitle_language"
+    nonisolated static let contentLanguage = "content_language"
+    nonisolated static let audioLanguage = "audio_language"
     nonisolated static let subtitleFontSize = "subtitle_font_size"
     nonisolated static let subtitleAutoSearch = "subtitle_auto_search"
     nonisolated static let openSubtitlesApiKey = "opensubtitles_api_key"
