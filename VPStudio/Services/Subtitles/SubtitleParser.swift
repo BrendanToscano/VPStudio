@@ -30,8 +30,9 @@ struct SubtitleParser {
     // MARK: - SRT Parser
 
     static func parseSRT(_ content: String) -> [SubtitleCue] {
+        let normalized = normalizeNewlines(content)
         var cues: [SubtitleCue] = []
-        let blocks = content.components(separatedBy: "\n\n")
+        let blocks = normalized.components(separatedBy: "\n\n")
 
         for block in blocks {
             let lines = block.trimmingCharacters(in: .whitespacesAndNewlines).components(separatedBy: "\n")
@@ -59,9 +60,10 @@ struct SubtitleParser {
     // MARK: - VTT Parser
 
     static func parseVTT(_ content: String) -> [SubtitleCue] {
+        let normalized = normalizeNewlines(content)
         var cues: [SubtitleCue] = []
         // Skip WEBVTT header
-        let stripped = content.replacingOccurrences(of: "^WEBVTT[^\n]*\n", with: "", options: .regularExpression)
+        let stripped = normalized.replacingOccurrences(of: "^WEBVTT[^\n]*\n", with: "", options: .regularExpression)
         let blocks = stripped.components(separatedBy: "\n\n")
         var index = 0
 
@@ -91,9 +93,10 @@ struct SubtitleParser {
     // MARK: - ASS/SSA Parser
 
     static func parseASS(_ content: String) -> [SubtitleCue] {
+        let normalized = normalizeNewlines(content)
         var cues: [SubtitleCue] = []
         var index = 0
-        let lines = content.components(separatedBy: "\n")
+        let lines = normalized.components(separatedBy: "\n")
 
         for line in lines {
             guard line.hasPrefix("Dialogue:") else { continue }

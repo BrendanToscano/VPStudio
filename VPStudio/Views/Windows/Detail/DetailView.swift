@@ -981,6 +981,7 @@ struct DetailView: View {
                         }
                     }
                     .buttonStyle(.plain)
+                    .accessibilityHint("Find Streams for this episode")
                     .animation(.spring(response: 0.28, dampingFraction: 0.8), value: vm.selectedEpisode?.id)
                     #if os(visionOS)
                     .hoverEffect(.highlight)
