@@ -147,21 +147,25 @@ final class HeadTracker {
                     smoothedRot = finalRot
 
                     // Recompose into a 4x4 matrix.
-                    var mat = simd_float4x4(finalRot)
-                    mat.columns.3 = SIMD4<Float>(finalPos.x, finalPos.y, finalPos.z, 1)
+                    let composedTransform: simd_float4x4 = {
+                        var matrix = simd_float4x4(finalRot)
+                        matrix.columns.3 = SIMD4<Float>(finalPos.x, finalPos.y, finalPos.z, 1)
+                        return matrix
+                    }()
 
-                    await MainActor.run {
+                    await MainActor.run { [weak self] in
                         guard let self else { return }
-                        self.headTransform = mat
+                        self.headTransform = composedTransform
                         if self.initialHeadTransform == nil {
-                            self.initialHeadTransform = mat
+                            self.initialHeadTransform = composedTransform
                         }
                         if !self.isTracking {
                             self.isTracking = true
                         }
                     }
                 }
-                let currentInterval = await MainActor.run { self?.isIdle == true } ? Self.idlePollInterval : interval
+                let isIdle = await MainActor.run { [weak self] in self?.isIdle == true }
+                let currentInterval = isIdle ? Self.idlePollInterval : interval
                 try? await Task.sleep(for: currentInterval)
             }
         }
