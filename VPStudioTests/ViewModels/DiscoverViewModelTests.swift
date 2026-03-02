@@ -144,7 +144,7 @@ struct DiscoverViewModelTests {
 
         await viewModel.load(apiKey: "   ")
         #expect(viewModel.isLoading == false)
-        #expect(viewModel.error == .unknown("API key required to load discover content."))
+        #expect(viewModel.error == .unknown("Discover needs a TMDB API key. Open Settings → Movie & TV Metadata (TMDB), add your key, then tap Retry."))
         #expect(viewModel.trendingMovies.isEmpty)
 
         await viewModel.load(apiKey: "valid-key")

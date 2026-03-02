@@ -18,6 +18,7 @@ struct PlayerSettingsView: View {
 
     var body: some View {
         Form {
+            quickStartSection
             navigationSection
             qualitySection
             playbackSection
@@ -65,6 +66,18 @@ struct PlayerSettingsView: View {
         }
     }
 
+    private var quickStartSection: some View {
+        Section("Quick Start") {
+            Text("Recommended defaults: Engine Mode = Compatibility, Prefer Cached Streams = On, Quality = 1080p.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Text("If playback fails, switch Engine Mode to Adaptive and retry the same title.")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        }
+    }
+
     private var navigationSection: some View {
         Section("Navigation") {
             Picker("Layout", selection: $navigationLayout) {
@@ -109,6 +122,10 @@ struct PlayerSettingsView: View {
             Text(playerEngineStrategy.summary)
                 .font(.caption)
                 .foregroundStyle(.secondary)
+
+            Text("Tip: Compatibility is the safest. Adaptive is best when you want automatic fallback between engines.")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
         }
     }
 

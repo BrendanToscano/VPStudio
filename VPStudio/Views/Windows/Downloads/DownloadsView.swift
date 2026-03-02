@@ -39,11 +39,21 @@ struct DownloadsView: View {
         if vm.isLoading && vm.groups.isEmpty {
             ProgressView("Loading Downloads...")
         } else if vm.groups.isEmpty {
-            ContentUnavailableView(
-                "No Downloads",
-                systemImage: "arrow.down.circle",
-                description: Text("Use the Download button on any stream to save content for offline viewing.")
-            )
+            VStack(spacing: 14) {
+                ContentUnavailableView(
+                    "No Downloads",
+                    systemImage: "arrow.down.circle",
+                    description: Text("No files downloaded yet. Start from Discover, pick a title, then use Download on a stream.")
+                )
+
+                Button {
+                    appState.selectedTab = .discover
+                } label: {
+                    Label("Browse Discover", systemImage: "sparkles")
+                }
+                .buttonStyle(.borderedProminent)
+            }
+            .padding(.top, 18)
         } else {
             ScrollView {
                 LazyVStack(spacing: 24) {

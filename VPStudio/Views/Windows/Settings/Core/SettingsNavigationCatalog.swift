@@ -33,13 +33,13 @@ enum SettingsDestination: String, CaseIterable, Sendable, Identifiable {
 
     var title: String {
         switch self {
-        case .debrid: return "Debrid Services"
-        case .indexers: return "Indexers"
-        case .metadata: return "TMDB API"
+        case .debrid: return "Streaming Providers (Debrid)"
+        case .indexers: return "Search Providers"
+        case .metadata: return "Movie & TV Metadata (TMDB)"
         case .player: return "Playback"
         case .subtitles: return "Subtitles"
         case .environments: return "Environments"
-        case .ai: return "AI Assistant"
+        case .ai: return "AI Recommendations"
         case .trakt: return "Trakt"
         case .simkl: return "Simkl"
         }
@@ -62,11 +62,11 @@ enum SettingsDestination: String, CaseIterable, Sendable, Identifiable {
     var summary: String {
         switch self {
         case .debrid:
-            return "Manage providers, tokens, priority, and active state."
+            return "Connect and prioritize debrid providers so streams can resolve reliably."
         case .indexers:
-            return "Add, validate, and order torrent search providers."
+            return "Add search providers so VPStudio can find sources quickly."
         case .metadata:
-            return "Configure and validate TMDB API access."
+            return "Add your TMDB key for posters, details, and Discover results."
         case .player:
             return "Tune stream preferences and playback behavior."
         case .subtitles:
@@ -74,11 +74,11 @@ enum SettingsDestination: String, CaseIterable, Sendable, Identifiable {
         case .environments:
             return "Import and control immersive environment assets."
         case .ai:
-            return "Choose providers, keys, models, and compare mode."
+            return "Connect an AI provider for personalized recommendations and rating help."
         case .trakt:
-            return "Connect Trakt and configure scrobble sync behavior."
+            return "Connect Trakt to sync watch history, ratings, and watchlist."
         case .simkl:
-            return "Connect Simkl and control list sync behavior."
+            return "Connect Simkl to sync watch history and list progress."
         }
     }
 

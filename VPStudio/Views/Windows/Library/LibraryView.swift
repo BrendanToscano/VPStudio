@@ -165,6 +165,14 @@ struct LibraryView: View {
                                                     }
                                                 }
                                             }
+
+                                            Divider()
+                                        }
+
+                                        Button(role: .destructive) {
+                                            remove(entry: entry)
+                                        } label: {
+                                            Label("Remove from \(entry.listType.displayName)", systemImage: "trash")
                                         }
                                     }
                                 }
@@ -672,6 +680,22 @@ struct LibraryView: View {
                     toFolderId: folder.id
                 )
                 statusMessage = "Moved to \(folder.name)."
+                NotificationCenter.default.post(name: .libraryDidChange, object: nil)
+                await loadSelection()
+            } catch {
+                statusMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func remove(entry: UserLibraryEntry) {
+        guard entry.listType == selectedList else { return }
+
+        loadTask?.cancel()
+        loadTask = Task {
+            do {
+                try await appState.database.removeFromLibrary(mediaId: entry.mediaId, listType: entry.listType)
+                statusMessage = "Removed from \(entry.listType.displayName)."
                 NotificationCenter.default.post(name: .libraryDidChange, object: nil)
                 await loadSelection()
             } catch {

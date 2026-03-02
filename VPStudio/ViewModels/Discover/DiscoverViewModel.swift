@@ -55,7 +55,7 @@ final class DiscoverViewModel {
         } else if metadataService == nil {
             guard !normalizedKey.isEmpty else {
                 isLoading = false
-                error = .unknown("API key required to load discover content.")
+                error = .unknown("Discover needs a TMDB API key. Open Settings → Movie & TV Metadata (TMDB), add your key, then tap Retry.")
                 return
             }
             metadataService = metadataServiceFactory(normalizedKey)
@@ -63,7 +63,7 @@ final class DiscoverViewModel {
         }
         guard let service = metadataService else {
             isLoading = false
-            error = .unknown("Metadata service unavailable.")
+            error = .unknown("Discover couldn't start because metadata is unavailable. Open Settings and reconnect Movie & TV Metadata (TMDB), then retry.")
             return
         }
         isLoading = true

@@ -46,6 +46,12 @@ struct SettingsView: View {
         SettingsHealthPolicy.configurationProgress(configured: configuredCount, total: totalCount)
     }
 
+    private var healthTint: Color {
+        if healthProgress >= 0.75 { return .green }
+        if healthProgress >= 0.45 { return .orange }
+        return .yellow
+    }
+
     var body: some View {
         List {
             Section {
@@ -70,7 +76,7 @@ struct SettingsView: View {
                         }
                     }
 
-                    GlassProgressBar(progress: healthProgress, tint: .vpRed)
+                    GlassProgressBar(progress: healthProgress, tint: healthTint)
                 }
                 .padding(.vertical, 4)
             }
