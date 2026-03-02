@@ -1319,9 +1319,10 @@ struct TraktSyncOrchestratorBidirectionalHistoryTests {
         try await database.saveWatchHistory(localHistory)
 
         // Remote: tt2222222 (not in local)
+        let watchedAt = ISO8601DateFormatter().string(from: Date())
         let session = makeOrchestratorStubSession(
             historyMovies: """
-            [{"id":6001,"watched_at":"2025-03-01T10:00:00.000Z","action":"watch","movie":{"title":"Remote Only Movie","year":2025,"ids":{"trakt":1,"imdb":"tt2222222"}}}]
+            [{"id":6001,"watched_at":"\(watchedAt)","action":"watch","movie":{"title":"Remote Only Movie","year":2025,"ids":{"trakt":1,"imdb":"tt2222222"}}}]
             """,
             postResponder: { _ in
                 (200, #"{"added":{"movies":1,"shows":0,"episodes":0}}"#)

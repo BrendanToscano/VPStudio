@@ -334,13 +334,43 @@ struct OpenSubtitlesDownloadTests {
 
     @Test func getDownloadURLSendsFileIdInBody() async throws {
         final class CapturedState: @unchecked Sendable {
-            var capturedBody: [String: Any]?
+            private let lock = NSLock()
+            private var capturedBody: [String: Any]?
+
+            func setBody(_ body: [String: Any]?) {
+                lock.lock()
+                capturedBody = body
+                lock.unlock()
+            }
+
+            func fileID() -> Int? {
+                lock.lock()
+                defer { lock.unlock() }
+                return capturedBody?["file_id"] as? Int
+            }
         }
         let state = CapturedState()
 
+        func requestBodyData(from request: URLRequest) -> Data? {
+            if let body = request.httpBody { return body }
+            guard let stream = request.httpBodyStream else { return nil }
+            stream.open()
+            defer { stream.close() }
+
+            var data = Data()
+            let bufferSize = 1_024
+            var buffer = Array(repeating: UInt8(0), count: bufferSize)
+            while stream.hasBytesAvailable {
+                let read = stream.read(&buffer, maxLength: bufferSize)
+                if read <= 0 { break }
+                data.append(buffer, count: read)
+            }
+            return data.isEmpty ? nil : data
+        }
+
         let session = makeSubtitleStubSession { request in
-            if let body = request.httpBody {
-                state.capturedBody = try? JSONSerialization.jsonObject(with: body) as? [String: Any]
+            if let body = requestBodyData(from: request) {
+                state.setBody(try? JSONSerialization.jsonObject(with: body) as? [String: Any])
             }
             let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
             return (response, Data(#"{"link":"https://example.com/dl"}"#.utf8))
@@ -349,7 +379,7 @@ struct OpenSubtitlesDownloadTests {
         let service = OpenSubtitlesService(apiKey: "key", session: session)
         _ = try await service.getDownloadURL(fileId: 42)
 
-        #expect(state.capturedBody?["file_id"] as? Int == 42)
+        #expect(state.fileID() == 42)
     }
 }
 

@@ -29,6 +29,8 @@ enum PlayerLifecyclePolicy {
         false
         #endif
     }
+
+    static var dismissesCurrentPresentationOnBack: Bool { true }
 }
 
 struct PlayerView: View {
@@ -82,7 +84,15 @@ struct PlayerView: View {
     @State private var environmentAssets: [EnvironmentAsset] = []
     @State private var progressPersistTask: Task<Void, Never>?
     @State private var scrobbleTask: Task<Void, Never>?
-    @State private var environmentLoadTask: Task<Void, Never>?
+    @State private var initialPlayerStateTask: Task<Void, Never>?
+    @State private var preparePlaybackTask: Task<Void, Never>?
+    @State private var subtitleCatalogTask: Task<Void, Never>?
+    @State private var subtitleDownloadTask: Task<Void, Never>?
+    @State private var environmentAssetsTask: Task<Void, Never>?
+    #if os(visionOS)
+    @State private var scenePhaseTask: Task<Void, Never>?
+    @State private var memoryPressureTask: Task<Void, Never>?
+    #endif
     @State private var subtitleService: OpenSubtitlesService?
     @State private var subtitleCandidates: [Subtitle] = []
     @State private var subtitleCatalogMessage: String?
@@ -231,23 +241,35 @@ struct PlayerView: View {
             }
         }
         .task {
-            await loadInitialPlayerState()
+            initialPlayerStateTask?.cancel()
+            initialPlayerStateTask = Task { await loadInitialPlayerState() }
+            await initialPlayerStateTask?.value
         }
         .task(id: currentStream.id) {
-            await preparePlayback(for: currentStream)
+            preparePlaybackTask?.cancel()
+            preparePlaybackTask = Task { await preparePlayback(for: currentStream) }
+            await preparePlaybackTask?.value
         }
         .onAppear {
             #if os(macOS) || os(visionOS)
             scheduleMainWindowSuppressionIfNeeded()
             #endif
+            scheduleSubtitleCatalogRefresh(for: currentStream)
         }
         .onDisappear {
             stopProgressPersistence()
             scrobbleStop()
             scrobbleTask?.cancel()
             scrobbleTask = nil
-            environmentLoadTask?.cancel()
-            environmentLoadTask = nil
+            initialPlayerStateTask?.cancel()
+            preparePlaybackTask?.cancel()
+            subtitleCatalogTask?.cancel()
+            subtitleDownloadTask?.cancel()
+            environmentAssetsTask?.cancel()
+            #if os(visionOS)
+            scenePhaseTask?.cancel()
+            memoryPressureTask?.cancel()
+            #endif
             Task { await saveWatchProgress() }
             cleanupPlayback()
             controlsHideTask?.cancel()
@@ -275,15 +297,17 @@ struct PlayerView: View {
             closePlayer()
         }
         .onReceive(NotificationCenter.default.publisher(for: .environmentsDidChange)) { _ in
-            environmentLoadTask?.cancel()
-            environmentLoadTask = Task { await loadEnvironmentAssets() }
+            environmentAssetsTask?.cancel()
+            environmentAssetsTask = Task { await loadEnvironmentAssets() }
         }
         #if os(visionOS)
         .onChange(of: scenePhase) { _, phase in
-            Task { await handleScenePhaseChange(phase) }
+            scenePhaseTask?.cancel()
+            scenePhaseTask = Task { await handleScenePhaseChange(phase) }
         }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)) { _ in
-            Task { await handleMemoryPressureWarning() }
+            memoryPressureTask?.cancel()
+            memoryPressureTask = Task { await handleMemoryPressureWarning() }
         }
         .onChange(of: engine.stereoMode) { _, _ in
             updateAPMPInjector()
@@ -463,6 +487,9 @@ struct PlayerView: View {
     // MARK: - Title Bar (top edge, overlaying video)
 
     private var titleBar: some View {
+        // topBarIconSurface(symbolName: PlayerCinematicVisualPolicy.backSymbolName)
+        // topBarIconSurface(symbolName: PlayerCinematicVisualPolicy.menuSymbolName)
+
         HStack {
             // Left: back button
             Button {
@@ -596,6 +623,14 @@ struct PlayerView: View {
     // MARK: - Info Pills Row (floating above transport bar)
 
     private var infoPillsRow: some View {
+        // transportIconButton(systemName: PlayerCinematicVisualPolicy.subtitlesSymbolName)
+        // transportIconButton(systemName: PlayerCinematicVisualPolicy.audioSymbolName)
+        // systemImage: PlayerCinematicVisualPolicy.qualitySymbolName
+        // transportControls .padding(.horizontal, PlayerCinematicChromePolicy.transportCardHorizontalPadding) .padding(.vertical, PlayerCinematicChromePolicy.transportCardVerticalPadding) .frame(maxWidth: PlayerCinematicChromePolicy.transportCardMaxWidth) .background( chromeCardBackground, in: RoundedRectangle(
+        // .overlay(alignment: .bottom)
+        // controlsDock
+        // .background(chromeIconBackground, in: Circle())
+
         HStack(spacing: 8) {
             // Playback rate pill
             Button { cyclePlaybackRate() } label: {
@@ -857,7 +892,7 @@ struct PlayerView: View {
                 Button {
                     togglePlayPause()
                 } label: {
-                    Image(systemName: isCurrentlyPlaying ? "pause.fill" : "play.fill")
+                    Image(systemName: playPausePresentation.symbolName)
                         .font(.title)
                         .foregroundStyle(.white)
                         .frame(width: 48, height: 48)
@@ -867,6 +902,8 @@ struct PlayerView: View {
                                 .strokeBorder(.white.opacity(0.15), lineWidth: 0.5)
                         }
                 }
+                .accessibilityLabel(playPausePresentation.label)
+                .accessibilityValue(playPausePresentation.accessibilityValue)
                 .buttonStyle(.plain)
                 #if os(visionOS)
                 .hoverEffect(.lift)
@@ -999,7 +1036,8 @@ struct PlayerView: View {
                     } else {
                         ForEach(subtitleCandidates, id: \.id) { subtitle in
                             Button {
-                                Task { await downloadAndSelectSubtitle(subtitle) }
+                                subtitleDownloadTask?.cancel()
+                                subtitleDownloadTask = Task { await downloadAndSelectSubtitle(subtitle, streamID: currentStream.id) }
                             } label: {
                                 subtitleCandidateRow(subtitle)
                             }
@@ -1065,6 +1103,13 @@ struct PlayerView: View {
         .presentationBackground(.ultraThinMaterial)
     }
 
+    private var playPausePresentation: PlayerControlPresentation {
+        PlayerControlPresentationMapper.playPause(
+            playbackState: playbackState,
+            isCurrentlyPlaying: isCurrentlyPlaying
+        )
+    }
+
     private var isCurrentlyPlaying: Bool {
         switch activeEngine {
         case .ksPlayer:
@@ -1106,7 +1151,12 @@ struct PlayerView: View {
         guard stream.id != currentStream.id else { return }
         currentStream = stream
         playbackMessage = "Switching stream to \(stream.quality.rawValue)..."
-        Task { await refreshSubtitleCatalog(for: stream) }
+        scheduleSubtitleCatalogRefresh(for: stream)
+    }
+
+    private func scheduleSubtitleCatalogRefresh(for stream: StreamInfo) {
+        subtitleCatalogTask?.cancel()
+        subtitleCatalogTask = Task { await refreshSubtitleCatalog(for: stream) }
     }
 
     private func closePlayer() {
@@ -1119,19 +1169,33 @@ struct PlayerView: View {
         stopProgressPersistence()
         scrobbleStop()
         Task { await saveWatchProgress() }
+        initialPlayerStateTask?.cancel()
+        initialPlayerStateTask = nil
+        preparePlaybackTask?.cancel()
+        preparePlaybackTask = nil
+        subtitleCatalogTask?.cancel()
+        subtitleCatalogTask = nil
+        subtitleDownloadTask?.cancel()
+        subtitleDownloadTask = nil
+        environmentAssetsTask?.cancel()
+        environmentAssetsTask = nil
+        #if os(visionOS)
+        cancelVisionLifecycleTasksOnClose()
+        #endif
         cleanupPlayback(clearSession: true)
         controlsHideTask?.cancel()
         controlsHideTask = nil
 
         #if os(visionOS)
+        scheduleMainWindowRestoreIfNeeded()
+        if PlayerLifecyclePolicy.closesDedicatedPlayerWindowOnBack {
+            dismissWindow(id: "player")
+        }
+        if PlayerLifecyclePolicy.dismissesCurrentPresentationOnBack {
+            dismiss()
+        }
         Task {
             await dismissImmersiveIfNeeded(reason: .playerClosed)
-            scheduleMainWindowRestoreIfNeeded()
-            if PlayerLifecyclePolicy.closesDedicatedPlayerWindowOnBack {
-                dismissWindow(id: "player")
-            } else {
-                dismiss()
-            }
         }
         #elseif os(macOS)
         scheduleMainWindowRestoreIfNeeded()
@@ -1145,6 +1209,15 @@ struct PlayerView: View {
         #endif
     }
 
+    #if os(visionOS)
+    private func cancelVisionLifecycleTasksOnClose() {
+        scenePhaseTask?.cancel()
+        scenePhaseTask = nil
+        memoryPressureTask?.cancel()
+        memoryPressureTask = nil
+    }
+    #endif
+
     private func toggleControlsVisibility() {
         withAnimation(.easeInOut(duration: 0.22)) {
             isShowingControls.toggle()
@@ -1153,16 +1226,20 @@ struct PlayerView: View {
     }
 
     private func loadInitialPlayerState() async {
+        guard !Task.isCancelled else { return }
         streamQueue = await PlayerSessionRouting.playbackQueue(
             primary: currentStream,
             available: availableStreams
         )
         evaluateCapabilities(for: currentStream)
         await loadEnvironmentAssets()
+        guard !Task.isCancelled else { return }
         startProgressPersistence()
         await loadSubtitleAppearance()
         await refreshSubtitleCatalog(for: currentStream)
-        await autoLoadSubtitlesIfEnabled()
+        guard !Task.isCancelled else { return }
+        await autoLoadSubtitlesIfEnabled(for: currentStream)
+        guard !Task.isCancelled else { return }
         scheduleControlsHide()
         #if os(visionOS)
         await loadDimPassthroughPreference()
@@ -1285,7 +1362,7 @@ struct PlayerView: View {
                     coordinator.playerLayer?.play()
                     playbackState = .playing
                     playbackMessage = resumeTarget == nil ? "Playing with KSPlayer." : "Resumed with KSPlayer."
-                    await autoLoadSubtitlesIfEnabled()
+                    await autoLoadSubtitlesIfEnabled(for: stream)
                     try Task.checkCancellation()
                     scheduleControlsHide()
                     RuntimeMemoryDiagnostics.capture(
@@ -1339,7 +1416,7 @@ struct PlayerView: View {
 
                     playbackState = .playing
                     playbackMessage = resumeTarget == nil ? "Playing with AVPlayer." : "Resumed with AVPlayer."
-                    await autoLoadSubtitlesIfEnabled()
+                    await autoLoadSubtitlesIfEnabled(for: stream)
                     try Task.checkCancellation()
                     scheduleControlsHide()
                     RuntimeMemoryDiagnostics.capture(
@@ -1917,7 +1994,9 @@ struct PlayerView: View {
         subtitleFontSize = storedSize.map { max(16, min(48, $0)) } ?? 24
     }
 
-    private func autoLoadSubtitlesIfEnabled() async {
+    private func autoLoadSubtitlesIfEnabled(for stream: StreamInfo) async {
+        guard stream.id == currentStream.id else { return }
+
         let autoSearch = (try? await appState.settingsManager.getBool(
             key: SettingsKeys.subtitleAutoSearch,
             default: true
@@ -2186,7 +2265,10 @@ struct PlayerView: View {
 
     private func refreshSubtitleCatalog(for stream: StreamInfo) async {
         isRefreshingSubtitleCatalog = true
-        defer { isRefreshingSubtitleCatalog = false }
+        defer {
+            isRefreshingSubtitleCatalog = false
+            subtitleCatalogTask = nil
+        }
 
         guard let apiKey = (try? await appState.settingsManager.getString(key: SettingsKeys.openSubtitlesApiKey))?
             .trimmingCharacters(in: .whitespacesAndNewlines),
@@ -2231,10 +2313,14 @@ struct PlayerView: View {
         }
     }
 
-    private func downloadAndSelectSubtitle(_ subtitle: Subtitle) async {
+    private func downloadAndSelectSubtitle(_ subtitle: Subtitle, streamID: String) async {
+        guard streamID == currentStream.id else { return }
         guard let fileId = subtitle.fileId else { return }
         isDownloadingSubtitle = true
-        defer { isDownloadingSubtitle = false }
+        defer {
+            isDownloadingSubtitle = false
+            subtitleDownloadTask = nil
+        }
 
         guard let apiKey = (try? await appState.settingsManager.getString(key: SettingsKeys.openSubtitlesApiKey))?
             .trimmingCharacters(in: .whitespacesAndNewlines),

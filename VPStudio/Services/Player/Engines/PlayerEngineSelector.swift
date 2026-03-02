@@ -25,7 +25,11 @@ enum PlayerEngineStrategy: String, CaseIterable, Sendable, Identifiable {
         case .performance:
             return "Always try AVPlayer first for the lowest memory footprint and best system-level decoding."
         case .compatibility:
+            #if os(visionOS)
+            return "Uses AVPlayer first on visionOS for stability and power efficiency, with KSPlayer as fallback for edge formats."
+            #else
             return "Always uses KSPlayer first for maximum container and codec compatibility. Recommended for most users."
+            #endif
         }
     }
 }
@@ -37,18 +41,27 @@ struct PlayerEngineSelector {
     ) -> [PlayerEngineKind] {
         switch strategy {
         case .compatibility:
+            #if os(visionOS)
+            // visionOS favors native AVPlayer first to reduce decoder/memory pressure.
+            return [.avPlayer, .ksPlayer]
+            #else
             // Always KSPlayer first for maximum codec/container compatibility.
             return [.ksPlayer, .avPlayer]
+            #endif
         case .performance:
             return [.avPlayer, .ksPlayer]
         case .adaptive:
             if shouldPreferNativePipeline(stream) {
                 return [.avPlayer, .ksPlayer]
             }
+            #if os(visionOS)
+            return [.avPlayer, .ksPlayer]
+            #else
             if streamNeedsCompatibilityDecodeAdaptive(stream) {
                 return [.ksPlayer, .avPlayer]
             }
             return [.avPlayer, .ksPlayer]
+            #endif
         }
     }
 

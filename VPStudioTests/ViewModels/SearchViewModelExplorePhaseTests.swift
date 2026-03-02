@@ -37,6 +37,27 @@ struct SearchViewModelExplorePhaseTests {
         func getExternalIds(tmdbId: Int, type: MediaType) async throws -> ExternalIds { ExternalIds(imdbId: nil, tvdbId: nil) }
     }
 
+    private final class LockedValue<Value>: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: Value
+
+        init(_ value: Value) {
+            self.value = value
+        }
+
+        func withLock<Result>(_ body: (inout Value) -> Result) -> Result {
+            lock.lock()
+            defer { lock.unlock() }
+            return body(&value)
+        }
+
+        func get() -> Value {
+            lock.lock()
+            defer { lock.unlock() }
+            return value
+        }
+    }
+
     /// Polls until `condition` returns true, yielding between checks. Fails after `timeout`.
     private static func waitUntil(
         timeout: Duration = .milliseconds(5000),
@@ -553,25 +574,25 @@ struct SearchViewModelExplorePhaseTests {
     // MARK: - Configure
 
     @Test func configureWithSameKeyDoesNotRecreateService() async throws {
-        var factoryCallCount = 0
-        let viewModel = SearchViewModel(metadataServiceFactory: { key in
-            factoryCallCount += 1
+        let factoryCallCount = LockedValue(0)
+        let viewModel = SearchViewModel(metadataServiceFactory: { _ in
+            factoryCallCount.withLock { $0 += 1 }
             return PhaseTestMetadataStub()
         })
         viewModel.configure(apiKey: "my-key")
-        let firstCount = factoryCallCount
+        let firstCount = factoryCallCount.get()
         viewModel.configure(apiKey: "my-key")
-        #expect(factoryCallCount == firstCount, "Factory should not be called again for same key")
+        #expect(factoryCallCount.get() == firstCount, "Factory should not be called again for same key")
     }
 
     @Test func configureTrimsApiKey() async throws {
-        var receivedKey: String?
+        let receivedKey = LockedValue<String?>(nil)
         let viewModel = SearchViewModel(metadataServiceFactory: { key in
-            receivedKey = key
+            receivedKey.withLock { $0 = key }
             return PhaseTestMetadataStub()
         })
         viewModel.configure(apiKey: "  my-key  ")
-        #expect(receivedKey == "my-key")
+        #expect(receivedKey.get() == "my-key")
     }
 
     // MARK: - Apply Language Filters

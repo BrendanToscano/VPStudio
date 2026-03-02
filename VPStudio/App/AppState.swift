@@ -37,7 +37,7 @@ final class AppState {
 
     // MARK: - Navigation
     var selectedTab: SidebarTab = .discover
-    var navigationLayout: NavigationLayout = .leftSidebar
+    var navigationLayout: NavigationLayout = .bottomTabBar
     var isShowingSetup: Bool = false
     var setupRecommendationNeeded: Bool = false
     var navigationResetID: UUID = UUID()
@@ -242,9 +242,10 @@ final class AppState {
     // MARK: - Initialization
 
     func bootstrap() async {
+        defer { isBootstrapping = false }
+
+        // Fatal bootstrap steps: database initialization, migration, and debrid bootstrap.
         do {
-            // Initialize the database eagerly so any filesystem errors surface here
-            // rather than crashing later from an unexpected code path.
             if _database == nil {
                 _database = try DatabaseManager()
             }
@@ -260,64 +261,69 @@ final class AppState {
             } else {
                 try await debridManager.initialize()
             }
-
-            // Environment bootstrap is non-fatal — the app works without environments
-            do {
-                if let bootstrapEnvironments = testHooks.bootstrapEnvironments {
-                    try await bootstrapEnvironments()
-                } else {
-                    try await environmentCatalogManager.bootstrapCuratedAssets()
-                }
-
-                if let fetchActiveEnvironment = testHooks.fetchActiveEnvironment {
-                    selectedEnvironmentAsset = try await fetchActiveEnvironment()
-                } else {
-                    selectedEnvironmentAsset = try await environmentCatalogManager.activeAsset()
-                }
-            } catch {
-                environmentBootstrapWarning = error.localizedDescription
-            }
-
-            let hasDebridConfig: Bool
-            if let fetchDebridConfigs = testHooks.fetchDebridConfigs {
-                hasDebridConfig = try await !fetchDebridConfigs().isEmpty
-            } else {
-                hasDebridConfig = try await !database.fetchDebridConfigs().isEmpty
-            }
-
-            let hasReadyDebridService: Bool
-            if let availableDebridServices = testHooks.availableDebridServices {
-                hasReadyDebridService = await !availableDebridServices().isEmpty
-            } else {
-                hasReadyDebridService = await !debridManager.availableServices().isEmpty
-            }
-
-            setupRecommendationNeeded = !hasDebridConfig || !hasReadyDebridService
-
-            await configureAIProviders()
-
-            runtimeDiagnosticsEnabled = (try? await settingsManager.getBool(
-                key: SettingsKeys.runtimeDiagnosticsEnabled,
-                default: false
-            )) ?? false
         } catch {
             Self.logger.error("Bootstrap error: \(error.localizedDescription, privacy: .public)")
             isShowingSetup = true
+            return
         }
-            // Auto-sync with Trakt on launch if credentials are available
-            Task.detached { [weak self] in
-                guard let self else { return }
-                let orchestrator = await self.makeTraktSyncOrchestrator()
-                guard let orchestrator else { return }
-                let result = await orchestrator.sync()
-                if result.totalPulled + result.totalPushed > 0 {
-                    await MainActor.run {
-                        NotificationCenter.default.post(name: .tasteProfileDidChange, object: nil)
-                    }
-                }
+
+        // Environment bootstrap is non-fatal — the app works without environments.
+        do {
+            if let bootstrapEnvironments = testHooks.bootstrapEnvironments {
+                try await bootstrapEnvironments()
+            } else {
+                try await environmentCatalogManager.bootstrapCuratedAssets()
             }
 
-        isBootstrapping = false
+            if let fetchActiveEnvironment = testHooks.fetchActiveEnvironment {
+                selectedEnvironmentAsset = try await fetchActiveEnvironment()
+            } else {
+                selectedEnvironmentAsset = try await environmentCatalogManager.activeAsset()
+            }
+        } catch {
+            environmentBootstrapWarning = error.localizedDescription
+        }
+
+        let hasDebridConfig: Bool = await {
+            do {
+                if let fetchDebridConfigs = testHooks.fetchDebridConfigs {
+                    return try await !fetchDebridConfigs().isEmpty
+                }
+                return try await !database.fetchDebridConfigs().isEmpty
+            } catch {
+                Self.logger.warning("Debrid config check failed: \(error.localizedDescription, privacy: .public)")
+                return false
+            }
+        }()
+
+        let hasReadyDebridService: Bool
+        if let availableDebridServices = testHooks.availableDebridServices {
+            hasReadyDebridService = await !availableDebridServices().isEmpty
+        } else {
+            hasReadyDebridService = await !debridManager.availableServices().isEmpty
+        }
+
+        setupRecommendationNeeded = !hasDebridConfig || !hasReadyDebridService
+
+        await configureAIProviders()
+
+        runtimeDiagnosticsEnabled = (try? await settingsManager.getBool(
+            key: SettingsKeys.runtimeDiagnosticsEnabled,
+            default: false
+        )) ?? false
+
+        // Auto-sync with Trakt on launch if credentials are available
+        Task.detached { [weak self] in
+            guard let self else { return }
+            let orchestrator = await self.makeTraktSyncOrchestrator()
+            guard let orchestrator else { return }
+            let result = await orchestrator.sync()
+            if result.totalPulled + result.totalPushed > 0 {
+                await MainActor.run {
+                    NotificationCenter.default.post(name: .tasteProfileDidChange, object: nil)
+                }
+            }
+        }
     }
 
     /// Loads saved API keys from settings and registers them with the AI assistant manager.

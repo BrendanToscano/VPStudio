@@ -128,8 +128,8 @@ struct KSPlayerEngine: PlayerEngine {
     nonisolated static func tuningProfile(for stream: StreamInfo) -> TuningProfile {
         if isHighDemandStream(stream) {
             return TuningProfile(
-                preferredForwardBufferDuration: 5.0,
-                maxBufferDuration: 30.0,
+                preferredForwardBufferDuration: 3.0,
+                maxBufferDuration: 16.0,
                 probesize: 6_000_000,
                 maxAnalyzeDuration: 6_000_000,
                 autoSelectEmbedSubtitle: false
@@ -137,8 +137,8 @@ struct KSPlayerEngine: PlayerEngine {
         }
 
         return TuningProfile(
-            preferredForwardBufferDuration: 3.0,
-            maxBufferDuration: 15.0,
+            preferredForwardBufferDuration: 1.5,
+            maxBufferDuration: 8.0,
             probesize: 2_000_000,
             maxAnalyzeDuration: 2_500_000,
             autoSelectEmbedSubtitle: true

@@ -221,13 +221,16 @@ import Testing
     // MARK: - Equatable
 
     @Test func equalityByAllFields() {
+        let fixedDate = Date(timeIntervalSinceReferenceDate: 1_000)
         let a = DownloadTask(
             id: "same-id", mediaId: "tt100", streamURL: "https://example.com/video.mkv", fileName: "video.mkv",
-            mediaTitle: "Test", mediaType: "movie", posterPath: "/test.jpg"
+            mediaTitle: "Test", mediaType: "movie", posterPath: "/test.jpg",
+            createdAt: fixedDate, updatedAt: fixedDate
         )
         let b = DownloadTask(
             id: "same-id", mediaId: "tt100", streamURL: "https://example.com/video.mkv", fileName: "video.mkv",
-            mediaTitle: "Test", mediaType: "movie", posterPath: "/test.jpg"
+            mediaTitle: "Test", mediaType: "movie", posterPath: "/test.jpg",
+            createdAt: fixedDate, updatedAt: fixedDate
         )
         #expect(a == b)
     }

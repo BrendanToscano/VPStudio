@@ -76,7 +76,23 @@ struct AppStateBootstrapMatrixTests {
             }
         )
 
-        let appState = AppState(testHooks: hooks)
+        let dbURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("appstate-bootstrap-matrix-\(data.id)-\(UUID().uuidString).sqlite")
+        defer {
+            let basePath = dbURL.path
+            try? FileManager.default.removeItem(atPath: basePath)
+            try? FileManager.default.removeItem(atPath: basePath + "-wal")
+            try? FileManager.default.removeItem(atPath: basePath + "-shm")
+        }
+        let database = try DatabaseManager(path: dbURL.path)
+        let secretStore = TestSecretStore()
+        let settingsManager = SettingsManager(database: database, secretStore: secretStore)
+        let appState = AppState(
+            database: database,
+            secretStore: secretStore,
+            settingsManager: settingsManager,
+            testHooks: hooks
+        )
         await appState.bootstrap()
 
         // Migration or debrid init failure is fatal — triggers setup mode

@@ -181,7 +181,7 @@ enum FeedbackScaleMode: String, Codable, Sendable, CaseIterable {
 
     static func fromStoredValue(_ rawValue: String?) -> Self {
         guard let rawValue, let mode = Self(rawValue: rawValue) else {
-            return .oneToTen
+            return .likeDislike
         }
         return mode.canonicalMode
     }

@@ -13,7 +13,10 @@ struct DiscoverViewModelAITests {
         [{"title":"Test Movie","year":2024,"type":"movie","reason":"Great","tmdbId":123}]
         """
     ) async throws -> (db: DatabaseManager, settings: SettingsManager, aiManager: AIAssistantManager) {
-        let db = try DatabaseManager()
+        let dbPath = FileManager.default.temporaryDirectory
+            .appendingPathComponent("DiscoverViewModelAITests-\(UUID().uuidString).sqlite")
+            .path
+        let db = try DatabaseManager(path: dbPath)
         try await db.migrate()
         let secretStore = TestSecretStore()
         let settings = SettingsManager(database: db, secretStore: secretStore)

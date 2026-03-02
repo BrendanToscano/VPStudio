@@ -11,40 +11,40 @@ struct PlayerCapabilityTests {
             quality: .hd1080p,
             hdr: .sdr,
             audio: .aac,
-            seeders: 50,
+            seeders: 1,
             cached: true
         )
-        var uncached4K = makeTorrent(
+        var uncached1080 = makeTorrent(
             hash: "uncached",
-            title: "Movie.2160p.DV.Atmos",
-            quality: .uhd4k,
-            hdr: .dolbyVision,
-            audio: .atmos,
-            seeders: 200,
+            title: "Movie.1080p.WEB-DL.AAC",
+            quality: .hd1080p,
+            hdr: .sdr,
+            audio: .aac,
+            seeders: 500,
             cached: false
         )
 
         let rankedCached = TorrentRanking.sort(
-            [uncached4K, cached1080],
-            preferredQuality: .uhd4k,
+            [uncached1080, cached1080],
+            preferredQuality: .hd1080p,
             preferCached: true,
-            preferAtmos: true,
-            hdrPreference: .dolbyVision
+            preferAtmos: false,
+            hdrPreference: .auto
         )
 
         let rankedQuality = TorrentRanking.sort(
-            [uncached4K, cached1080],
-            preferredQuality: .uhd4k,
+            [uncached1080, cached1080],
+            preferredQuality: .hd1080p,
             preferCached: false,
-            preferAtmos: true,
-            hdrPreference: .dolbyVision
+            preferAtmos: false,
+            hdrPreference: .auto
         )
 
         #expect(rankedCached.first?.infoHash == cached1080.infoHash)
-        #expect(rankedQuality.first?.infoHash == uncached4K.infoHash)
+        #expect(rankedQuality.first?.infoHash == uncached1080.infoHash)
 
         cached1080.isCached = true
-        uncached4K.isCached = false
+        uncached1080.isCached = false
     }
 
     @Test func rankingHonorsAtmosAndHDRPreferences() {

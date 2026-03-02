@@ -68,13 +68,13 @@ struct LibraryCSVMultiImportTests {
         #expect(summary2.rowsImported == 1)
         #expect(summary2.targetFolderName == "Horror Picks")
 
-        // Verify separate folders were created
+        // "Watchlist" resolves to the system root folder; only non-system names create custom folders.
         let folders = try await database.fetchAllLibraryFolders(listType: .watchlist)
         let customFolders = folders.filter { !$0.isSystem }
-        #expect(customFolders.count == 2)
+        #expect(customFolders.count == 1)
         let folderNames = Set(customFolders.map(\.name))
-        #expect(folderNames.contains("Watchlist"))
         #expect(folderNames.contains("Horror Picks"))
+        #expect(!folderNames.contains("Watchlist"))
     }
 
     @Test

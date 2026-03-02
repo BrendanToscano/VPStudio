@@ -230,4 +230,12 @@ struct TraktListMapping: Codable, Sendable, Identifiable, Equatable, FetchableRe
         self.listType = listType
         self.lastSyncedAt = lastSyncedAt
     }
+
+    static func == (lhs: TraktListMapping, rhs: TraktListMapping) -> Bool {
+        lhs.id == rhs.id
+            && lhs.traktListId == rhs.traktListId
+            && lhs.traktListSlug == rhs.traktListSlug
+            && lhs.localFolderId == rhs.localFolderId
+            && lhs.listType == rhs.listType
+    }
 }

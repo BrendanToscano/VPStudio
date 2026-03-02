@@ -122,7 +122,7 @@ enum SettingsDestination: String, CaseIterable, Sendable, Identifiable {
         case .environments:
             return ["immersive", "skybox", "hdri", "usdz", "reality"]
         case .ai:
-            return ["openai", "anthropic", "ollama", "llm", "assistant", "ratings"]
+            return ["openai", "anthropic", "ollama", "llm", "assistant", "ratings", "imdb", "csv", "import"]
         case .trakt:
             return ["watch history", "watchlist", "oauth", "scrobble"]
         case .simkl:
