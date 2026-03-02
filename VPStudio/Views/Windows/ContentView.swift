@@ -438,7 +438,7 @@ struct VPBottomTabBar: View {
         .accessibilityHint(TabBarAccessibilityPolicy.accessibilityHint(for: tab))
         #if os(visionOS)
         .hoverEffect(.highlight)
-        #else
+        #elseif os(macOS)
         .onHover { isHovered in
             withAnimation(.easeInOut(duration: 0.15)) {
                 hoveredTab = isHovered ? tab : nil

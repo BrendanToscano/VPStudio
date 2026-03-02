@@ -72,7 +72,9 @@ struct VPStudioApp: App {
             }
         }
         .defaultSize(width: 1400, height: 788)
+        #if !os(iOS)
         .windowStyle(.plain)
+        #endif
         #if os(visionOS)
         .windowResizability(.automatic)
         #endif
