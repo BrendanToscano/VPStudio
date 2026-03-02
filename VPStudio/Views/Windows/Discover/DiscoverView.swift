@@ -104,16 +104,35 @@ struct DiscoverView: View {
         .navigationDestination(item: $selectedItem) { item in
             DetailView(preview: item)
         }
-        .appErrorAlert(
-            "Discover Error",
-            error: Binding(
-                get: { viewModel.error },
-                set: { viewModel.error = $0 }
-            ),
-            onRetry: {
-                Task { await viewModel.refresh() }
+        .alert(
+            discoverAlertTitle,
+            isPresented: Binding(
+                get: { viewModel.error != nil },
+                set: { isPresented in
+                    if !isPresented {
+                        viewModel.error = nil
+                    }
+                }
+            )
+        ) {
+            if isDiscoverSetupError {
+                Button("Open Settings") {
+                    appState.selectedTab = .settings
+                    viewModel.error = nil
+                }
             }
-        )
+
+            Button("Retry") {
+                Task { await viewModel.refresh() }
+                viewModel.error = nil
+            }
+
+            Button("Dismiss", role: .cancel) {
+                viewModel.error = nil
+            }
+        } message: {
+            Text(discoverAlertMessage)
+        }
         .refreshable {
             await viewModel.refresh()
         }
@@ -165,6 +184,30 @@ struct DiscoverView: View {
     }
 
     // MARK: - AI Curated Section
+
+    private var discoverAlertTitle: String {
+        isDiscoverSetupError ? "Finish Setup to Use Discover" : "Discover Error"
+    }
+
+    private var discoverAlertMessage: String {
+        guard let error = viewModel.error else { return "Unknown error." }
+
+        if isDiscoverSetupError {
+            return "\(error.errorDescription ?? "Discover is not configured yet.")\n\nYou can still browse Library and Downloads now. When ready, open Settings and complete Movie & TV metadata setup."
+        }
+
+        if let suggestion = error.recoverySuggestion, !suggestion.isEmpty {
+            return "\(error.errorDescription ?? "Something went wrong.")\n\n\(suggestion)"
+        }
+
+        return error.errorDescription ?? "Something went wrong."
+    }
+
+    private var isDiscoverSetupError: Bool {
+        guard let error = viewModel.error else { return false }
+        let description = (error.errorDescription ?? "").lowercased()
+        return description.contains("tmdb") && description.contains("key")
+    }
 
     @ViewBuilder
     private var aiCuratedSection: some View {
