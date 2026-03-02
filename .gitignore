@@ -11,6 +11,9 @@ DerivedData/
 *.xcodeproj/project.xcworkspace/xcuserdata/
 *.xcuserstate
 
+# Local smoke artifacts
+.smoke-runs/
+
 # Local env / secrets
 .env
 .env.*

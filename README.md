@@ -81,6 +81,7 @@ For full streaming behavior, configure at least a TMDB API key and one debrid pr
 ### Troubleshooting
 
 - **No simulator:** Install visionOS runtime from Xcode -> Settings -> Components.
+- **Wrong destination errors (e.g., iOS Simulator not found):** VPStudio currently targets visionOS. Use `tools/build-simulator.sh` to auto-select a valid Vision Pro simulator destination.
 - **Package resolution:** Reset caches (`File -> Packages -> Reset Package Caches`), then resolve again.
 - **`pkg-config` / `sdl2` warning:** `brew install pkg-config sdl2`, clean (`Shift+Cmd+K`), rebuild.
 - **No metadata:** Check TMDB key in Settings.
