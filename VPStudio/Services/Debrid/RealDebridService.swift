@@ -21,7 +21,7 @@ actor RealDebridService: DebridServiceProtocol {
         let formatter = ISO8601DateFormatter()
         let expiry = user.expiration.flatMap { formatter.date(from: $0) }
         return DebridAccountInfo(
-            username: user.username,
+            username: user.username ?? "Unknown",
             email: user.email,
             premiumExpiry: expiry,
             isPremium: user.type == "premium"
@@ -30,11 +30,14 @@ actor RealDebridService: DebridServiceProtocol {
 
     /// Validates that a string looks like a hex info-hash (40 or 64 hex chars).
     /// Prevents path-traversal or URL corruption when hashes are embedded in URL paths.
-    private static let hexHashPattern = try! NSRegularExpression(pattern: "^[0-9a-fA-F]{40,64}$")
+    private static var hexHashPattern: NSRegularExpression? {
+        try? NSRegularExpression(pattern: "^[0-9a-fA-F]{40,64}$")
+    }
 
     private static func isValidHexHash(_ hash: String) -> Bool {
+        guard let pattern = hexHashPattern else { return false }
         let range = NSRange(hash.startIndex..<hash.endIndex, in: hash)
-        return hexHashPattern.firstMatch(in: hash, range: range) != nil
+        return pattern.firstMatch(in: hash, range: range) != nil
     }
 
     func checkCache(hashes: [String]) async throws -> [String: CacheStatus] {
@@ -72,14 +75,17 @@ actor RealDebridService: DebridServiceProtocol {
     func addMagnet(hash: String) async throws -> String {
         // Check if torrent already exists
         let existing: [RDTorrentInfo] = try await request(method: "GET", path: "/torrents?limit=2500")
-        if let found = existing.first(where: { $0.hash?.lowercased() == hash.lowercased() }) {
-            return found.id
+        if let found = existing.first(where: { $0.hash?.lowercased() == hash.lowercased() }), let id = found.id {
+            return id
         }
 
         let magnet = "magnet:?xt=urn:btih:\(hash)"
         let body = "magnet=\(magnet.addingPercentEncoding(withAllowedCharacters: Self.formEncodingAllowed) ?? magnet)"
         let response: RDAddMagnetResponse = try await request(method: "POST", path: "/torrents/addMagnet", body: body)
-        return response.id
+        guard let id = response.id else {
+            throw DebridError.invalidHash(hash)
+        }
+        return id
     }
 
     func selectFiles(torrentId: String, fileIds: [Int]) async throws {
@@ -122,7 +128,7 @@ actor RealDebridService: DebridServiceProtocol {
     func unrestrict(link: String) async throws -> URL {
         let body = "link=\(link.addingPercentEncoding(withAllowedCharacters: Self.formEncodingAllowed) ?? link)"
         let response: RDUnrestrictResponse = try await request(method: "POST", path: "/unrestrict/link", body: body)
-        guard let url = URL(string: response.download) else {
+        guard let download = response.download, let url = URL(string: download) else {
             throw DebridError.networkError("Invalid unrestrict URL")
         }
         return url
@@ -177,9 +183,9 @@ actor RealDebridService: DebridServiceProtocol {
 // MARK: - Real-Debrid API Models
 
 private struct RDUserResponse: Sendable {
-    let username: String
-    let email: String
-    let type: String
+    let username: String?
+    let email: String?
+    let type: String?
     let expiration: String?
 }
 extension RDUserResponse: Decodable {}
@@ -194,7 +200,7 @@ private struct RDAddMagnetResponse: Sendable {
 extension RDAddMagnetResponse: Decodable {}
 
 private struct RDTorrentInfo: Sendable {
-    let id: String
+    let id: String?
     let filename: String?
     let hash: String?
     let bytes: Int64?
@@ -204,9 +210,9 @@ private struct RDTorrentInfo: Sendable {
 extension RDTorrentInfo: Decodable {}
 
 private struct RDUnrestrictResponse: Sendable {
-    let id: String
-    let filename: String
-    let download: String
+    let id: String?
+    let filename: String?
+    let download: String?
     let filesize: Int64?
 }
 extension RDUnrestrictResponse: Decodable {}

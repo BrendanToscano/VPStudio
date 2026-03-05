@@ -155,9 +155,10 @@ final class PlayerLoadingTipRotator: @unchecked Sendable {
         rotationTask = Task { [weak self] in
             guard let self else { return }
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(self.interval))
+                let interval = await MainActor.run { self.interval }
+                try? await Task.sleep(for: .seconds(interval))
                 guard !Task.isCancelled else { return }
-                self.advance()
+                await self.advance()
             }
         }
     }

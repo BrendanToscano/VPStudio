@@ -6,10 +6,12 @@ struct AISettingsView: View {
     @Environment(AppState.self) private var appState
     @State private var anthropicKey = ""
     @State private var openAIKey = ""
+    @State private var geminiKey = ""
     @State private var ollamaURL = "http://localhost:11434"
     @State private var selectedProvider: AIProviderKind = .anthropic
     @State private var anthropicModelID: String = AIModelCatalog.defaultModel(for: .anthropic)?.id ?? ""
     @State private var openAIModelID: String = AIModelCatalog.defaultModel(for: .openAI)?.id ?? ""
+    @State private var geminiModelID: String = AIModelCatalog.defaultModel(for: .gemini)?.id ?? ""
     @State private var ollamaModelID: String = AIModelCatalog.defaultModel(for: .ollama)?.id ?? ""
     @State private var feedbackScaleMode: FeedbackScaleMode = .likeDislike
     @State private var likedTitles: [String] = []
@@ -17,6 +19,7 @@ struct AISettingsView: View {
     @State private var recentRatings: [String] = []
     @State private var anthropicSaveTask: Task<Void, Never>?
     @State private var openAISaveTask: Task<Void, Never>?
+    @State private var geminiSaveTask: Task<Void, Never>?
     @State private var feedbackReloadTask: Task<Void, Never>?
     @State private var sessionUsage: AIUsageSummary = .empty
     @State private var lifetimeUsage: AIUsageSummary = .empty
@@ -26,6 +29,7 @@ struct AISettingsView: View {
     // Live-fetched model lists (fall back to static catalog)
     @State private var anthropicModels: [AIModelDefinition] = AIModelCatalog.models(for: .anthropic)
     @State private var openAIModels: [AIModelDefinition] = AIModelCatalog.models(for: .openAI)
+    @State private var geminiModels: [AIModelDefinition] = AIModelCatalog.models(for: .gemini)
     @State private var ollamaModels: [AIModelDefinition] = AIModelCatalog.models(for: .ollama)
     @State private var isFetchingModels = false
 
@@ -38,6 +42,7 @@ struct AISettingsView: View {
                 Picker("Provider", selection: $selectedProvider) {
                     Text("Anthropic Claude").tag(AIProviderKind.anthropic)
                     Text("OpenAI").tag(AIProviderKind.openAI)
+                    Text("Google Gemini").tag(AIProviderKind.gemini)
                     Text("Ollama (Local)").tag(AIProviderKind.ollama)
                 }
             }
@@ -61,6 +66,18 @@ struct AISettingsView: View {
                 }
                 Picker("Model", selection: $openAIModelID) {
                     ForEach(openAIModels) { model in
+                        Text(model.displayName).tag(model.id)
+                    }
+                }
+            }
+
+            Section("Google Gemini") {
+                HStack {
+                    SecureField("API Key", text: $geminiKey)
+                    PasteFieldButton { geminiKey = $0 }
+                }
+                Picker("Model", selection: $geminiModelID) {
+                    ForEach(geminiModels) { model in
                         Text(model.displayName).tag(model.id)
                     }
                 }
@@ -137,6 +154,7 @@ struct AISettingsView: View {
         .task {
             anthropicKey = (try? await appState.settingsManager.getString(key: SettingsKeys.anthropicApiKey)) ?? ""
             openAIKey = (try? await appState.settingsManager.getString(key: SettingsKeys.openAIApiKey)) ?? ""
+            geminiKey = (try? await appState.settingsManager.getString(key: SettingsKeys.geminiApiKey)) ?? ""
             ollamaURL = (try? await appState.settingsManager.getString(key: SettingsKeys.ollamaEndpoint)) ?? "http://localhost:11434"
 
             let storedAnthropicModel = try? await appState.settingsManager.getString(key: SettingsKeys.anthropicModelPreset)
@@ -144,6 +162,9 @@ struct AISettingsView: View {
 
             let storedOpenAIModel = try? await appState.settingsManager.getString(key: SettingsKeys.openAIModelPreset)
             openAIModelID = storedOpenAIModel ?? AIModelCatalog.defaultModel(for: .openAI)?.id ?? "gpt-5.2"
+
+            let storedGeminiModel = try? await appState.settingsManager.getString(key: SettingsKeys.geminiModelPreset)
+            geminiModelID = storedGeminiModel ?? AIModelCatalog.defaultModel(for: .gemini)?.id ?? "gemini-2.0-flash"
 
             let storedOllamaModel = try? await appState.settingsManager.getString(key: SettingsKeys.ollamaModelPreset)
             ollamaModelID = storedOllamaModel ?? AIModelCatalog.defaultModel(for: .ollama)?.id ?? "llama3.1"
@@ -178,11 +199,23 @@ struct AISettingsView: View {
                 await refreshOpenAIModels()
             }
         }
+        .onChange(of: geminiKey) { _, newValue in
+            geminiSaveTask?.cancel()
+            geminiSaveTask = Task {
+                try? await Task.sleep(for: .milliseconds(500))
+                guard !Task.isCancelled else { return }
+                try? await appState.settingsManager.setString(key: SettingsKeys.geminiApiKey, value: newValue)
+                await appState.configureAIProviders()
+                await refreshGeminiModels()
+            }
+        }
         .onDisappear {
             anthropicSaveTask?.cancel()
             anthropicSaveTask = nil
             openAISaveTask?.cancel()
             openAISaveTask = nil
+            geminiSaveTask?.cancel()
+            geminiSaveTask = nil
             feedbackReloadTask?.cancel()
             feedbackReloadTask = nil
         }
@@ -201,6 +234,12 @@ struct AISettingsView: View {
         .onChange(of: openAIModelID) { _, newValue in
             Task {
                 try? await appState.settingsManager.setString(key: SettingsKeys.openAIModelPreset, value: newValue)
+                await appState.configureAIProviders()
+            }
+        }
+        .onChange(of: geminiModelID) { _, newValue in
+            Task {
+                try? await appState.settingsManager.setString(key: SettingsKeys.geminiModelPreset, value: newValue)
                 await appState.configureAIProviders()
             }
         }
@@ -315,8 +354,9 @@ struct AISettingsView: View {
         defer { isFetchingModels = false }
         async let anthropic: Void = refreshAnthropicModels()
         async let openAI: Void = refreshOpenAIModels()
+        async let gemini: Void = refreshGeminiModels()
         async let ollama: Void = refreshOllamaModels()
-        _ = await (anthropic, openAI, ollama)
+        _ = await (anthropic, openAI, gemini, ollama)
     }
 
     @MainActor
@@ -334,6 +374,15 @@ struct AISettingsView: View {
         if !fetched.isEmpty {
             openAIModels = fetched
             ensureSelectionValid(modelID: &openAIModelID, in: openAIModels)
+        }
+    }
+
+    @MainActor
+    private func refreshGeminiModels() async {
+        let fetched = await AIModelFetcher.fetchGeminiModels(apiKey: geminiKey)
+        if !fetched.isEmpty {
+            geminiModels = fetched
+            ensureSelectionValid(modelID: &geminiModelID, in: geminiModels)
         }
     }
 

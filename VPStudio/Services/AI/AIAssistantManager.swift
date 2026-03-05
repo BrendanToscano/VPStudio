@@ -31,6 +31,8 @@ actor AIAssistantManager {
             providers[.openAI] = OpenAIProvider(apiKey: apiKey, model: model ?? defaultModelID ?? "gpt-5.2")
         case .ollama:
             providers[.ollama] = OllamaProvider(baseURL: baseURL ?? "http://localhost:11434", model: model ?? defaultModelID ?? "llama3.1")
+        case .gemini:
+            providers[.gemini] = GeminiProvider(apiKey: apiKey, model: model ?? defaultModelID ?? "gemini-2.0-flash", baseURL: baseURL ?? "https://generativelanguage.googleapis.com/v1beta")
         }
     }
 
@@ -441,7 +443,7 @@ actor AIAssistantManager {
             requestType: requestType
         )
         let database = self.database
-        Task.detached {
+        Task.detached { [database] in
             try? await database.saveAIUsageRecord(record)
         }
     }
