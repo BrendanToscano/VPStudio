@@ -109,6 +109,8 @@ struct PlayerView: View {
     @State private var apmpInjector = APMPInjector()
     @State private var isAPMPActive = false
     @State private var playerWindowScene: UIWindowScene?
+    @State private var immersiveLifecycleTask: Task<Void, Never>?
+    @State private var visionGeometryTask: Task<Void, Never>?
     #endif
 
     // MARK: - Aspect Ratio
@@ -166,8 +168,17 @@ struct PlayerView: View {
             onCycleRate: { cyclePlaybackRate() },
             onToggleSubtitles: { isShowingSubtitlePicker.toggle() },
             onToggleAudio: { isShowingAudioPicker.toggle() },
-            onRequestEnvironmentSwitch: { Task { await loadEnvironmentAssets() } },
-            onDismiss: { Task { await dismissImmersiveIfNeeded(reason: .userInitiated) } }
+            onRequestEnvironmentSwitch: {
+                scheduleImmersiveLifecycleTask {
+                    await loadEnvironmentAssets()
+                    isShowingEnvironmentPicker = true
+                }
+            },
+            onDismiss: {
+                scheduleImmersiveLifecycleTask {
+                    await dismissImmersiveIfNeeded(reason: .userInitiated)
+                }
+            }
         ))
         #endif
         #if os(macOS)
@@ -205,10 +216,14 @@ struct PlayerView: View {
         .sheet(isPresented: $isShowingEnvironmentPicker) {
             EnvironmentPickerSheet(
                 onSelect: { asset in
-                    Task { await openEnvironment(asset) }
+                    scheduleImmersiveLifecycleTask {
+                        await openEnvironment(asset)
+                    }
                 },
                 onDismiss: {
-                    Task { await dismissImmersiveIfNeeded(reason: .userInitiated) }
+                    scheduleImmersiveLifecycleTask {
+                        await dismissImmersiveIfNeeded(reason: .userInitiated)
+                    }
                 }
             )
             .environment(appState)
@@ -269,6 +284,11 @@ struct PlayerView: View {
             #if os(visionOS)
             scenePhaseTask?.cancel()
             memoryPressureTask?.cancel()
+            immersiveLifecycleTask?.cancel()
+            immersiveLifecycleTask = nil
+            visionGeometryTask?.cancel()
+            visionGeometryTask = nil
+            playerWindowScene = nil
             #endif
             Task { await saveWatchProgress() }
             cleanupPlayback()
@@ -284,7 +304,7 @@ struct PlayerView: View {
                 downloadedSubtitleFileURL = nil
             }
             #if os(visionOS)
-            Task {
+            scheduleImmersiveLifecycleTask {
                 await dismissImmersiveIfNeeded(reason: .playerClosed)
                 scheduleMainWindowRestoreIfNeeded()
             }
@@ -302,8 +322,12 @@ struct PlayerView: View {
         }
         #if os(visionOS)
         .onChange(of: scenePhase) { _, phase in
-            scenePhaseTask?.cancel()
-            scenePhaseTask = Task { await handleScenePhaseChange(phase) }
+            let previousSceneTask = scenePhaseTask
+            scenePhaseTask = Task {
+                await previousSceneTask?.value
+                guard !Task.isCancelled else { return }
+                await handleScenePhaseChange(phase)
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)) { _ in
             memoryPressureTask?.cancel()
@@ -572,7 +596,9 @@ struct PlayerView: View {
                     } else {
                         ForEach(environmentAssets, id: \.id) { asset in
                             Button {
-                                Task { await openEnvironment(asset) }
+                                scheduleImmersiveLifecycleTask {
+                                    await openEnvironment(asset)
+                                }
                             } label: {
                                 HStack {
                                     Text(asset.name)
@@ -586,7 +612,9 @@ struct PlayerView: View {
                     }
                     if appState.isImmersiveSpaceOpen {
                         Button(role: .destructive) {
-                            Task { await dismissImmersiveIfNeeded(reason: .userInitiated) }
+                            scheduleImmersiveLifecycleTask {
+                                await dismissImmersiveIfNeeded(reason: .userInitiated)
+                            }
                         } label: {
                             Label("Exit Environment", systemImage: "xmark.circle")
                         }
@@ -690,7 +718,9 @@ struct PlayerView: View {
             // Environment toggle pill — always visible so users can discover/import environments
             Button {
                 if appState.isImmersiveSpaceOpen {
-                    Task { await dismissImmersiveIfNeeded(reason: .userInitiated) }
+                    scheduleImmersiveLifecycleTask {
+                        await dismissImmersiveIfNeeded(reason: .userInitiated)
+                    }
                 } else {
                     isShowingEnvironmentPicker = true
                 }
@@ -1194,7 +1224,7 @@ struct PlayerView: View {
         if PlayerLifecyclePolicy.dismissesCurrentPresentationOnBack {
             dismiss()
         }
-        Task {
+        scheduleImmersiveLifecycleTask {
             await dismissImmersiveIfNeeded(reason: .playerClosed)
         }
         #elseif os(macOS)
@@ -1215,6 +1245,11 @@ struct PlayerView: View {
         scenePhaseTask = nil
         memoryPressureTask?.cancel()
         memoryPressureTask = nil
+        immersiveLifecycleTask?.cancel()
+        immersiveLifecycleTask = nil
+        visionGeometryTask?.cancel()
+        visionGeometryTask = nil
+        playerWindowScene = nil
     }
     #endif
 
@@ -1786,31 +1821,45 @@ struct PlayerView: View {
 
     #if os(visionOS)
     private func applyVisionOSWindowGeometry() {
-        guard let windowScene = playerWindowScene else { return }
+        visionGeometryTask?.cancel()
+
+        guard let windowScene = playerWindowScene else {
+            visionGeometryTask = nil
+            return
+        }
 
         let ratio = detectedVideoRatio ?? (16.0 / 9.0)
-        let currentWidth = max(windowScene.coordinateSpace.bounds.width, 1400)
-        let targetHeight = currentWidth / ratio
-        let targetSize = CGSize(width: currentWidth, height: targetHeight)
+        let trackedSceneID = ObjectIdentifier(windowScene)
 
-        // Force the window into the video's aspect ratio by briefly locking
-        // min = max, then relax to allow proportional user resizing.
-        let forceGeometry = UIWindowScene.GeometryPreferences.Vision(
-            minimumSize: targetSize,
-            maximumSize: targetSize,
-            resizingRestrictions: .uniform
-        )
-        windowScene.requestGeometryUpdate(forceGeometry)
+        visionGeometryTask = Task { @MainActor in
+            guard let liveScene = playerWindowScene,
+                  ObjectIdentifier(liveScene) == trackedSceneID else { return }
 
-        Task { @MainActor in
+            let currentWidth = max(liveScene.coordinateSpace.bounds.width, 1400)
+            let targetHeight = currentWidth / ratio
+            let targetSize = CGSize(width: currentWidth, height: targetHeight)
+
+            // Force the window into the video's aspect ratio by briefly locking
+            // min = max, then relax to allow proportional user resizing.
+            let forceGeometry = UIWindowScene.GeometryPreferences.Vision(
+                minimumSize: targetSize,
+                maximumSize: targetSize,
+                resizingRestrictions: .uniform
+            )
+            liveScene.requestGeometryUpdate(forceGeometry)
+
             try? await Task.sleep(for: .milliseconds(400))
-            guard let windowScene = playerWindowScene else { return }
+            guard !Task.isCancelled else { return }
+            guard let liveScene = playerWindowScene,
+                  ObjectIdentifier(liveScene) == trackedSceneID else { return }
+
             let relaxed = UIWindowScene.GeometryPreferences.Vision(
                 minimumSize: CGSize(width: 640, height: 640 / ratio),
                 maximumSize: CGSize(width: 3840, height: 3840 / ratio),
                 resizingRestrictions: .uniform
             )
-            windowScene.requestGeometryUpdate(relaxed)
+            liveScene.requestGeometryUpdate(relaxed)
+            visionGeometryTask = nil
         }
     }
     #endif
@@ -1830,6 +1879,16 @@ struct PlayerView: View {
     #endif
 
     #if os(visionOS)
+    private func scheduleImmersiveLifecycleTask(_ operation: @escaping @MainActor () async -> Void) {
+        immersiveLifecycleTask?.cancel()
+        immersiveLifecycleTask = Task { @MainActor in
+            await operation()
+            if !Task.isCancelled {
+                immersiveLifecycleTask = nil
+            }
+        }
+    }
+
     private func openEnvironment(_ asset: EnvironmentAsset) async {
         // Skip if this asset is already active and the space is open
         if asset.id == appState.selectedEnvironmentAsset?.id && appState.isImmersiveSpaceOpen {
@@ -1859,6 +1918,7 @@ struct PlayerView: View {
         guard appState.beginImmersiveTransition() else { return }
         appState.stageImmersiveDismiss(reason: reason)
         await dismissImmersiveSpace()
+        await appState.settleImmersiveDismissal()
     }
 
     private func handleScenePhaseChange(_ phase: ScenePhase) async {

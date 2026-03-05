@@ -11,6 +11,7 @@ struct CustomEnvironmentView: View {
 
     @State private var headTracker = HeadTracker()
     @State private var isShowingImmersiveControls = false
+    @State private var sceneRoot: Entity?
     @State private var cinemaScreen: ModelEntity?
     @State private var controlsAnchor: Entity?
     @State private var lastMaterialSourceID: ObjectIdentifier?
@@ -18,6 +19,11 @@ struct CustomEnvironmentView: View {
 
     var body: some View {
         RealityView { content, attachments in
+            let root = Entity()
+            root.name = "custom-root"
+            content.add(root)
+            sceneRoot = root
+
             guard let selected = appState.selectedEnvironmentAsset else {
                 logger.warning("No selectedEnvironmentAsset — space opened prematurely?")
                 return
@@ -30,7 +36,7 @@ struct CustomEnvironmentView: View {
 
             do {
                 let entity = try await Entity(contentsOf: url)
-                content.add(entity)
+                root.addChild(entity)
                 cinemaScreen = findScreenEntity(in: entity)
             } catch {
                 logger.error("Entity(contentsOf:) failed — \(error.localizedDescription, privacy: .public)")
@@ -43,20 +49,24 @@ struct CustomEnvironmentView: View {
             tapCatcher.components.set(CollisionComponent(shapes: [tapShape], mode: .trigger, filter: .default))
             tapCatcher.components.set(InputTargetComponent(allowedInputTypes: .indirect))
             tapCatcher.position = SIMD3<Float>(0, 0, -5)
-            content.add(tapCatcher)
+            root.addChild(tapCatcher)
 
             // MARK: Controls anchor
             let anchor = Entity()
             anchor.name = "controls-anchor"
-            content.add(anchor)
+            root.addChild(anchor)
             controlsAnchor = anchor
 
             if let controlsPanel = attachments.entity(for: "playerControls") {
-                controlsPanel.position = SIMD3<Float>(0, -0.15, -1.5)
+                controlsPanel.position = SIMD3<Float>(
+                    0,
+                    ImmersiveControlsPolicy.controlsVerticalOffset,
+                    -ImmersiveControlsPolicy.controlsForwardOffset
+                )
                 anchor.addChild(controlsPanel)
             }
 
-        } update: { content, attachments in
+        } update: { _, attachments in
             // MARK: Cinema screen material (cached)
             if let screen = cinemaScreen {
                 let currentSourceID: ObjectIdentifier? = {
@@ -78,14 +88,38 @@ struct CustomEnvironmentView: View {
             }
 
             // MARK: Controls anchor tracking
-            if headTracker.isTracking, let anchor = controlsAnchor {
-                let m = headTracker.headTransform
-                let col3 = m.columns.3
-                let headPos = SIMD3<Float>(col3.x, col3.y - 0.15, col3.z)
-                let col2 = m.columns.2
-                let forward = normalize(SIMD3<Float>(-col2.x, 0, -col2.z))
-                let target = headPos + forward * 1.5
-                anchor.position = simd_mix(anchor.position, target, SIMD3<Float>(repeating: 0.08))
+            if let anchor = controlsAnchor {
+                if let controlsPanel = attachments.entity(for: "playerControls"),
+                   controlsPanel.parent !== anchor {
+                    controlsPanel.position = SIMD3<Float>(
+                        0,
+                        ImmersiveControlsPolicy.controlsVerticalOffset,
+                        -ImmersiveControlsPolicy.controlsForwardOffset
+                    )
+                    anchor.addChild(controlsPanel)
+                }
+
+                if headTracker.isTracking {
+                    let m = headTracker.headTransform
+                    let col3 = m.columns.3
+                    let headPos = SIMD3<Float>(
+                        col3.x,
+                        col3.y + ImmersiveControlsPolicy.controlsVerticalOffset,
+                        col3.z
+                    )
+                    let col2 = m.columns.2
+                    let planarForward = SIMD3<Float>(-col2.x, 0, -col2.z)
+                    let forward = simd_length_squared(planarForward) > 0.0001
+                        ? normalize(planarForward)
+                        : SIMD3<Float>(0, 0, -1)
+                    let target = headPos + forward * ImmersiveControlsPolicy.controlsForwardOffset
+                    anchor.position = ImmersiveControlsPolicy.smoothedPosition(
+                        current: anchor.position,
+                        target: target
+                    )
+                } else {
+                    anchor.position = ImmersiveControlsPolicy.fallbackControlsPosition
+                }
             }
 
         } attachments: {
@@ -130,7 +164,10 @@ struct CustomEnvironmentView: View {
             scheduleAutoDismiss()
         }
         .onAppear {
+            resetStateForReentry()
             appState.immersiveSpaceDidAppear(.customEnvironment)
+            headTracker.stop()
+            headTracker.isIdle = true
             headTracker.start()
         }
         .onDisappear {
@@ -138,20 +175,35 @@ struct CustomEnvironmentView: View {
             autoDismissTask = nil
             appState.immersiveSpaceDidDisappear()
             headTracker.stop()
+            headTracker.isIdle = true
 
             // Break lingering RealityKit references.
+            sceneRoot?.removeFromParent()
+            sceneRoot = nil
             cinemaScreen = nil
             controlsAnchor = nil
             lastMaterialSourceID = nil
+            isShowingImmersiveControls = false
         }
     }
 
-    /// Schedules auto-hide of controls after 10 seconds (OpenImmersive pattern).
+    private func resetStateForReentry() {
+        autoDismissTask?.cancel()
+        autoDismissTask = nil
+        isShowingImmersiveControls = false
+        lastMaterialSourceID = nil
+        sceneRoot?.removeFromParent()
+        sceneRoot = nil
+        cinemaScreen = nil
+        controlsAnchor = nil
+    }
+
+    /// Schedules auto-hide of controls after the shared immersive policy interval.
     private func scheduleAutoDismiss() {
         autoDismissTask?.cancel()
         guard isShowingImmersiveControls else { return }
         autoDismissTask = Task {
-            try? await Task.sleep(for: .seconds(10))
+            try? await Task.sleep(for: ImmersiveControlsPolicy.autoDismissInterval)
             guard !Task.isCancelled else { return }
             withAnimation(.easeInOut(duration: 0.25)) {
                 isShowingImmersiveControls = false

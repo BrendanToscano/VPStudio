@@ -53,6 +53,7 @@ struct HDRISkyboxEnvironment: View {
 
     @State private var headTracker = HeadTracker()
     @State private var isShowingImmersiveControls = false
+    @State private var sceneRoot: Entity?
     @State private var cinemaScreen: ModelEntity?
     @State private var controlsAnchor: Entity?
     @State private var didAnchorScreenToHead = false
@@ -73,6 +74,11 @@ struct HDRISkyboxEnvironment: View {
 
     var body: some View {
         RealityView { content, attachments in
+            let root = Entity()
+            root.name = "hdri-root"
+            content.add(root)
+            sceneRoot = root
+
             // MARK: Placeholder sphere (dark gradient while HDRI loads)
             let placeholderMesh = MeshResource.generateSphere(radius: 999)
             var placeholderMat = UnlitMaterial()
@@ -80,7 +86,7 @@ struct HDRISkyboxEnvironment: View {
             let placeholder = ModelEntity(mesh: placeholderMesh, materials: [placeholderMat])
             placeholder.scale *= SIMD3<Float>(x: -1, y: 1, z: 1)
             placeholder.name = "hdri-placeholder"
-            content.add(placeholder)
+            root.addChild(placeholder)
 
             // MARK: Cinema screen (default position, repositioned by head tracker)
             let preset = screenSizePreset
@@ -89,7 +95,7 @@ struct HDRISkyboxEnvironment: View {
             let screen = ModelEntity(mesh: screenMesh, materials: [screenMat])
             screen.name = "cinema-screen"
             screen.position = SIMD3<Float>(0, 1.6, -preset.distance)
-            content.add(screen)
+            root.addChild(screen)
             cinemaScreen = screen
 
             // MARK: TapCatcher
@@ -99,12 +105,12 @@ struct HDRISkyboxEnvironment: View {
             tapCatcher.components.set(CollisionComponent(shapes: [tapShape], mode: .trigger, filter: .default))
             tapCatcher.components.set(InputTargetComponent(allowedInputTypes: .indirect))
             tapCatcher.position = SIMD3<Float>(0, 0, -5)
-            content.add(tapCatcher)
+            root.addChild(tapCatcher)
 
             // MARK: Controls anchor
             let anchor = Entity()
             anchor.name = "controls-anchor"
-            content.add(anchor)
+            root.addChild(anchor)
             controlsAnchor = anchor
 
             if let controlsPanel = attachments.entity(for: "playerControls") {
@@ -115,7 +121,7 @@ struct HDRISkyboxEnvironment: View {
             // MARK: Loading indicator attachment
             if let loadingPanel = attachments.entity(for: "loadingIndicator") {
                 loadingPanel.position = SIMD3<Float>(0, 1.6, -4)
-                content.add(loadingPanel)
+                root.addChild(loadingPanel)
             }
 
             // MARK: Async HDRI load
@@ -155,7 +161,7 @@ struct HDRISkyboxEnvironment: View {
                     skyEntity.orientation = simd_quatf(angle: yawRadians, axis: [0, 1, 0])
                 }
                 skyEntity.name = "hdri-sky"
-                content.add(skyEntity)
+                root.addChild(skyEntity)
 
                 // Remove placeholder
                 placeholder.removeFromParent()
@@ -176,7 +182,7 @@ struct HDRISkyboxEnvironment: View {
                     source: .single(environmentResource),
                     intensityExponent: 1.0
                 ))
-                content.add(iblEntity)
+                root.addChild(iblEntity)
 
                 // MARK: Ground plane
                 let groundMaterial = SimpleMaterial(
@@ -190,7 +196,7 @@ struct HDRISkyboxEnvironment: View {
                 )
                 ground.name = "hdri-ground"
                 ground.components.set(ImageBasedLightReceiverComponent(imageBasedLight: iblEntity))
-                content.add(ground)
+                root.addChild(ground)
 
                 // MARK: Ambient floor rim
                 let rimMesh = MeshResource.generatePlane(width: 22, depth: 22)
@@ -199,7 +205,7 @@ struct HDRISkyboxEnvironment: View {
                 let rimEntity = ModelEntity(mesh: rimMesh, materials: [rimMat])
                 rimEntity.name = "hdri-floor-rim"
                 rimEntity.position.y = 0.001
-                content.add(rimEntity)
+                root.addChild(rimEntity)
 
                 loadingState = .loaded
 
@@ -238,7 +244,10 @@ struct HDRISkyboxEnvironment: View {
                 let col3 = initial.columns.3
                 let headPos = SIMD3<Float>(col3.x, col3.y, col3.z)
                 let col2 = initial.columns.2
-                let forward = normalize(SIMD3<Float>(-col2.x, 0, -col2.z))
+                let planarForward = SIMD3<Float>(-col2.x, 0, -col2.z)
+                let forward = simd_length_squared(planarForward) > 0.0001
+                    ? normalize(planarForward)
+                    : SIMD3<Float>(0, 0, -1)
                 let dist = screenSizePreset.distance
                 let screenPos = headPos + forward * dist
                 let finalScreenPos = SIMD3<Float>(screenPos.x, headPos.y, screenPos.z)
@@ -246,8 +255,26 @@ struct HDRISkyboxEnvironment: View {
                 didAnchorScreenToHead = true
             }
 
-            // MARK: Controls anchor tracking
+            // MARK: Loading indicator and controls attachment lifecycle
+            if let loadingPanel = attachments.entity(for: "loadingIndicator") {
+                switch loadingState {
+                case .loading, .failed:
+                    loadingPanel.position = SIMD3<Float>(0, 1.6, -4)
+                    if loadingPanel.parent == nil {
+                        sceneRoot?.addChild(loadingPanel)
+                    }
+                case .loaded:
+                    loadingPanel.removeFromParent()
+                }
+            }
+
             if let anchor = controlsAnchor {
+                if let controlsPanel = attachments.entity(for: "playerControls"),
+                   controlsPanel.parent !== anchor {
+                    controlsPanel.position = SIMD3<Float>(0, -0.15, -1.5)
+                    anchor.addChild(controlsPanel)
+                }
+
                 if headTracker.isTracking {
                     let m = headTracker.headTransform
                     let col3 = m.columns.3
@@ -257,12 +284,14 @@ struct HDRISkyboxEnvironment: View {
                         col3.z
                     )
                     let col2 = m.columns.2
-                    let forward = normalize(SIMD3<Float>(-col2.x, 0, -col2.z))
+                    let planarForward = SIMD3<Float>(-col2.x, 0, -col2.z)
+                    let forward = simd_length_squared(planarForward) > 0.0001
+                        ? normalize(planarForward)
+                        : SIMD3<Float>(0, 0, -1)
                     let target = headPos + forward * ImmersiveControlsPolicy.controlsForwardOffset
-                    let smoothing = ImmersiveControlsPolicy.controlsAnchorSmoothing
-                    anchor.position = simd_mix(
-                        anchor.position, target,
-                        SIMD3<Float>(repeating: smoothing)
+                    anchor.position = ImmersiveControlsPolicy.smoothedPosition(
+                        current: anchor.position,
+                        target: target
                     )
                 } else {
                     // Simulator / no ARKit — park controls at a sensible default.
@@ -322,7 +351,10 @@ struct HDRISkyboxEnvironment: View {
             scheduleAutoDismiss()
         }
         .onAppear {
+            resetStateForReentry()
             appState.immersiveSpaceDidAppear(.hdriSkybox)
+            headTracker.stop()
+            headTracker.isIdle = true
             headTracker.start()
         }
         .onDisappear {
@@ -330,13 +362,33 @@ struct HDRISkyboxEnvironment: View {
             autoDismissTask = nil
             appState.immersiveSpaceDidDisappear()
             headTracker.stop()
+            headTracker.isIdle = true
 
             // Explicit cleanup to break any lingering RealityKit references.
+            sceneRoot?.removeFromParent()
+            sceneRoot = nil
             cinemaScreen = nil
             controlsAnchor = nil
             lastMaterialSourceID = nil
             didAnchorScreenToHead = false
+            isShowingImmersiveControls = false
         }
+    }
+
+    // MARK: - Re-entry Lifecycle
+
+    private func resetStateForReentry() {
+        autoDismissTask?.cancel()
+        autoDismissTask = nil
+        isShowingImmersiveControls = false
+        didAnchorScreenToHead = false
+        screenSizePreset = .cinema
+        loadingState = .loading
+        lastMaterialSourceID = nil
+        sceneRoot?.removeFromParent()
+        sceneRoot = nil
+        cinemaScreen = nil
+        controlsAnchor = nil
     }
 
     // MARK: - Screen Size Cycling
@@ -357,7 +409,10 @@ struct HDRISkyboxEnvironment: View {
             let col3 = initial.columns.3
             headPos = SIMD3<Float>(col3.x, col3.y, col3.z)
             let col2 = initial.columns.2
-            let forward = normalize(SIMD3<Float>(-col2.x, 0, -col2.z))
+            let planarForward = SIMD3<Float>(-col2.x, 0, -col2.z)
+            let forward = simd_length_squared(planarForward) > 0.0001
+                ? normalize(planarForward)
+                : SIMD3<Float>(0, 0, -1)
             let newPos = headPos + forward * newPreset.distance
             targetPos = SIMD3<Float>(newPos.x, headPos.y, newPos.z)
         } else {

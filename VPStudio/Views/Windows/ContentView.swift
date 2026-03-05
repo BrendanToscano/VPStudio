@@ -309,6 +309,7 @@ struct ContentView: View {
         guard appState.beginImmersiveTransition() else { return }
         appState.stageImmersiveDismiss(reason: reason)
         await dismissImmersiveSpace()
+        await appState.settleImmersiveDismissal()
     }
     #endif
 }
@@ -602,6 +603,7 @@ struct EnvironmentsTabView: View {
             guard appState.beginImmersiveTransition() else { return }
             appState.stageImmersiveDismiss(reason: .switchingEnvironment)
             await dismissImmersiveSpace()
+            await appState.settleImmersiveDismissal()
         }
         await appState.activateEnvironmentAsset(asset)
         guard appState.beginImmersiveTransition() else { return }
@@ -619,6 +621,7 @@ struct EnvironmentsTabView: View {
         guard appState.beginImmersiveTransition() else { return }
         appState.stageImmersiveDismiss(reason: .userInitiated)
         await dismissImmersiveSpace()
+        await appState.settleImmersiveDismissal()
     }
 }
 #else

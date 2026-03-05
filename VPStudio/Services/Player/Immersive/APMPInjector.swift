@@ -156,7 +156,9 @@ private final class DisplayLinkTarget: NSObject, @unchecked Sendable {
             sampleBufferOut: &layerBuffer
         )
 
-        if rendererStatus == noErr, let rendererBuffer {
+        if rendererStatus == noErr,
+           let rendererBuffer,
+           renderer.isReadyForMoreMediaData {
             renderer.enqueue(rendererBuffer)
         }
 

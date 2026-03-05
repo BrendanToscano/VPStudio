@@ -15,6 +15,7 @@ final class AppState {
         var fetchDebridConfigs: (@Sendable () async throws -> [DebridConfig])?
         var availableDebridServices: (@Sendable () async -> [DebridServiceType])?
         var initializeIndexers: (@Sendable () async throws -> Void)?
+        var immersiveTransitionWatchdogTimeout: Duration?
 
         nonisolated init(
             migrate: (@Sendable () async throws -> Void)? = nil,
@@ -23,7 +24,8 @@ final class AppState {
             fetchActiveEnvironment: (@Sendable () async throws -> EnvironmentAsset?)? = nil,
             fetchDebridConfigs: (@Sendable () async throws -> [DebridConfig])? = nil,
             availableDebridServices: (@Sendable () async -> [DebridServiceType])? = nil,
-            initializeIndexers: (@Sendable () async throws -> Void)? = nil
+            initializeIndexers: (@Sendable () async throws -> Void)? = nil,
+            immersiveTransitionWatchdogTimeout: Duration? = nil
         ) {
             self.migrate = migrate
             self.initializeDebrid = initializeDebrid
@@ -32,6 +34,7 @@ final class AppState {
             self.fetchDebridConfigs = fetchDebridConfigs
             self.availableDebridServices = availableDebridServices
             self.initializeIndexers = initializeIndexers
+            self.immersiveTransitionWatchdogTimeout = immersiveTransitionWatchdogTimeout
         }
     }
 
@@ -55,6 +58,8 @@ final class AppState {
     var isImmersiveTransitionInFlight: Bool = false
     var shouldRestoreImmersiveAfterSuspension: Bool = false
     private var pendingImmersiveDismissReason: ImmersiveDismissReason = .userInitiated
+    private let immersiveTransitionWatchdogTimeout: Duration
+    private var immersiveTransitionWatchdogTask: Task<Void, Never>?
 
     // MARK: - Player Session
     var activePlayerSession: PlayerSessionRequest?
@@ -101,6 +106,7 @@ final class AppState {
         _environmentCatalogManager = environmentCatalogManager
         _libraryCSVImportService = libraryCSVImportService
         self.testHooks = testHooks
+        immersiveTransitionWatchdogTimeout = testHooks.immersiveTransitionWatchdogTimeout ?? .seconds(3)
     }
 
     var database: DatabaseManager {
@@ -400,11 +406,12 @@ final class AppState {
     func beginImmersiveTransition() -> Bool {
         guard !isImmersiveTransitionInFlight else { return false }
         isImmersiveTransitionInFlight = true
+        armImmersiveTransitionWatchdog()
         return true
     }
 
     func cancelImmersiveTransition() {
-        isImmersiveTransitionInFlight = false
+        completeImmersiveTransition()
     }
 
     func stageImmersiveDismiss(reason: ImmersiveDismissReason) {
@@ -416,10 +423,37 @@ final class AppState {
         }
     }
 
+    /// Waits briefly for immersive dismissal callbacks. If the system never
+    /// delivers lifecycle callbacks (e.g. interrupted window transition), force
+    /// local cleanup so the next open attempt can proceed deterministically.
+    func settleImmersiveDismissal(
+        timeout: Duration = .seconds(2),
+        pollInterval: Duration = .milliseconds(40)
+    ) async {
+        let clock = ContinuousClock()
+        let deadline = clock.now + timeout
+
+        while clock.now < deadline {
+            if !isImmersiveSpaceOpen && !isImmersiveTransitionInFlight {
+                return
+            }
+            try? await Task.sleep(for: pollInterval)
+        }
+
+        Self.logger.warning("Immersive dismiss lifecycle timed out; forcing local transition cleanup")
+        completeImmersiveTransition()
+        isImmersiveSpaceOpen = false
+        activeEnvironment = nil
+        if pendingImmersiveDismissReason != .suspension {
+            shouldRestoreImmersiveAfterSuspension = false
+        }
+        pendingImmersiveDismissReason = .userInitiated
+    }
+
     func immersiveSpaceDidAppear(_ environment: EnvironmentType) {
         isImmersiveSpaceOpen = true
         activeEnvironment = environment
-        isImmersiveTransitionInFlight = false
+        completeImmersiveTransition()
         pendingImmersiveDismissReason = .userInitiated
         shouldRestoreImmersiveAfterSuspension = false
     }
@@ -427,7 +461,7 @@ final class AppState {
     func immersiveSpaceDidDisappear() {
         isImmersiveSpaceOpen = false
         activeEnvironment = nil
-        isImmersiveTransitionInFlight = false
+        completeImmersiveTransition()
         if pendingImmersiveDismissReason != .suspension {
             shouldRestoreImmersiveAfterSuspension = false
         }
@@ -437,6 +471,26 @@ final class AppState {
         guard shouldRestoreImmersiveAfterSuspension else { return false }
         shouldRestoreImmersiveAfterSuspension = false
         return true
+    }
+
+    private func armImmersiveTransitionWatchdog() {
+        immersiveTransitionWatchdogTask?.cancel()
+        let timeout = immersiveTransitionWatchdogTimeout
+        immersiveTransitionWatchdogTask = Task { [weak self] in
+            try? await Task.sleep(for: timeout)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                guard let self, self.isImmersiveTransitionInFlight else { return }
+                Self.logger.warning("Immersive transition watchdog expired; releasing stale transition lock")
+                self.completeImmersiveTransition()
+            }
+        }
+    }
+
+    private func completeImmersiveTransition() {
+        immersiveTransitionWatchdogTask?.cancel()
+        immersiveTransitionWatchdogTask = nil
+        isImmersiveTransitionInFlight = false
     }
 
     func resetAllData() async throws {
@@ -454,7 +508,7 @@ final class AppState {
         selectedEnvironmentAsset = nil
         activeEnvironment = nil
         isImmersiveSpaceOpen = false
-        isImmersiveTransitionInFlight = false
+        completeImmersiveTransition()
         shouldRestoreImmersiveAfterSuspension = false
         environmentBootstrapWarning = nil
     }

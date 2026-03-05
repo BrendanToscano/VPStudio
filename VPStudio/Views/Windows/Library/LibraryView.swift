@@ -45,6 +45,7 @@ struct LibraryView: View {
     @State private var folders: [LibraryFolder] = []
     @State private var mediaItems: [String: MediaItem] = [:]
     @State private var metadataHydrator = LibraryMetadataHydrator()
+    @State private var mediaItemCacheOrder: [String] = []
 
     @State private var selectedItem: MediaPreview?
     @State private var loadTask: Task<Void, Never>?
@@ -246,6 +247,7 @@ struct LibraryView: View {
             loadTask = nil
             // Clear cached media items to free memory when view is offscreen
             mediaItems.removeAll()
+            mediaItemCacheOrder.removeAll()
             userRatings.removeAll()
         }
         .onChange(of: selectedList) { _, _ in
@@ -569,30 +571,34 @@ struct LibraryView: View {
     }
 
     /// Maximum number of media items to cache in memory
-    private static let maxCachedItems = 200
+    private static let maxCachedItems = LibraryMediaCachePolicy.defaultMaxEntries
 
     private func loadMediaItemsIfMissing(ids: [String]) async {
-        let uniqueIDs = ids.reduce(into: [String]()) { partial, id in
-            if !partial.contains(id) {
-                partial.append(id)
-            }
+        let uniqueIDs = LibraryMediaCachePolicy.deduplicatedIDs(ids)
+        guard !uniqueIDs.isEmpty else { return }
+
+        for id in uniqueIDs where mediaItems[id] != nil {
+            LibraryMediaCachePolicy.touch(id: id, order: &mediaItemCacheOrder)
         }
 
-        // Bound the cache to prevent unbounded growth
-        if mediaItems.count >= Self.maxCachedItems {
-            // Remove oldest entries (simple eviction: remove first half)
-            let keysToRemove = Array(mediaItems.keys.prefix(mediaItems.count / 2))
-            for key in keysToRemove {
-                mediaItems.removeValue(forKey: key)
-            }
-        }
+        // Trim stale entries before loading new IDs, then enforce a hard cap.
+        LibraryMediaCachePolicy.trimCache(
+            items: &mediaItems,
+            order: &mediaItemCacheOrder,
+            preserving: Set(uniqueIDs),
+            maxEntries: Self.maxCachedItems
+        )
 
         let database = appState.database
         let missingIDs = uniqueIDs.filter { mediaItems[$0] == nil }
-        guard !missingIDs.isEmpty else { return }
+        let remainingCapacity = max(0, Self.maxCachedItems - mediaItems.count)
+        guard remainingCapacity > 0 else { return }
+
+        let fetchIDs = Array(missingIDs.prefix(remainingCapacity))
+        guard !fetchIDs.isEmpty else { return }
 
         await withTaskGroup(of: (String, MediaItem?).self) { group in
-            for id in missingIDs {
+            for id in fetchIDs {
                 group.addTask {
                     (id, try? await database.fetchMediaItem(id: id))
                 }
@@ -601,9 +607,18 @@ struct LibraryView: View {
             for await (id, item) in group {
                 if let item {
                     mediaItems[id] = item
+                    LibraryMediaCachePolicy.touch(id: id, order: &mediaItemCacheOrder)
                 }
             }
         }
+
+        // Final hard cap to guard against any unexpected growth.
+        LibraryMediaCachePolicy.trimCache(
+            items: &mediaItems,
+            order: &mediaItemCacheOrder,
+            preserving: Set(uniqueIDs),
+            maxEntries: Self.maxCachedItems
+        )
     }
 
     private func hydrateLibraryMetadataIfNeeded(for ids: [String]) async {

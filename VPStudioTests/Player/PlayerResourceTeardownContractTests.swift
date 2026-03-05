@@ -37,6 +37,13 @@ struct PlayerResourceTeardownContractTests {
     }
 
     @Test
+    func apmpInjectorDropsFramesWhenRendererBackpressureIsHigh() throws {
+        let source = try contents(of: "VPStudio/Services/Player/Immersive/APMPInjector.swift")
+        #expect(source.contains("renderer.isReadyForMoreMediaData"))
+        #expect(source.contains("layerRenderer.isReadyForMoreMediaData"))
+    }
+
+    @Test
     func playerViewChecksCancellationDuringAsyncEnginePreparation() throws {
         let source = try contents(of: "VPStudio/Views/Windows/Player/PlayerView.swift")
         #expect(source.contains("let prepared = try await ksPlayerEngine.prepare(stream: stream)\n                    try Task.checkCancellation()"))
@@ -115,7 +122,10 @@ struct PlayerResourceTeardownContractTests {
             of: "if PlayerLifecyclePolicy.dismissesCurrentPresentationOnBack",
             in: visionOSBranch
         )
-        let immersiveTaskRange = try requiredRange(of: "Task {", in: visionOSBranch)
+        let immersiveTaskRange = try requiredRange(
+            of: "scheduleImmersiveLifecycleTask {",
+            in: visionOSBranch
+        )
         let immersiveDismissRange = try requiredRange(
             of: "await dismissImmersiveIfNeeded(reason: .playerClosed)",
             in: visionOSBranch
@@ -189,8 +199,9 @@ struct PlayerResourceTeardownContractTests {
         #expect(source.contains("environmentAssetsTask?.cancel()"))
         #expect(source.contains("environmentAssetsTask = Task { await loadEnvironmentAssets() }"))
         #expect(source.contains("@State private var scenePhaseTask: Task<Void, Never>?"))
-        #expect(source.contains("scenePhaseTask?.cancel()"))
-        #expect(source.contains("scenePhaseTask = Task { await handleScenePhaseChange(phase) }"))
+        #expect(source.contains("let previousSceneTask = scenePhaseTask"))
+        #expect(source.contains("scenePhaseTask = Task {"))
+        #expect(source.contains("await previousSceneTask?.value"))
         #expect(source.contains("@State private var memoryPressureTask: Task<Void, Never>?"))
         #expect(source.contains("memoryPressureTask?.cancel()"))
         #expect(source.contains("memoryPressureTask = Task { await handleMemoryPressureWarning() }"))
@@ -228,6 +239,8 @@ struct PlayerResourceTeardownContractTests {
             "environmentAssetsTask",
             "scenePhaseTask",
             "memoryPressureTask",
+            "immersiveLifecycleTask",
+            "visionGeometryTask",
         ] {
             let cancelRange = try requiredRange(of: "\(taskName)?.cancel()", in: onDisappearSection)
             #expect(cancelRange.lowerBound < onDisappearCleanupRange.lowerBound)
@@ -254,6 +267,8 @@ struct PlayerResourceTeardownContractTests {
         for taskName in [
             "scenePhaseTask",
             "memoryPressureTask",
+            "immersiveLifecycleTask",
+            "visionGeometryTask",
         ] {
             let cancelRange = try requiredRange(of: "\(taskName)?.cancel()", in: visionTaskCancelBody)
             let clearRange = try requiredRange(of: "\(taskName) = nil", in: visionTaskCancelBody)
