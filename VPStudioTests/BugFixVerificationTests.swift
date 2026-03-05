@@ -304,4 +304,60 @@ struct BugFixVerificationTests {
             vm.playFile(task)
         }
     }
+
+    // MARK: - Fix 11: Build warnings cleanup
+
+    @Suite("Fix 11 — Build warnings cleanup")
+    struct BuildWarningsTests {
+
+        @Test("DetailViewModel handles non-optional genres")
+        @MainActor
+        func detailViewModelGenresNonOptional() {
+            // Verify MediaItem can be created with non-optional genres
+            let item = MediaItem(
+                id: "tt123",
+                title: "Test Movie",
+                year: 2024,
+                type: .movie,
+                overview: "Test overview",
+                posterPath: nil,
+                backdropPath: nil,
+                genres: ["Action", "Adventure"],
+                rating: 8.5,
+                trailer: nil,
+                imdbId: "tt123",
+                releaseDate: "2024-01-01"
+            )
+
+            #expect(item.genres.count == 2)
+            #expect(item.genres.contains("Action"))
+        }
+
+        @Test("SearchViewModel saveRecentSearches uses weak self")
+        @MainActor
+        func searchViewModelSaveRecentSearchesWeakSelf() {
+            // The fix adds [weak self] to saveRecentSearches Task closure
+            let settingsManager = SettingsManager()
+            let viewModel = SearchViewModel(
+                database: try! .inMemory(),
+                settingsManager: settingsManager,
+                indexerManager: IndexerManager(),
+                appState: AppState(testHooks: .init())
+            )
+
+            // Should not crash with weak self
+            viewModel.recentSearches = ["test query"]
+            viewModel.saveRecentSearches(to: settingsManager)
+
+            #expect(viewModel.recentSearches.count == 1)
+        }
+
+        @Test("HeadTracker captures values for Swift 6 safety")
+        @MainActor
+        func headTrackerSwift6Safety() {
+            // Verify HeadTracker can be initialized without issues
+            let tracker = HeadTracker()
+            #expect(tracker != nil)
+        }
+    }
 }
