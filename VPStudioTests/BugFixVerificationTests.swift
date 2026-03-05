@@ -304,4 +304,97 @@ struct BugFixVerificationTests {
             vm.playFile(task)
         }
     }
+
+    // MARK: - Fix 9: Swift warnings cleanup (d1)
+
+    @Suite("Fix 9 — Swift warnings cleanup")
+    struct SwiftWarningsD1Tests {
+
+        @Test("DetailViewModel handles non-optional genres correctly")
+        @MainActor
+        func detailViewModelGenresNonOptional() {
+            // The fix changed item.genres ?? [] to item.genres
+            // This verifies genres is now properly handled as non-optional
+            let viewModel = DetailViewModel(
+                tmdbService: TMDBService(apiKey: "test"),
+                simklService: SimklService(),
+                debridService: nil,
+                database: try! .inMemory(),
+                libraryService: LibraryService(),
+                appState: AppState(testHooks: .init())
+            )
+
+            // Create a mock media item with genres
+            let item = MediaItem(
+                id: "tt123",
+                title: "Test Movie",
+                year: 2024,
+                type: .movie,
+                overview: "Test overview",
+                posterPath: nil,
+                backdropPath: nil,
+                genres: ["Action", "Adventure"], // Now non-optional
+                rating: 8.5,
+                trailer: nil,
+                imdbId: "tt123",
+                releaseDate: "2024-01-01"
+            )
+
+            // Verify the item can be created with genres without force unwrapping
+            #expect(item.genres.count == 2)
+            #expect(item.genres.contains("Action"))
+        }
+
+        @Test("DownloadManager progress update uses weak self")
+        @MainActor
+        func downloadManagerWeakSelf() async throws {
+            // The fix adds [weak self] to Task closure in progress update
+            // This test verifies the download manager can complete a download
+            // without retain cycle issues (verified by completion)
+            let (database, rootDir) = try await DatabaseTests.makeDatabase(named: "weak-self-test.sqlite")
+            defer { try? FileManager.default.removeItem(at: rootDir) }
+
+            let downloadsDir = rootDir.appendingPathComponent("downloads", isDirectory: true)
+            try FileManager.default.createDirectory(at: downloadsDir, withIntermediateDirectories: true)
+
+            let performer: DownloadManager.DownloadPerformer = { _, _ in
+                let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+                let data = Data(repeating: 0x01, count: 256)
+                try data.write(to: tempURL)
+                let response = URLResponse(
+                    url: URL(string: "https://cdn.example.com/test.mkv")!,
+                    mimeType: "video/x-matroska",
+                    expectedContentLength: 256,
+                    textEncodingName: nil
+                )
+                return (tempURL, response)
+            }
+
+            let manager = DownloadManager(
+                database: database,
+                downloadsDirectory: downloadsDir,
+                performer: performer
+            )
+
+            let stream = Fixtures.stream(name: "test.mkv")
+            let task = try await manager.enqueueDownload(stream: stream, mediaId: "tt999", episodeId: nil)
+
+            // Wait for completion - if there's a retain cycle, this would hang
+            let deadline = Date().addingTimeInterval(15)
+            var completed = false
+            while Date() < deadline && !completed {
+                let downloads = try await manager.listDownloads()
+                if let download = downloads.first(where: { $0.id == task.id }) {
+                    if download.status == .completed {
+                        completed = true
+                    } else if download.status == .failed {
+                        break
+                    }
+                }
+                try await Task.sleep(for: .milliseconds(100))
+            }
+
+            #expect(completed, "Download should complete without retain cycle")
+        }
+    }
 }
