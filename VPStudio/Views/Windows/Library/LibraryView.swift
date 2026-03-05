@@ -44,6 +44,7 @@ struct LibraryView: View {
     @State private var historyEntries: [WatchHistory] = []
     @State private var folders: [LibraryFolder] = []
     @State private var mediaItems: [String: MediaItem] = [:]
+    @State private var metadataHydrator = LibraryMetadataHydrator()
 
     @State private var selectedItem: MediaPreview?
     @State private var loadTask: Task<Void, Never>?
@@ -553,7 +554,10 @@ struct LibraryView: View {
             sortOption: sortOption
         )) ?? []
         historyEntries = []
-        await loadMediaItemsIfMissing(ids: entries.map(\.mediaId))
+
+        let mediaIDs = entries.map(\.mediaId)
+        await loadMediaItemsIfMissing(ids: mediaIDs)
+        await hydrateLibraryMetadataIfNeeded(for: mediaIDs)
     }
 
     private func loadHistoryEntries() async {
@@ -598,6 +602,33 @@ struct LibraryView: View {
                 if let item {
                     mediaItems[id] = item
                 }
+            }
+        }
+    }
+
+    private func hydrateLibraryMetadataIfNeeded(for ids: [String]) async {
+        guard selectedList != .history else { return }
+
+        let tmdbApiKey = (try? await appState.settingsManager.getString(key: SettingsKeys.tmdbApiKey)) ?? ""
+        guard !tmdbApiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+
+        let uniqueIDs = ids.reduce(into: [String]()) { partial, id in
+            if !partial.contains(id) {
+                partial.append(id)
+            }
+        }
+
+        for mediaID in uniqueIDs {
+            if Task.isCancelled { return }
+            guard LibraryMetadataHydrator.requiresHydration(mediaItems[mediaID]) else { continue }
+
+            if let hydrated = await metadataHydrator.hydrate(
+                mediaID: mediaID,
+                existingItem: mediaItems[mediaID],
+                apiKey: tmdbApiKey
+            ) {
+                mediaItems[mediaID] = hydrated
+                try? await appState.database.saveMediaItem(hydrated)
             }
         }
     }

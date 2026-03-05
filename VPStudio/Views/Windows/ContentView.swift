@@ -29,6 +29,7 @@ enum BottomTabRoutingPolicy {
 struct ContentView: View {
     @Environment(AppState.self) private var appState
     @AppStorage("onboarding.soft_setup_dismissed") private var softSetupPromptDismissed = false
+    @AppStorage("onboarding.setup_completed") private var hasCompletedOnboarding = false
 
     #if os(macOS) || os(visionOS)
     @Environment(\.dismissWindow) private var dismissWindow
@@ -139,8 +140,18 @@ struct ContentView: View {
                 event: .appBootstrapCompleted,
                 enabled: appState.runtimeDiagnosticsEnabled
             )
-            if appState.setupRecommendationNeeded, !softSetupPromptDismissed {
+
+            if OnboardingPresentationPolicy.shouldAutoPresentSetup(
+                setupRecommendationNeeded: appState.setupRecommendationNeeded,
+                hasCompletedOnboarding: hasCompletedOnboarding
+            ) {
+                softSetupPromptDismissed = true
+                isShowingQuickStartPrompt = false
+                appState.isShowingSetup = true
+            } else if appState.setupRecommendationNeeded, !softSetupPromptDismissed {
                 isShowingQuickStartPrompt = true
+            } else {
+                isShowingQuickStartPrompt = false
             }
         }
         .onChange(of: state.isShowingSetup) { _, isShowingSetup in
@@ -148,6 +159,13 @@ struct ContentView: View {
                 softSetupPromptDismissed = true
                 isShowingQuickStartPrompt = false
             }
+        }
+        .onChange(of: state.selectedTab) { previousTab, selectedTab in
+            publishTabSelectionEvent(previousTab: previousTab, selectedTab: selectedTab)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .setupDidComplete)) { _ in
+            hasCompletedOnboarding = true
+            isShowingQuickStartPrompt = false
         }
         #if os(visionOS)
         .ornament(attachmentAnchor: .scene(.bottom), contentAlignment: .top) {
@@ -213,16 +231,34 @@ struct ContentView: View {
     }
 
     private func handleTabSelection(_ tab: SidebarTab, state: AppState) {
+        let previousTab = state.selectedTab
         withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
             state.selectedTab = tab
             state.navigationResetID = UUID()
         }
-        Task { try? await appState.settingsManager.setValue(tab.rawValue, forKey: SettingsKeys.lastSelectedTab) }
+
+        Task {
+            try? await appState.settingsManager.setValue(tab.rawValue, forKey: SettingsKeys.lastSelectedTab)
+        }
+
         RuntimeMemoryDiagnostics.capture(
             event: .tabSelectionChanged,
             enabled: appState.runtimeDiagnosticsEnabled,
             context: tab.rawValue
         )
+
+        if previousTab == tab {
+            publishTabSelectionEvent(previousTab: previousTab, selectedTab: tab)
+        }
+    }
+
+    private func publishTabSelectionEvent(previousTab: SidebarTab, selectedTab: SidebarTab) {
+        appState.notifyTabSelectionChange(previousTab: previousTab, selectedTab: selectedTab)
+
+        let event = TabSelectionEvent(previousTab: previousTab, selectedTab: selectedTab)
+        if let reason = DiscoverRefreshTriggerPolicy.reason(for: event) {
+            appState.requestDiscoverRefresh(reason: reason)
+        }
     }
 
     @ViewBuilder

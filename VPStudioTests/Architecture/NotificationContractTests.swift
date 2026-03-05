@@ -10,6 +10,9 @@ struct NotificationContractTests {
         .environmentsDidChange,
         .indexersDidChange,
         .tmdbApiKeyDidChange,
+        .tabSelectionDidChange,
+        .discoverRefreshRequested,
+        .setupDidComplete,
     ]
 
     @Test(arguments: ExhaustiveMode.choose(fast: Array(0..<8), full: Array(0..<16)))
@@ -19,6 +22,9 @@ struct NotificationContractTests {
         #expect(Notification.Name.environmentsDidChange.rawValue == "VPStudio.EnvironmentsDidChange")
         #expect(Notification.Name.indexersDidChange.rawValue == "VPStudio.IndexersDidChange")
         #expect(Notification.Name.tmdbApiKeyDidChange.rawValue == "VPStudio.TMDBApiKeyDidChange")
+        #expect(Notification.Name.tabSelectionDidChange.rawValue == "VPStudio.TabSelectionDidChange")
+        #expect(Notification.Name.discoverRefreshRequested.rawValue == "VPStudio.DiscoverRefreshRequested")
+        #expect(Notification.Name.setupDidComplete.rawValue == "VPStudio.SetupDidComplete")
         AssertionHelpers.expectUnique(Self.expectedNames.map(\.rawValue))
     }
 }

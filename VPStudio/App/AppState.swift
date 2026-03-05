@@ -40,6 +40,7 @@ final class AppState {
     var navigationLayout: NavigationLayout = .bottomTabBar
     var isShowingSetup: Bool = false
     var setupRecommendationNeeded: Bool = false
+    var discoverRefreshToken: UInt64 = 0
     var navigationResetID: UUID = UUID()
     var isBootstrapping: Bool = true
     var runtimeDiagnosticsEnabled: Bool = false
@@ -284,26 +285,7 @@ final class AppState {
             environmentBootstrapWarning = error.localizedDescription
         }
 
-        let hasDebridConfig: Bool = await {
-            do {
-                if let fetchDebridConfigs = testHooks.fetchDebridConfigs {
-                    return try await !fetchDebridConfigs().isEmpty
-                }
-                return try await !database.fetchDebridConfigs().isEmpty
-            } catch {
-                Self.logger.warning("Debrid config check failed: \(error.localizedDescription, privacy: .public)")
-                return false
-            }
-        }()
-
-        let hasReadyDebridService: Bool
-        if let availableDebridServices = testHooks.availableDebridServices {
-            hasReadyDebridService = await !availableDebridServices().isEmpty
-        } else {
-            hasReadyDebridService = await !debridManager.availableServices().isEmpty
-        }
-
-        setupRecommendationNeeded = !hasDebridConfig || !hasReadyDebridService
+        await recomputeSetupRecommendationState()
 
         await configureAIProviders()
 
@@ -351,6 +333,63 @@ final class AppState {
         if !hasCloudProvider {
             await manager.configure(provider: .ollama, apiKey: "", baseURL: ollamaURL, model: ollamaModel)
         }
+    }
+
+    private func computeSetupRecommendationNeeded() async -> Bool {
+        let hasDebridConfig: Bool = await {
+            do {
+                if let fetchDebridConfigs = testHooks.fetchDebridConfigs {
+                    return try await !fetchDebridConfigs().isEmpty
+                }
+                return try await !database.fetchDebridConfigs().isEmpty
+            } catch {
+                Self.logger.warning("Debrid config check failed: \(error.localizedDescription, privacy: .public)")
+                return false
+            }
+        }()
+
+        let hasReadyDebridService: Bool
+        if let availableDebridServices = testHooks.availableDebridServices {
+            hasReadyDebridService = await !availableDebridServices().isEmpty
+        } else {
+            hasReadyDebridService = await !debridManager.availableServices().isEmpty
+        }
+
+        return !hasDebridConfig || !hasReadyDebridService
+    }
+
+    func recomputeSetupRecommendationState() async {
+        setupRecommendationNeeded = await computeSetupRecommendationNeeded()
+    }
+
+    func notifyTabSelectionChange(previousTab: SidebarTab, selectedTab: SidebarTab) {
+        let event = TabSelectionEvent(previousTab: previousTab, selectedTab: selectedTab)
+        NotificationCenter.default.post(
+            name: .tabSelectionDidChange,
+            object: nil,
+            userInfo: event.notificationUserInfo
+        )
+    }
+
+    func requestDiscoverRefresh(reason: DiscoverRefreshReason) {
+        discoverRefreshToken &+= 1
+        NotificationCenter.default.post(
+            name: .discoverRefreshRequested,
+            object: nil,
+            userInfo: reason.notificationUserInfo
+        )
+    }
+
+    func handleSetupCompletion() async {
+        await recomputeSetupRecommendationState()
+        NotificationCenter.default.post(
+            name: .setupDidComplete,
+            object: nil,
+            userInfo: [
+                AppNotificationUserInfoKey.setupRecommendationNeeded: setupRecommendationNeeded,
+            ]
+        )
+        requestDiscoverRefresh(reason: .setupCompleted)
     }
 
     func activateEnvironmentAsset(_ asset: EnvironmentAsset) async {

@@ -15,6 +15,7 @@ struct SetupWizardView: View {
     @State private var selectedSubtitleLanguage: SubtitleLanguageOption = .none
     @State private var saveError: String?
     @State private var appeared = false
+    @AppStorage("onboarding.setup_completed") private var hasCompletedOnboarding = false
 
     private let totalSteps = 5
 
@@ -516,7 +517,7 @@ struct SetupWizardView: View {
                 }
             } else if currentStep == totalSteps - 1 {
                 WizardAccentButton(title: "Start Exploring", icon: "sparkles") {
-                    appState.isShowingSetup = false
+                    Task { await completeSetupFlow() }
                 }
             }
         }
@@ -616,6 +617,13 @@ struct SetupWizardView: View {
         }
 
         advanceStep()
+    }
+
+    @MainActor
+    private func completeSetupFlow() async {
+        hasCompletedOnboarding = true
+        await appState.handleSetupCompletion()
+        appState.isShowingSetup = false
     }
 
     private var continueButtonTitle: String {

@@ -141,6 +141,10 @@ struct DiscoverView: View {
             viewModel.hasPerformedInitialLoad = true
             await reloadDiscoverForLatestTMDBKey()
         }
+        .task(id: appState.discoverRefreshToken) {
+            guard viewModel.hasPerformedInitialLoad else { return }
+            await reloadDiscoverForLatestTMDBKey()
+        }
         .task {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(8))

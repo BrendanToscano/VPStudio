@@ -7,6 +7,9 @@ extension Notification.Name {
     static let environmentsDidChange = Notification.Name("VPStudio.EnvironmentsDidChange")
     static let indexersDidChange = Notification.Name("VPStudio.IndexersDidChange")
     static let tmdbApiKeyDidChange = Notification.Name("VPStudio.TMDBApiKeyDidChange")
+    static let tabSelectionDidChange = Notification.Name("VPStudio.TabSelectionDidChange")
+    static let discoverRefreshRequested = Notification.Name("VPStudio.DiscoverRefreshRequested")
+    static let setupDidComplete = Notification.Name("VPStudio.SetupDidComplete")
 
     // Immersive space control bridge
     static let immersiveTapCatcherDidFire = Notification.Name("VPStudio.ImmersiveTapCatcherDidFire")
