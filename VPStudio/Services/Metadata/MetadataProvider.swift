@@ -58,7 +58,9 @@ struct DiscoverFilters: Sendable {
 
     /// A date string offset by the given number of days from `now`.
     static func dateString(daysFromNow days: Int, now: Date = Date()) -> String {
-        let date = Calendar(identifier: .gregorian).date(byAdding: .day, value: days, to: now)!
+        guard let date = Calendar(identifier: .gregorian).date(byAdding: .day, value: days, to: now) else {
+            return todayString(now: now)
+        }
         return todayString(now: date)
     }
 

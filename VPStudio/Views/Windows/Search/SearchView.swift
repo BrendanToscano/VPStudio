@@ -51,12 +51,14 @@ struct SearchView: View {
         .task {
             await loadUserRatings()
         }
-        .onReceive(NotificationCenter.default.publisher(for: .tasteProfileDidChange)) { _ in
-            Task { await loadUserRatings() }
+        .onReceive(NotificationCenter.default.publisher(for: .tasteProfileDidChange)) { [weak self] _ in
+            guard let self = self else { return }
+            Task { await self.loadUserRatings() }
         }
-        .onReceive(NotificationCenter.default.publisher(for: .tmdbApiKeyDidChange)) { _ in
+        .onReceive(NotificationCenter.default.publisher(for: .tmdbApiKeyDidChange)) { [weak self] _ in
+            guard let self = self else { return }
             tmdbReloadTask?.cancel()
-            tmdbReloadTask = Task { await reloadTMDBConfigurationAndSearch() }
+            tmdbReloadTask = Task { await self.reloadTMDBConfigurationAndSearch() }
         }
         .onDisappear {
             viewModel.cancelInFlightWork()

@@ -235,9 +235,10 @@ struct AISettingsView: View {
                 NotificationCenter.default.post(name: .tasteProfileDidChange, object: nil)
             }
         }
-        .onReceive(NotificationCenter.default.publisher(for: .tasteProfileDidChange)) { _ in
+        .onReceive(NotificationCenter.default.publisher(for: .tasteProfileDidChange)) { [weak self] _ in
+            guard let self = self else { return }
             feedbackReloadTask?.cancel()
-            feedbackReloadTask = Task { await loadFeedbackState() }
+            feedbackReloadTask = Task { await self.loadFeedbackState() }
         }
     }
 

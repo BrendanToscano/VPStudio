@@ -45,22 +45,23 @@ struct DetailView: View {
             activeSessionToastTask?.cancel()
             activeSessionToastTask = nil
         }
-        .onReceive(NotificationCenter.default.publisher(for: .tmdbApiKeyDidChange)) { _ in
+        .onReceive(NotificationCenter.default.publisher(for: .tmdbApiKeyDidChange)) { [weak self] _ in
+            guard let self = self else { return }
             tmdbReloadTask?.cancel()
-            tmdbReloadTask = Task { await reloadDetailForLatestTMDBKey() }
+            tmdbReloadTask = Task { await self.reloadDetailForLatestTMDBKey() }
         }
-        .onReceive(NotificationCenter.default.publisher(for: .libraryDidChange)) { _ in
-            guard let vm = viewModel else { return }
+        .onReceive(NotificationCenter.default.publisher(for: .libraryDidChange)) { [weak self] _ in
+            guard let self = self, let vm = self.viewModel else { return }
             libraryReloadTask?.cancel()
             libraryReloadTask = Task { await vm.reloadLibraryState() }
         }
-        .onReceive(NotificationCenter.default.publisher(for: .tasteProfileDidChange)) { _ in
-            guard let vm = viewModel else { return }
+        .onReceive(NotificationCenter.default.publisher(for: .tasteProfileDidChange)) { [weak self] _ in
+            guard let self = self, let vm = self.viewModel else { return }
             feedbackReloadTask?.cancel()
             feedbackReloadTask = Task { await vm.reloadFeedbackState() }
         }
-        .onReceive(NotificationCenter.default.publisher(for: .downloadsDidChange)) { _ in
-            guard let vm = viewModel else { return }
+        .onReceive(NotificationCenter.default.publisher(for: .downloadsDidChange)) { [weak self] _ in
+            guard let self = self, let vm = self.viewModel else { return }
             Task { await vm.refreshDownloadStates() }
         }
         .sheet(isPresented: $isShowingRatingSheet) {

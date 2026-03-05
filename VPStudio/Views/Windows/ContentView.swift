@@ -511,8 +511,8 @@ struct EnvironmentsTabView: View {
         }
         .navigationTitle("Environments")
         .task { await coalescedLoadEnvironments() }
-        .onReceive(NotificationCenter.default.publisher(for: .environmentsDidChange)) { _ in
-            scheduleEnvironmentLoad()
+        .onReceive(NotificationCenter.default.publisher(for: .environmentsDidChange)) { [weak self] _ in
+            self?.scheduleEnvironmentLoad()
         }
         .onDisappear {
             environmentLoadTask?.cancel()
