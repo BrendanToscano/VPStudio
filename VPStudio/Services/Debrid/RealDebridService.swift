@@ -1,10 +1,87 @@
 import Foundation
 
+/// Represents a selectable file from a torrent with metadata for smart ranking
+struct TorrentFile: Sendable, Identifiable {
+    let id: Int  // File index in RD API (1-based)
+    let path: String
+    let sizeBytes: Int64
+    
+    var fileName: String {
+        (path as NSString).lastPathComponent
+    }
+    
+    var fileExtension: String {
+        (path as NSString).pathExtension.lowercased()
+    }
+    
+    var isVideoFile: Bool {
+        Self.videoExtensions.contains(fileExtension)
+    }
+    
+    var isSampleFile: Bool {
+        let lowerPath = path.lowercased()
+        return lowerPath.contains("sample") || lowerPath.contains("trailer") || 
+               lowerPath.contains("bonus") || lowerPath.contains("extra")
+    }
+    
+    /// Minimum valid video file size (500MB) - below this is likely a sample
+    static let minimumValidVideoSize: Int64 = 500_000_000
+    
+    var isValidVideoSize: Bool {
+        sizeBytes >= Self.minimumValidVideoSize
+    }
+    
+    private static let videoExtensions: Set<String> = [
+        "mkv", "mp4", "avi", "mov", "wmv", "flv", "webm", "m4v", "ts"
+    ]
+}
+
+/// File selection strategy based on media type
+enum FileSelectionStrategy: Sendable {
+    case movie
+    case episode(season: Int, episode: Int)
+    case all
+    
+    /// Matches episode pattern in filename (S01E01, 1x01, etc.)
+    func matches(episode: Int, season: Int, fileName: String) -> Bool {
+        let lower = fileName.lowercased()
+        
+        // SxxExx pattern
+        let sPattern = #"s(\d{1,2})[ex](\d{1,2})"#
+        if let regex = try? NSRegularExpression(pattern: sPattern, options: .caseInsensitive),
+           let match = regex.firstMatch(in: lower, range: NSRange(lower.startIndex..., in: lower)) {
+            if let sRange = Range(match.range(at: 1), in: lower),
+               let eRange = Range(match.range(at: 2), in: lower),
+               let fileSeason = Int(lower[sRange]),
+               let fileEpisode = Int(lower[eRange]) {
+                return fileSeason == season && fileEpisode == episode
+            }
+        }
+        
+        // 1x01 pattern
+        let xPattern = #"(\d{1,2})[x](\d{1,2})"#
+        if let regex = try? NSRegularExpression(pattern: xPattern, options: .caseInsensitive),
+           let match = regex.firstMatch(in: lower, range: NSRange(lower.startIndex..., in: lower)) {
+            if let sRange = Range(match.range(at: 1), in: lower),
+               let eRange = Range(match.range(at: 2), in: lower),
+               let fileSeason = Int(lower[sRange]),
+               let fileEpisode = Int(lower[eRange]) {
+                return fileSeason == season && fileEpisode == episode
+            }
+        }
+        
+        return false
+    }
+}
+
 actor RealDebridService: DebridServiceProtocol {
     let serviceType: DebridServiceType = .realDebrid
     private let apiToken: String
     private let baseURL = "https://api.real-debrid.com/rest/1.0"
     private let session: URLSession
+    
+    /// In-flight tasks map to deduplicate concurrent addMagnet calls for the same hash
+    private var inFlightAddMagnetTasks: [String: Task<String, Error>] = [:]
 
     init(apiToken: String, session: URLSession = .shared) {
         self.apiToken = apiToken
@@ -70,6 +147,30 @@ actor RealDebridService: DebridServiceProtocol {
     }
 
     func addMagnet(hash: String) async throws -> String {
+        // Deduplicate: if there's already an in-flight task for this hash, await it
+        if let existingTask = inFlightAddMagnetTasks[hash.lowercased()] {
+            return try await existingTask.value
+        }
+        
+        // Create new task for this hash
+        let task = Task<String, Error> {
+            try await self.addMagnetInternal(hash: hash)
+        }
+        
+        inFlightAddMagnetTasks[hash.lowercased()] = task
+        
+        do {
+            let result = try await task.value
+            inFlightAddMagnetTasks[hash.lowercased()] = nil
+            return result
+        } catch {
+            inFlightAddMagnetTasks[hash.lowercased()] = nil
+            throw error
+        }
+    }
+
+    /// Internal implementation of addMagnet - called by the deduplicated wrapper
+    private func addMagnetInternal(hash: String) async throws -> String {
         // Check if torrent already exists
         let existing: [RDTorrentInfo] = try await request(method: "GET", path: "/torrents?limit=2500")
         if let found = existing.first(where: { $0.hash?.lowercased() == hash.lowercased() }) {
@@ -80,6 +181,77 @@ actor RealDebridService: DebridServiceProtocol {
         let body = "magnet=\(magnet.addingPercentEncoding(withAllowedCharacters: Self.formEncodingAllowed) ?? magnet)"
         let response: RDAddMagnetResponse = try await request(method: "POST", path: "/torrents/addMagnet", body: body)
         return response.id
+    }
+
+    /// Fetches the list of files available in a torrent
+    func getTorrentFiles(torrentId: String) async throws -> [TorrentFile] {
+        let response: RDFilesResponse = try await request(method: "GET", path: "/torrents/files/\(torrentId)")
+        
+        return response.files.enumerated().map { index, file in
+            TorrentFile(
+                id: index + 1,  // RD uses 1-based indexing for file selection
+                path: file.path ?? "",
+                sizeBytes: Int64(file.size ?? 0)
+            )
+        }
+    }
+
+    /// Selects files using smart ranking based on media type
+    /// - Parameters:
+    ///   - torrentId: The torrent ID
+    ///   - strategy: Movie, episode (with season/episode numbers), or all files
+    /// - Returns: Array of selected file IDs
+    func selectFilesSmart(torrentId: String, strategy: FileSelectionStrategy) async throws -> [Int] {
+        let files = try await getTorrentFiles(torrentId: torrentId)
+        
+        // Filter to valid video files based on strategy
+        let selectedFiles: [TorrentFile]
+        
+        switch strategy {
+        case .all:
+            // Select all valid video files (non-samples)
+            selectedFiles = files.filter { $0.isVideoFile && !$0.isSampleFile }
+            
+        case .movie:
+            // For movies: prefer largest valid video file, exclude samples
+            let validVideos = files.filter { $0.isVideoFile && !$0.isSampleFile && $0.isValidVideoSize }
+            if validVideos.isEmpty {
+                // Fallback: include smaller files if no valid size found
+                selectedFiles = files.filter { $0.isVideoFile && !$0.isSampleFile }
+            } else {
+                // Sort by size descending and pick the largest
+                selectedFiles = validVideos.sorted { $0.sizeBytes > $1.sizeBytes }
+            }
+            
+        case .episode(let season, let episode):
+            // For episodes: try to find matching SxxExx pattern first
+            let matchingFiles = files.filter { file in
+                file.isVideoFile && 
+                !file.isSampleFile &&
+                strategy.matches(episode: episode, season: season, fileName: file.fileName)
+            }
+            
+            if !matchingFiles.isEmpty {
+                // Found matching episode - pick largest valid one
+                let validMatching = matchingFiles.filter { $0.isValidVideoSize }
+                if validMatching.isEmpty {
+                    selectedFiles = matchingFiles.sorted { $0.sizeBytes > $1.sizeBytes }
+                } else {
+                    selectedFiles = validMatching.sorted { $0.sizeBytes > $1.sizeBytes }
+                }
+            } else {
+                // No exact match - fallback to largest valid video file
+                let validVideos = files.filter { $0.isVideoFile && !$0.isSampleFile && $0.isValidVideoSize }
+                if validVideos.isEmpty {
+                    selectedFiles = files.filter { $0.isVideoFile && !$0.isSampleFile }
+                } else {
+                    selectedFiles = validVideos.sorted { $0.sizeBytes > $1.sizeBytes }
+                }
+            }
+        }
+        
+        // Return just the file IDs (take top 3 to handle multi-part releases)
+        return Array(selectedFiles.prefix(3).map(\.id))
     }
 
     func selectFiles(torrentId: String, fileIds: [Int]) async throws {
@@ -210,6 +382,18 @@ private struct RDUnrestrictResponse: Sendable {
     let filesize: Int64?
 }
 extension RDUnrestrictResponse: Decodable {}
+
+/// Response model for torrent files endpoint
+private struct RDFilesResponse: Sendable {
+    let files: [RDFile]
+}
+
+private struct RDFile: Sendable {
+    let path: String?
+    let size: Int64?
+}
+extension RDFile: Decodable {}
+extension RDFilesResponse: Decodable {}
 
 private struct EmptyResponse: Sendable {}
 extension EmptyResponse: Decodable {}

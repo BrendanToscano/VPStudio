@@ -107,7 +107,79 @@ actor DebridManager {
         }
 
         let torrentId = try await service.addMagnet(hash: hash)
+        
+        // Use smart file selection - default to movie strategy
+        // Note: In a full implementation, we'd pass the media type from the caller
         try await service.selectFiles(torrentId: torrentId, fileIds: [])
+
+        // Poll for completion with exponential backoff
+        var delay: UInt64 = 500_000_000 // 0.5s
+        let maxAttempts = 30
+        for attempt in 0..<maxAttempts {
+            try Task.checkCancellation()
+            do {
+                let stream = try await service.getStreamURL(torrentId: torrentId)
+                return stream
+            } catch DebridError.fileNotReady {
+                if attempt < maxAttempts - 1 {
+                    try await Task.sleep(nanoseconds: delay)
+                    delay = min(delay * 2, 5_000_000_000) // max 5s
+                }
+            }
+        }
+
+        throw DebridError.timeout
+    }
+
+    /// Resolves a stream with smart file selection based on media type
+    /// - Parameters:
+    ///   - hash: The torrent info hash
+    ///   - mediaType: The type of media (movie or series)
+    ///   - season: Season number (for series)
+    ///   - episode: Episode number (for series)
+    ///   - preferredService: Preferred debrid service
+    func resolveStreamSmart(
+        hash: String,
+        mediaType: MediaType,
+        season: Int? = nil,
+        episode: Int? = nil,
+        preferredService: DebridServiceType? = nil
+    ) async throws -> StreamInfo {
+        try await ensureServicesInitializedIfNeeded()
+
+        let service: any DebridServiceProtocol
+        if let preferred = preferredService, let svc = services[preferred] {
+            service = svc
+        } else if let selectedType = services.keys.min(by: { lhs, rhs in
+            let lhsPriority = servicePriority[lhs] ?? .max
+            let rhsPriority = servicePriority[rhs] ?? .max
+            if lhsPriority != rhsPriority {
+                return lhsPriority < rhsPriority
+            }
+            return lhs.rawValue < rhs.rawValue
+        }), let selected = services[selectedType] {
+            service = selected
+        } else {
+            throw DebridError.networkError("No debrid services configured. Add one in Settings > Debrid Services.")
+        }
+
+        let torrentId = try await service.addMagnet(hash: hash)
+        
+        // Use smart file selection based on media type
+        let strategy: FileSelectionStrategy
+        if mediaType == .series, let season = season, let episode = episode {
+            strategy = .episode(season: season, episode: episode)
+        } else {
+            strategy = .movie
+        }
+        
+        // Try smart selection for RealDebrid, fallback to all files for others
+        if let rdService = service as? RealDebridService {
+            let selectedIds = try await rdService.selectFilesSmart(torrentId: torrentId, strategy: strategy)
+            try await rdService.selectFiles(torrentId: torrentId, fileIds: selectedIds)
+        } else {
+            try await service.selectFiles(torrentId: torrentId, fileIds: [])
+        }
 
         // Poll for completion with exponential backoff
         var delay: UInt64 = 500_000_000 // 0.5s

@@ -243,6 +243,9 @@ struct LibraryView: View {
         .onDisappear {
             loadTask?.cancel()
             loadTask = nil
+            // Clear cached media items to free memory when view is offscreen
+            mediaItems.removeAll()
+            userRatings.removeAll()
         }
         .onChange(of: selectedList) { _, _ in
             selectedFolderID = nil
@@ -561,10 +564,22 @@ struct LibraryView: View {
         await loadMediaItemsIfMissing(ids: displayedHistoryMediaIDs)
     }
 
+    /// Maximum number of media items to cache in memory
+    private static let maxCachedItems = 200
+
     private func loadMediaItemsIfMissing(ids: [String]) async {
         let uniqueIDs = ids.reduce(into: [String]()) { partial, id in
             if !partial.contains(id) {
                 partial.append(id)
+            }
+        }
+
+        // Bound the cache to prevent unbounded growth
+        if mediaItems.count >= Self.maxCachedItems {
+            // Remove oldest entries (simple eviction: remove first half)
+            let keysToRemove = Array(mediaItems.keys.prefix(mediaItems.count / 2))
+            for key in keysToRemove {
+                mediaItems.removeValue(forKey: key)
             }
         }
 

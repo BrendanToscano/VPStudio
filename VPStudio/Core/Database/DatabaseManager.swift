@@ -342,12 +342,69 @@ actor DatabaseManager {
 
     // MARK: - Media Cache
 
+    /// Retry configuration for database operations
+    private static let maxRetries = 3
+    private static let retryDelay: UInt64 = 50_000_000 // 50ms in nanoseconds
+
+    /// Executes a database operation with automatic retry on transient failures
+    private func executeWithRetry<T>(_ operation: @escaping () async throws -> T) async throws -> T {
+        var lastError: Error?
+        
+        for attempt in 1...Self.maxRetries {
+            do {
+                return try await operation()
+            } catch {
+                lastError = error
+                // Only retry on transient database errors
+                let isTransientError = Self.isTransientError(error)
+                if !isTransientError || attempt == Self.maxRetries {
+                    throw error
+                }
+                // Exponential backoff
+                let delay = Self.retryDelay * UInt64(attempt)
+                try? await Task.sleep(nanoseconds: delay)
+            }
+        }
+        
+        throw lastError ?? DatabaseError(message: "Unknown database error after \(Self.maxRetries) attempts")
+    }
+
+    /// Checks if an error is transient and worth retrying
+    private static func isTransientError(_ error: Error) -> Bool {
+        // Database locked, temporary unavailable, etc.
+        let errorDescription = String(describing: error).lowercased()
+        if errorDescription.contains("database") && (errorDescription.contains("locked") || errorDescription.contains("busy") || errorDescription.contains("transaction")) {
+            return true
+        }
+        return false
+    }
+
     func saveMediaItem(_ item: MediaItem) async throws {
-        try await dbPool.write { db in try item.save(db) }
+        try await executeWithRetry {
+            try await self.dbPool.write { db in try item.save(db) }
+        }
     }
 
     func fetchMediaItem(id: String) async throws -> MediaItem? {
-        try await dbPool.read { db in try MediaItem.fetchOne(db, key: id) }
+        try await executeWithRetry {
+            try await self.dbPool.read { db in try MediaItem.fetchOne(db, key: id) }
+        }
+    }
+
+    /// Fetches media item with fallback handling for incomplete data
+    /// Returns nil if the item exists but has missing critical fields (title/poster)
+    func fetchMediaItemWithFallback(id: String) async throws -> MediaItem? {
+        guard let item = try await fetchMediaItem(id: id) else {
+            return nil
+        }
+        
+        // Check for incomplete data - missing title or poster
+        if item.title.isEmpty && item.posterPath == nil {
+            // Item exists but has no useful data - return nil to trigger refresh
+            return nil
+        }
+        
+        return item
     }
 
     // MARK: - Watch History
