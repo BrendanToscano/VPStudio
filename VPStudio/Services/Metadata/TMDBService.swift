@@ -236,7 +236,7 @@ extension TMDBEpisode: Decodable {}
 struct TMDBFindResponse: Sendable { let movieResults: [TMDBSearchResult]; let tvResults: [TMDBSearchResult] }
 extension TMDBFindResponse: Decodable {}
 
-enum TMDBError: LocalizedError, Equatable {
+enum TMDBError: LocalizedError, Equatable, Sendable {
     case invalidURL(String), invalidResponse, unauthorized, notFound(String), rateLimited, httpError(Int, String)
     var errorDescription: String? {
         switch self {

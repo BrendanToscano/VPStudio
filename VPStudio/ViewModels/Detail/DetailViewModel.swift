@@ -593,7 +593,7 @@ final class DetailViewModel {
                 title: item.title,
                 year: item.year,
                 type: item.type,
-                genres: item.genres ?? [],
+                genres: item.genres,
                 overview: item.overview
             )
             aiAnalysis = analysis
