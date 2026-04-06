@@ -59,6 +59,7 @@ struct HDRISkyboxEnvironment: View {
     @State private var screenSizePreset: ScreenSizePreset = .cinema
     @State private var loadingState: LoadingState = .loading
     @State private var autoDismissTask: Task<Void, Never>?
+    @State private var subtitleEntity: Entity?
 
     /// Tracks the identity of the current video source so we only rebuild the
     /// `VideoMaterial` when the source actually changes — avoids GPU churn on
@@ -116,6 +117,17 @@ struct HDRISkyboxEnvironment: View {
             if let loadingPanel = attachments.entity(for: "loadingIndicator") {
                 loadingPanel.position = SIMD3<Float>(0, 1.6, -4)
                 content.add(loadingPanel)
+            }
+
+            // MARK: Subtitle attachment
+            if let subtitlePanel = attachments.entity(for: "immersiveSubtitle") {
+                subtitlePanel.position = SIMD3<Float>(
+                    0,
+                    screen.position.y - preset.subtitleVerticalOffset,
+                    screen.position.z
+                )
+                content.add(subtitlePanel)
+                subtitleEntity = subtitlePanel
             }
 
             // MARK: Async HDRI load
@@ -246,6 +258,20 @@ struct HDRISkyboxEnvironment: View {
                 didAnchorScreenToHead = true
             }
 
+            // MARK: Subtitle position tracking
+            if let subEnt = attachments.entity(for: "immersiveSubtitle"),
+               let screen = cinemaScreen {
+                let preset = screenSizePreset
+                subEnt.position = SIMD3<Float>(
+                    screen.position.x,
+                    screen.position.y - preset.subtitleVerticalOffset,
+                    screen.position.z
+                )
+                // Match the screen's orientation so subtitles face the viewer.
+                subEnt.orientation = screen.orientation
+                subtitleEntity = subEnt
+            }
+
             // MARK: Controls anchor tracking
             if let anchor = controlsAnchor {
                 if headTracker.isTracking {
@@ -287,6 +313,18 @@ struct HDRISkyboxEnvironment: View {
                     errorView(message: message)
                 case .loaded:
                     EmptyView()
+                }
+            }
+
+            Attachment(id: "immersiveSubtitle") {
+                if let subtitleText = engine.currentSubtitleText, !subtitleText.isEmpty {
+                    ImmersiveSubtitleRenderer(
+                        text: subtitleText,
+                        fontSize: screenSizePreset.subtitleFontSize,
+                        maxWidth: screenSizePreset.subtitleMaxWidth
+                    )
+                    .transition(.opacity)
+                    .animation(.easeInOut(duration: 0.15), value: subtitleText)
                 }
             }
         }
@@ -334,6 +372,7 @@ struct HDRISkyboxEnvironment: View {
             // Explicit cleanup to break any lingering RealityKit references.
             cinemaScreen = nil
             controlsAnchor = nil
+            subtitleEntity = nil
             lastMaterialSourceID = nil
             didAnchorScreenToHead = false
         }

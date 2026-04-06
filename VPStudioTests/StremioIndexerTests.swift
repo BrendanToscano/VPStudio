@@ -57,7 +57,7 @@ struct StremioIndexerTests {
     private static let payloadCases: [PayloadCase] = {
         var values: [PayloadCase] = []
         for index in 0..<50 {
-            switch index % 5 {
+            switch index % 6 {
             case 0:
                 values.append(PayloadCase(payload: #"{"streams":[{"title":"A","infoHash":"ABCDEF1234567890","behaviorHints":{"videoSize":1234,"seeders":11,"leechers":2}}]}"#, expectedCount: 1))
             case 1:
@@ -66,6 +66,10 @@ struct StremioIndexerTests {
                 values.append(PayloadCase(payload: #"{"streams":[{"title":"A","externalUrl":"magnet:?xt=urn:btih:FACE1234FACE1234FACE"}]}"#, expectedCount: 1))
             case 3:
                 values.append(PayloadCase(payload: #"{"streams":[{"title":"No Hash"}]}"#, expectedCount: 0))
+            case 4:
+                values.append(PayloadCase(payload: #"{"streams":[{"title":"A","url":"https://torrentio.strem.fun/resolve/rd/0123456789abcdef0123456789abcdef01234567/file.mkv"}]}"#, expectedCount: 1))
+            case 5:
+                values.append(PayloadCase(payload: #"{"streams":[{"title":"A","url":"https://torrentio.strem.fun/nohash/placeholder","externalUrl":"https://cdn.example.com/resolve/realdebrid/0123456789ABCDEF0123456789ABCDEF01234567/index.mkv"}]}"#, expectedCount: 1))
             default:
                 values.append(PayloadCase(payload: #"{"invalid":true}"#, expectedCount: 0))
             }
@@ -117,7 +121,7 @@ struct StremioIndexerTests {
 
         let indexer = StremioIndexer(name: "Stremio", baseURL: "https://addon.example", endpointPath: "/manifest.json", session: session)
         let results = try await indexer.search(imdbId: "tt1234567", type: .movie, season: nil, episode: nil)
-        #expect(results.count == data.expectedCount)
+        #expect(results.count == data.expectedCount, "count for payload: \(data.payload)")
     }
 
     @Test func searchDoesNotFetchManifest() async throws {

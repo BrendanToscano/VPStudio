@@ -15,7 +15,7 @@ protocol DetailIndexerManaging: Sendable {
 
 protocol DetailDebridManaging: Sendable {
     func checkCacheAcrossServices(hashes: [String]) async throws -> [String: (CacheStatus, DebridServiceType)]
-    func resolveStream(hash: String, preferredService: DebridServiceType?) async throws -> StreamInfo
+    func resolveStream(hash: String, preferredService: DebridServiceType?, seasonNumber: Int?, episodeNumber: Int?) async throws -> StreamInfo
 }
 
 protocol DetailDownloadManaging: Sendable {
@@ -26,6 +26,28 @@ extension TMDBService: DetailMetadataProviding {}
 extension IndexerManager: DetailIndexerManaging {}
 extension DebridManager: DetailDebridManaging {}
 extension DownloadManager: DetailDownloadManaging {}
+
+enum DetailRefreshRetentionPolicy {
+    static func shouldPreserveExistingContent(
+        currentMediaItem: MediaItem?,
+        incomingPreview: MediaPreview
+    ) -> Bool {
+        guard let currentMediaItem else { return false }
+        guard currentMediaItem.type == incomingPreview.type else { return false }
+
+        if currentMediaItem.id == incomingPreview.id {
+            return true
+        }
+
+        if let currentTMDBId = currentMediaItem.tmdbId,
+           let incomingTMDBId = incomingPreview.tmdbId,
+           currentTMDBId == incomingTMDBId {
+            return true
+        }
+
+        return false
+    }
+}
 
 @Observable
 @MainActor
@@ -191,8 +213,17 @@ final class DetailViewModel {
     }
 
     func loadDetail(preview: MediaPreview, apiKey: String) async {
+        let shouldPreserveExistingContent = DetailRefreshRetentionPolicy.shouldPreserveExistingContent(
+            currentMediaItem: mediaItem,
+            incomingPreview: preview
+        )
+
         previewContext = preview
         beginLoading(.detail)
+
+        if !shouldPreserveExistingContent {
+            prepareForDetailLoad(preview: preview)
+        }
 
         let service = metadataProviderFactory(apiKey)
 
@@ -210,36 +241,122 @@ final class DetailViewModel {
             // Load seasons for TV shows
             if preview.type == .series, let tmdbId = item.tmdbId {
                 seasons = try await service.getSeasons(tmdbId: tmdbId)
-                if let firstSeason = seasons.first {
-                    selectedSeason = firstSeason.seasonNumber
-                    episodes = try await service.getEpisodes(tmdbId: tmdbId, season: firstSeason.seasonNumber)
-                    selectedEpisode = episodes.first
-                    await loadEpisodeWatchStates()
+                if let initialSeason = resolveInitialSeason(preview: preview) {
+                    selectedSeason = initialSeason
+                    episodes = try await service.getEpisodes(tmdbId: tmdbId, season: initialSeason)
+                    selectedEpisode = resolveInitialEpisode(in: episodes, preview: preview) ?? episodes.first
+                    // episodeWatchStates loaded via reloadLibraryState() -> refreshWatchHistoryState() below
                 }
             }
 
-            async let libraryState: Void = refreshLibraryState()
+            async let libraryState: Void = reloadLibraryState()
             async let feedbackState: Void = refreshFeedbackState()
             _ = await (libraryState, feedbackState)
             markLoaded()
         } catch {
             setError(error, fallback: .network(.transport(error.localizedDescription)))
-            async let libraryState: Void = refreshLibraryState()
+            async let libraryState: Void = reloadLibraryState()
             async let feedbackState: Void = refreshFeedbackState()
             _ = await (libraryState, feedbackState)
         }
     }
 
+    private func prepareForDetailLoad(preview: MediaPreview) {
+        mediaItem = nil
+        seasons = []
+        episodes = []
+        selectedEpisode = nil
+        selectedSeason = preview.seasonNumber ?? 1
+
+        torrentSearch.setSearchResults([], initialBatchSize: 0)
+        torrentSearch.didSearch = false
+        torrentSearch.lastSearchEpisodeId = nil
+        torrentSearch.lastSearchContextKey = nil
+    }
+
+    private func resolveInitialSeason(preview: MediaPreview) -> Int? {
+        let availableSeasons = Set(seasons.map(\.seasonNumber))
+
+        if let seasonNumber = preview.seasonNumber, availableSeasons.contains(seasonNumber) {
+            return seasonNumber
+        }
+
+        if let parsedSeason = parseSeasonAndEpisode(from: preview.episodeId)?.seasonNumber,
+           availableSeasons.contains(parsedSeason) {
+            return parsedSeason
+        }
+
+        if let recentEpisodeId = mediaLibrary.watchHistory?.episodeId,
+           let parsedSeason = parseSeasonAndEpisode(from: recentEpisodeId)?.seasonNumber,
+           availableSeasons.contains(parsedSeason) {
+            return parsedSeason
+        }
+
+        return seasons.first?.seasonNumber
+    }
+
+    private func resolveInitialEpisode(in episodes: [Episode], preview: MediaPreview) -> Episode? {
+        if let previewEpisodeId = preview.episodeId,
+           let matchingEpisode = episodes.first(where: { $0.id == previewEpisodeId }) {
+            return matchingEpisode
+        }
+
+        if let previewEpisodeNumber = preview.episodeNumber,
+           let matchingEpisode = episodes.first(where: { $0.episodeNumber == previewEpisodeNumber }) {
+            return matchingEpisode
+        }
+
+        if let previewEpisodeId = preview.episodeId,
+           let parsedEpisode = parseSeasonAndEpisode(from: previewEpisodeId)?.episodeNumber,
+           let matchingEpisode = episodes.first(where: { $0.episodeNumber == parsedEpisode }) {
+            return matchingEpisode
+        }
+
+        if let recentEpisodeId = mediaLibrary.watchHistory?.episodeId {
+            if let matchingEpisode = episodes.first(where: { $0.id == recentEpisodeId }) {
+                return matchingEpisode
+            }
+
+            if let parsedEpisode = parseSeasonAndEpisode(from: recentEpisodeId)?.episodeNumber,
+               let matchingEpisode = episodes.first(where: { $0.episodeNumber == parsedEpisode }) {
+                return matchingEpisode
+            }
+        }
+
+        return nil
+    }
+
+    private func parseSeasonAndEpisode(from episodeId: String?) -> (seasonNumber: Int, episodeNumber: Int)? {
+        guard let episodeId else { return nil }
+        guard let seasonMarkerRange = episodeId.range(of: "-s") else { return nil }
+        let seasonStart = seasonMarkerRange.upperBound
+        guard let episodeMarkerRange = episodeId.range(of: "e", range: seasonStart..<episodeId.endIndex) else { return nil }
+
+        let seasonSubstring = episodeId[seasonStart..<episodeMarkerRange.lowerBound]
+        let episodeSubstring = episodeId[episodeMarkerRange.upperBound..<episodeId.endIndex]
+
+        guard let seasonNumber = Int(seasonSubstring),
+              let episodeNumber = Int(episodeSubstring) else { return nil }
+
+        return (seasonNumber, episodeNumber)
+    }
+
     func loadSeason(_ seasonNumber: Int, apiKey: String) async {
         guard let tmdbId = mediaItem?.tmdbId else { return }
+        guard selectedSeason != seasonNumber || episodes.isEmpty else { return }
+
+        cancelInFlightWork()
         selectedSeason = seasonNumber
+        episodes = []
+        selectedEpisode = nil
+        invalidateSearchResultsForEpisodeChange()
         beginLoading(.seasonEpisodes)
+
         let service = metadataProviderFactory(apiKey)
         do {
             episodes = try await service.getEpisodes(tmdbId: tmdbId, season: seasonNumber)
             selectedEpisode = episodes.first
             await loadEpisodeWatchStates()
-            invalidateSearchResultsForEpisodeChange()
             markLoaded()
         } catch {
             setError(error, fallback: .network(.transport(error.localizedDescription)))
@@ -259,15 +376,17 @@ final class DetailViewModel {
         cacheEnrichmentTask?.cancel()
         beginLoading(.torrentSearch)
 
-        searchTask = Task {
+        let season: Int? = item.type == .series ? selectedSeason : nil
+        let episode: Int? = item.type == .series ? selectedEpisode?.episodeNumber : nil
+        let searchedEpisodeId = item.type == .series ? selectedEpisode?.id : nil
+        let contextKey = searchContextKey(mediaID: item.id, season: season, episode: episode)
+        let query = buildQuery(for: item, season: season, episode: episode)
+        let indexerManager = self.indexerManager
+
+        searchTask = Task { [weak self] in
             do {
                 try Task.checkCancellation()
                 try await indexerManager.initialize()
-
-                let season: Int? = item.type == .series ? selectedSeason : nil
-                let episode: Int? = item.type == .series ? selectedEpisode?.episodeNumber : nil
-                let searchedEpisodeId = item.type == .series ? selectedEpisode?.id : nil
-                let contextKey = searchContextKey(mediaID: item.id, season: season, episode: episode)
 
                 var results: [TorrentResult] = []
                 var primaryError: Error?
@@ -290,7 +409,7 @@ final class DetailViewModel {
                 if results.isEmpty {
                     do {
                         results = try await indexerManager.searchByQuery(
-                            query: buildQuery(for: item, season: season, episode: episode),
+                            query: query,
                             type: item.type
                         )
                     } catch {
@@ -302,22 +421,23 @@ final class DetailViewModel {
                 }
 
                 try Task.checkCancellation()
-                results = await sortTorrentsByPreferences(results)
-                let latestContext = searchContextKey(
+                guard let self else { return }
+                results = await self.sortTorrentsByPreferences(results)
+                let latestContext = self.searchContextKey(
                     mediaID: item.id,
-                    season: item.type == .series ? selectedSeason : nil,
-                    episode: item.type == .series ? selectedEpisode?.episodeNumber : nil
+                    season: item.type == .series ? self.selectedSeason : nil,
+                    episode: item.type == .series ? self.selectedEpisode?.episodeNumber : nil
                 )
                 guard latestContext == contextKey else { return }
-                torrentSearch.setSearchResults(results, initialBatchSize: Self.torrentResultBatchSize)
-                torrentSearch.markCompletedSearch(episodeId: searchedEpisodeId, contextKey: contextKey)
-                markLoaded()
-
+                self.torrentSearch.setSearchResults(results, initialBatchSize: Self.torrentResultBatchSize)
+                self.torrentSearch.markCompletedSearch(episodeId: searchedEpisodeId, contextKey: contextKey)
+                self.markLoaded()
                 self.startCacheEnrichment(contextKey: contextKey)
             } catch is CancellationError {
                 // Silently discard cancelled search — a newer search is in progress.
             } catch {
-                setError(error, fallback: .indexer(.queryFailed(error.localizedDescription)))
+                guard let self else { return }
+                self.setError(error, fallback: .indexer(.queryFailed(error.localizedDescription)))
             }
         }
         await searchTask?.value
@@ -354,9 +474,20 @@ final class DetailViewModel {
 
         do {
             let preferredService = torrent.cachedOnService.flatMap(DebridServiceType.init(rawValue:))
-            let stream = try await debridManager.resolveStream(
+            let seasonNumber = mediaItem?.type == .series ? selectedEpisode?.seasonNumber : nil
+            let episodeNumber = mediaItem?.type == .series ? selectedEpisode?.episodeNumber : nil
+            let resolvedStream = try await debridManager.resolveStream(
                 hash: torrent.infoHash,
-                preferredService: preferredService
+                preferredService: preferredService,
+                seasonNumber: seasonNumber,
+                episodeNumber: episodeNumber
+            )
+            let stream = attachRecoveryContext(
+                to: resolvedStream,
+                torrent: torrent,
+                preferredService: preferredService,
+                seasonNumber: seasonNumber,
+                episodeNumber: episodeNumber
             )
             debridResolver.appendStreamIfNeeded(stream)
             return stream
@@ -376,9 +507,20 @@ final class DetailViewModel {
 
         do {
             let preferredService = torrent.cachedOnService.flatMap(DebridServiceType.init(rawValue:))
-            let stream = try await debridManager.resolveStream(
+            let seasonNumber = item.type == .series ? selectedEpisode?.seasonNumber : nil
+            let episodeNumber = item.type == .series ? selectedEpisode?.episodeNumber : nil
+            let resolvedStream = try await debridManager.resolveStream(
                 hash: torrent.infoHash,
-                preferredService: preferredService
+                preferredService: preferredService,
+                seasonNumber: seasonNumber,
+                episodeNumber: episodeNumber
+            )
+            let stream = attachRecoveryContext(
+                to: resolvedStream,
+                torrent: torrent,
+                preferredService: preferredService,
+                seasonNumber: seasonNumber,
+                episodeNumber: episodeNumber
             )
             guard mediaItem?.id == item.id else { return }
             downloadStates[hash] = .downloading
@@ -389,13 +531,12 @@ final class DetailViewModel {
                 mediaTitle: item.title,
                 mediaType: item.type.rawValue,
                 posterPath: item.posterPath,
-                seasonNumber: item.type == .series ? selectedEpisode?.seasonNumber : nil,
-                episodeNumber: item.type == .series ? selectedEpisode?.episodeNumber : nil,
+                seasonNumber: seasonNumber,
+                episodeNumber: episodeNumber,
                 episodeTitle: item.type == .series ? selectedEpisode?.title : nil
             )
             downloadTaskIdsByHash[hash] = enqueuedTask.id
             mediaLibrary.statusMessage = "Added to downloads."
-            NotificationCenter.default.post(name: .downloadsDidChange, object: nil)
         } catch {
             downloadStates[hash] = .failed
             setError(error, fallback: .debrid(.networkError(error.localizedDescription)))
@@ -512,6 +653,7 @@ final class DetailViewModel {
 
     func reloadLibraryState() async {
         await refreshLibraryState()
+        await refreshWatchHistoryState()
     }
 
     func submitFeedback(value: Double) async {
@@ -593,7 +735,7 @@ final class DetailViewModel {
                 title: item.title,
                 year: item.year,
                 type: item.type,
-                genres: item.genres ?? [],
+                genres: item.genres,
                 overview: item.overview
             )
             aiAnalysis = analysis
@@ -613,7 +755,10 @@ final class DetailViewModel {
 
     func loadEpisodeWatchStates() async {
         guard let mediaItem, mediaItem.type == .series else { return }
-        episodeWatchStates = (try? await appState.database.fetchEpisodeWatchStates(mediaId: mediaItem.id)) ?? [:]
+        let freshStates = (try? await appState.database.fetchEpisodeWatchStates(mediaId: mediaItem.id)) ?? [:]
+        if freshStates != episodeWatchStates {
+            episodeWatchStates = freshStates
+        }
     }
 
     func toggleEpisodeWatched(_ episode: Episode) async {
@@ -653,13 +798,17 @@ final class DetailViewModel {
         episodeWatchStates = episodeWatchStates.filter { !episodes.map(\.id).contains($0.key) }
     }
 
-    func makePlayerSessionRequest(stream: StreamInfo, preview: MediaPreview) -> PlayerSessionRequest {
+    func makePlayerSessionRequest(
+        stream: StreamInfo,
+        preview: MediaPreview,
+        availableStreams: [StreamInfo]? = nil
+    ) -> PlayerSessionRequest {
         let title = mediaItem?.title ?? preview.title
         let mediaIdentifier = mediaItem?.id ?? preview.id
         let activeEpisodeId = (mediaItem?.type == .series ? selectedEpisode?.id : nil)
         let streamPool = PlayerSessionRouting.sessionStreams(
             primary: stream,
-            available: debridResolver.streams
+            available: availableStreams ?? debridResolver.streams
         )
 
         return PlayerSessionRequest(
@@ -669,6 +818,23 @@ final class DetailViewModel {
             mediaId: mediaIdentifier,
             episodeId: activeEpisodeId
         )
+    }
+
+    private func attachRecoveryContext(
+        to stream: StreamInfo,
+        torrent: TorrentResult,
+        preferredService: DebridServiceType?,
+        seasonNumber: Int?,
+        episodeNumber: Int?
+    ) -> StreamInfo {
+        let actualService = DebridServiceType(rawValue: stream.debridService) ?? preferredService
+        let recoveryContext = StreamRecoveryContext(
+            infoHash: torrent.infoHash,
+            preferredService: actualService,
+            seasonNumber: seasonNumber,
+            episodeNumber: episodeNumber
+        )
+        return stream.withRecoveryContext(recoveryContext)
     }
 
     private func toggleLibraryMembership(for listType: UserLibraryEntry.ListType) async {
@@ -718,6 +884,29 @@ final class DetailViewModel {
         mediaLibrary.isInFavorites = (try? await favoritesMembership) ?? false
         mediaLibrary.watchlistFolders = sortedFolders((try? await watchlistFolders) ?? [])
         mediaLibrary.favoriteFolders = sortedFolders((try? await favoriteFolders) ?? [])
+    }
+
+    private func refreshWatchHistoryState() async {
+        guard let mediaIdentifier = mediaItem?.id ?? previewContext?.id else {
+            mediaLibrary.watchHistory = nil
+            episodeWatchStates = [:]
+            return
+        }
+
+        mediaLibrary.watchHistory = try? await appState.database.fetchWatchHistory(mediaId: mediaIdentifier)
+
+        let mediaType = mediaItem?.type ?? previewContext?.type
+        if mediaType == .series {
+            let freshStates = (try? await appState.database.fetchEpisodeWatchStates(mediaId: mediaIdentifier)) ?? [:]
+            // Only reassign if data actually changed to prevent cascading re-renders
+            if freshStates != episodeWatchStates {
+                episodeWatchStates = freshStates
+            }
+        } else {
+            if !episodeWatchStates.isEmpty {
+                episodeWatchStates = [:]
+            }
+        }
     }
 
     private func refreshFeedbackState() async {

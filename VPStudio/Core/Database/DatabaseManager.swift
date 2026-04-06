@@ -7,6 +7,7 @@ actor DatabaseManager {
     private static let watchHistoryRetentionTTL: TimeInterval = 365 * 24 * 60 * 60
     private static let tasteEventsRetentionCap = 4_000
     private static let tasteEventsRetentionTTL: TimeInterval = 365 * 24 * 60 * 60
+    private var lastRetentionSweepDate: Date?
 
     init(path: String? = nil) throws {
         let dbPath: String
@@ -337,6 +338,43 @@ actor DatabaseManager {
             )
         }
 
+        migrator.registerMigration("v10_local_models") { db in
+            try db.create(table: "local_models", ifNotExists: true) { t in
+                t.primaryKey("id", .text)
+                t.column("displayName", .text).notNull()
+                t.column("huggingFaceRepo", .text).notNull()
+                t.column("revision", .text).notNull().defaults(to: "main")
+                t.column("parameterCount", .text).notNull()
+                t.column("quantization", .text).notNull()
+                t.column("diskSizeMB", .integer).notNull()
+                t.column("minMemoryMB", .integer).notNull()
+                t.column("expectedFileCount", .integer).notNull().defaults(to: 0)
+                t.column("maxContextTokens", .integer).notNull()
+                t.column("effectivePromptCap", .integer).notNull()
+                t.column("effectiveOutputCap", .integer).notNull()
+                t.column("status", .text).notNull().defaults(to: "available")
+                t.column("downloadProgress", .double).notNull().defaults(to: 0)
+                t.column("downloadedBytes", .integer).notNull().defaults(to: 0)
+                t.column("totalBytes", .integer).notNull().defaults(to: 0)
+                t.column("lastProgressAt", .datetime)
+                t.column("checksumSHA256", .text)
+                t.column("validationState", .text).notNull().defaults(to: "pending")
+                t.column("localPath", .text)
+                t.column("partialDownloadPath", .text)
+                t.column("isDefault", .boolean).notNull().defaults(to: false)
+                t.column("createdAt", .datetime).notNull()
+                t.column("updatedAt", .datetime).notNull()
+            }
+        }
+
+        migrator.registerMigration("v11_download_recovery_context") { db in
+            let columns = try db.columns(in: "download_tasks")
+            let hasColumn = columns.contains { $0.name.caseInsensitiveCompare("recoveryContextJSON") == .orderedSame }
+            if !hasColumn {
+                try db.execute(sql: "ALTER TABLE \"download_tasks\" ADD COLUMN \"recoveryContextJSON\" TEXT")
+            }
+        }
+
         try migrator.migrate(dbPool)
     }
 
@@ -350,28 +388,98 @@ actor DatabaseManager {
         try await dbPool.read { db in try MediaItem.fetchOne(db, key: id) }
     }
 
-    // MARK: - Watch History
-
-    func saveWatchHistory(_ history: WatchHistory) async throws {
-        try await dbPool.write { db in try history.save(db) }
-        _ = try await applyWatchHistoryRetentionPolicy()
-    }
-
-    func fetchWatchHistory(limit: Int = 50) async throws -> [WatchHistory] {
-        try await dbPool.read { db in
-            try WatchHistory
-                .order(WatchHistory.Columns.watchedAt.desc)
-                .limit(limit)
+    func fetchMediaItems(ids: [String]) async throws -> [MediaItem] {
+        let uniqueIDs = Array(Set(ids))
+        guard !uniqueIDs.isEmpty else { return [] }
+        return try await dbPool.read { db in
+            try MediaItem
+                .filter(uniqueIDs.contains(MediaItem.Columns.id))
                 .fetchAll(db)
         }
     }
 
-    func fetchCompletedWatchHistory(limit: Int = 1000) async throws -> [WatchHistory] {
+    func fetchMediaItemsResolvingAliases(ids: [String]) async throws -> [String: MediaItem] {
+        let uniqueIDs = Array(Set(ids))
+        guard !uniqueIDs.isEmpty else { return [:] }
+
+        return try await dbPool.read { db in
+            let directItems = try MediaItem
+                .filter(uniqueIDs.contains(MediaItem.Columns.id))
+                .fetchAll(db)
+
+            var resolved: [String: MediaItem] = [:]
+            for item in directItems {
+                resolved[item.id] = item
+            }
+
+            let unresolvedIDs = uniqueIDs.filter { resolved[$0] == nil }
+            guard !unresolvedIDs.isEmpty else { return resolved }
+
+            let tmdbAliasMap = unresolvedIDs.reduce(into: [Int: [String]]()) { partial, id in
+                guard let tmdbID = Self.extractTMDBID(from: id) else { return }
+                partial[tmdbID, default: []].append(id)
+            }
+            guard !tmdbAliasMap.isEmpty else { return resolved }
+
+            let aliasTMDBIDs = Array(tmdbAliasMap.keys)
+            let aliasItems = try MediaItem
+                .filter(aliasTMDBIDs.contains(MediaItem.Columns.tmdbId))
+                .fetchAll(db)
+
+            for item in aliasItems {
+                guard let tmdbID = item.tmdbId,
+                      let aliases = tmdbAliasMap[tmdbID] else { continue }
+                for alias in aliases where resolved[alias] == nil {
+                    resolved[alias] = item
+                }
+            }
+
+            return resolved
+        }
+    }
+
+    private static func extractTMDBID(from id: String) -> Int? {
+        if id.hasPrefix("tmdb-") {
+            let suffix = String(id.dropFirst(5))
+            if let value = Int(suffix) {
+                return value
+            }
+        }
+
+        if id.contains("tmdb-"),
+           let suffix = id.split(separator: "-").last,
+           let value = Int(suffix) {
+            return value
+        }
+
+        return nil
+    }
+
+    // MARK: - Watch History
+
+    func saveWatchHistory(_ history: WatchHistory) async throws {
+        try await dbPool.write { db in try history.save(db) }
+    }
+
+    func fetchWatchHistory(limit: Int = 50, offset: Int = 0) async throws -> [WatchHistory] {
         try await dbPool.read { db in
-            try WatchHistory
+            let effectiveLimit = max(limit, 0)
+            let effectiveOffset = max(offset, 0)
+            return try WatchHistory
+                .order(WatchHistory.Columns.watchedAt.desc)
+                .limit(effectiveLimit, offset: effectiveOffset)
+                .fetchAll(db)
+        }
+    }
+
+    func fetchCompletedWatchHistory(limit: Int = 1000, offset: Int = 0) async throws -> [WatchHistory] {
+        try await dbPool.read { db in
+            let effectiveLimit = max(limit, 0)
+            let effectiveOffset = max(offset, 0)
+            return try WatchHistory
                 .filter(WatchHistory.Columns.isCompleted == true)
                 .order(WatchHistory.Columns.watchedAt.desc)
-                .limit(limit)
+                .limit(effectiveLimit, offset: effectiveOffset)
                 .fetchAll(db)
         }
     }
@@ -409,6 +517,20 @@ actor DatabaseManager {
         }
     }
 
+    /// Runs the retention policy if it hasn't been run recently.
+    /// Call this periodically (e.g. on app launch, after sync) rather than on every save.
+    func runRetentionSweepIfNeeded(
+        interval: TimeInterval = 3600,
+        maxEntries: Int = DatabaseManager.watchHistoryRetentionCap,
+        ttl: TimeInterval = DatabaseManager.watchHistoryRetentionTTL
+    ) async throws -> Int {
+        let now = Date()
+        let lastSweep = lastRetentionSweepDate ?? .distantPast
+        guard now.timeIntervalSince(lastSweep) >= interval else { return 0 }
+        lastRetentionSweepDate = now
+        return try await applyWatchHistoryRetentionPolicy(maxEntries: maxEntries, ttl: ttl, now: now)
+    }
+
     /// Marks an episode as watched (creates a completed WatchHistory entry).
     func markEpisodeWatched(mediaId: String, episodeId: String, title: String) async throws {
         let history = WatchHistory(
@@ -435,7 +557,7 @@ actor DatabaseManager {
     }
 
     @discardableResult
-    func applyWatchHistoryRetentionPolicy(
+    public func applyWatchHistoryRetentionPolicy(
         maxEntries: Int = DatabaseManager.watchHistoryRetentionCap,
         ttl: TimeInterval = DatabaseManager.watchHistoryRetentionTTL,
         now: Date = Date()
@@ -459,10 +581,14 @@ actor DatabaseManager {
                 sql: """
                 DELETE FROM watch_history
                 WHERE id IN (
-                    SELECT id
-                    FROM watch_history
-                    ORDER BY watchedAt DESC, id DESC
-                    LIMIT -1 OFFSET ?
+                    SELECT stale.id
+                    FROM watch_history AS stale
+                    WHERE stale.id NOT IN (
+                        SELECT retained.id
+                        FROM watch_history AS retained
+                        ORDER BY retained.watchedAt DESC, retained.id DESC
+                        LIMIT ?
+                    )
                 )
                 """,
                 arguments: [effectiveMaxEntries]
@@ -552,12 +678,19 @@ actor DatabaseManager {
         }
     }
 
-    func removeFromLibrary(mediaId: String, listType: UserLibraryEntry.ListType) async throws {
+    func removeFromLibrary(
+        mediaId: String,
+        listType: UserLibraryEntry.ListType,
+        folderId: String? = nil
+    ) async throws {
         try await dbPool.write { db in
-            _ = try UserLibraryEntry
+            var request = UserLibraryEntry
                 .filter(UserLibraryEntry.Columns.mediaId == mediaId)
                 .filter(UserLibraryEntry.Columns.listType == listType.rawValue)
-                .deleteAll(db)
+            if let folderId {
+                request = request.filter(UserLibraryEntry.Columns.folderId == folderId)
+            }
+            _ = try request.deleteAll(db)
         }
     }
 
@@ -661,12 +794,19 @@ actor DatabaseManager {
         }
     }
 
-    func isInLibrary(mediaId: String, listType: UserLibraryEntry.ListType) async throws -> Bool {
+    func isInLibrary(
+        mediaId: String,
+        listType: UserLibraryEntry.ListType,
+        folderId: String? = nil
+    ) async throws -> Bool {
         try await dbPool.read { db in
-            try UserLibraryEntry
+            var request = UserLibraryEntry
                 .filter(UserLibraryEntry.Columns.mediaId == mediaId)
                 .filter(UserLibraryEntry.Columns.listType == listType.rawValue)
-                .fetchCount(db) > 0
+            if let folderId {
+                request = request.filter(UserLibraryEntry.Columns.folderId == folderId)
+            }
+            return try request.fetchCount(db) > 0
         }
     }
 
@@ -962,6 +1102,15 @@ actor DatabaseManager {
         }
     }
 
+    func updateDownloadTaskStreamURL(id: String, streamURL: String) async throws {
+        try await dbPool.write { db in
+            try db.execute(
+                sql: "UPDATE download_tasks SET streamURL = ?, updatedAt = ? WHERE id = ?",
+                arguments: [streamURL, Date(), id]
+            )
+        }
+    }
+
     func updateDownloadTaskStatus(id: String, status: DownloadStatus, errorMessage: String? = nil) async throws {
         try await dbPool.write { db in
             let now = Date()
@@ -1146,13 +1295,16 @@ actor DatabaseManager {
     func fetchTasteEvents(
         userId: String = "default",
         eventType: TasteEvent.EventType? = nil,
-        limit: Int = 200
+        limit: Int = 200,
+        offset: Int = 0
     ) async throws -> [TasteEvent] {
         try await dbPool.read { db in
+            let effectiveLimit = max(limit, 0)
+            let effectiveOffset = max(offset, 0)
             var request = TasteEvent
                 .filter(TasteEvent.Columns.userId == userId)
                 .order(TasteEvent.Columns.createdAt.desc)
-                .limit(limit)
+                .limit(effectiveLimit, offset: effectiveOffset)
             if let eventType {
                 request = request.filter(TasteEvent.Columns.eventType == eventType.rawValue)
             }
@@ -1300,10 +1452,71 @@ actor DatabaseManager {
         }
     }
 
+    // MARK: - Local Models
+
+    func fetchLocalModels() async throws -> [LocalModelDescriptor] {
+        try await dbPool.read { db in
+            try LocalModelDescriptor.order(Column("isDefault").desc, Column("displayName")).fetchAll(db)
+        }
+    }
+
+    func fetchDownloadedLocalModels() async throws -> [LocalModelDescriptor] {
+        try await dbPool.read { db in
+            try LocalModelDescriptor
+                .filter(Column("status") == LocalModelStatus.downloaded.rawValue)
+                .order(Column("isDefault").desc, Column("displayName"))
+                .fetchAll(db)
+        }
+    }
+
+    func fetchLocalModel(id: String) async throws -> LocalModelDescriptor? {
+        try await dbPool.read { db in try LocalModelDescriptor.fetchOne(db, key: id) }
+    }
+
+    func saveLocalModel(_ model: LocalModelDescriptor) async throws {
+        try await dbPool.write { db in try model.save(db) }
+    }
+
+    func deleteLocalModel(id: String) async throws {
+        try await dbPool.write { db in
+            try db.execute(sql: "DELETE FROM local_models WHERE id = ?", arguments: [id])
+        }
+    }
+
+    func updateLocalModelStatus(
+        id: String,
+        status: LocalModelStatus,
+        localPath: String? = nil,
+        errorMessage: String? = nil
+    ) async throws {
+        try await dbPool.write { db in
+            guard var model = try LocalModelDescriptor.fetchOne(db, key: id) else { return }
+            guard LocalModelDescriptor.canTransition(from: model.status, to: status) else { return }
+            model.status = status
+            if let localPath { model.localPath = localPath }
+            model.updatedAt = Date()
+            try model.update(db)
+        }
+    }
+
+    func updateLocalModelProgress(id: String, progress: Double, downloadedBytes: Int64, totalBytes: Int64) async throws {
+        try await dbPool.write { db in
+            try db.execute(
+                sql: """
+                    UPDATE local_models
+                    SET downloadProgress = ?, downloadedBytes = ?, totalBytes = ?, lastProgressAt = ?, updatedAt = ?
+                    WHERE id = ?
+                    """,
+                arguments: [progress, downloadedBytes, totalBytes, Date(), Date(), id]
+            )
+        }
+    }
+
     /// Deletes all user data from every table. Used by the "Reset All Data" flow.
     func resetAllData() async throws {
         try await dbPool.write { db in
             let tables = [
+                "local_models",
                 "ai_context_snapshots",
                 "ai_usage_log",
                 "environment_assets",

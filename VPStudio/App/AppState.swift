@@ -35,9 +35,43 @@ final class AppState {
         }
     }
 
+    private struct QATraktRefreshFixture: Decodable {
+        struct Media: Decodable {
+            var id: String
+            var type: MediaType
+            var title: String
+            var year: Int?
+            var posterPath: String?
+            var backdropPath: String?
+            var overview: String?
+            var genres: [String]?
+            var imdbRating: Double?
+            var runtime: Int?
+            var status: String?
+            var tmdbId: Int?
+        }
+
+        struct History: Decodable {
+            var id: String
+            var mediaId: String?
+            var episodeId: String?
+            var title: String
+            var progress: Double
+            var duration: Double
+            var quality: String?
+            var debridService: String?
+            var streamURL: String?
+            var watchedAt: Date
+            var isCompleted: Bool
+        }
+
+        var media: Media
+        var history: History
+    }
+
     // MARK: - Navigation
     var selectedTab: SidebarTab = .discover
-    var navigationLayout: NavigationLayout = .leftSidebar
+    var navigationLayout: NavigationLayout = .bottomTabBar
     var isShowingSetup: Bool = false
     var setupRecommendationNeeded: Bool = false
     var navigationResetID: UUID = UUID()
@@ -65,6 +99,8 @@ final class AppState {
     weak var activeAVPlayer: AVPlayer?
     weak var activeVideoRenderer: AVSampleBufferVideoRenderer?
 
+    let spatialAudioManager = SpatialAudioManager()
+
     // MARK: - Services (lazy-initialized)
     private var _database: DatabaseManager?
     private var _secretStore: (any SecretStore)?
@@ -76,6 +112,9 @@ final class AppState {
     private var _scrobbleCoordinator: ScrobbleCoordinator?
     private var _traktSyncOrchestrator: TraktSyncOrchestrator?
     private var _aiAssistantManager: AIAssistantManager?
+    private var _localCatalogStore: LocalModelCatalogStore?
+    private var _localDownloadService: LocalDownloadService?
+    private var _localInferenceEngine: LocalInferenceEngine?
     private var _libraryCSVImportService: LibraryCSVImportService?
     private var _networkMonitor: NetworkMonitor?
     private let testHooks: TestHooks
@@ -159,7 +198,19 @@ final class AppState {
 
     var downloadManager: DownloadManager {
         if _downloadManager == nil {
-            _downloadManager = DownloadManager(database: database)
+            let debrid = debridManager
+            _downloadManager = DownloadManager(
+                database: database,
+                linkRefresher: { context in
+                    let stream = try await debrid.resolveStream(
+                        hash: context.infoHash,
+                        preferredService: context.preferredService,
+                        seasonNumber: context.seasonNumber,
+                        episodeNumber: context.episodeNumber
+                    )
+                    return stream.streamURL
+                }
+            )
         }
         return _downloadManager!
     }
@@ -235,6 +286,27 @@ final class AppState {
         return _aiAssistantManager!
     }
 
+    var localCatalogStore: LocalModelCatalogStore {
+        if _localCatalogStore == nil {
+            _localCatalogStore = LocalModelCatalogStore(database: database)
+        }
+        return _localCatalogStore!
+    }
+
+    var localDownloadService: LocalDownloadService {
+        if _localDownloadService == nil {
+            _localDownloadService = LocalDownloadService(catalogStore: localCatalogStore)
+        }
+        return _localDownloadService!
+    }
+
+    var localInferenceEngine: LocalInferenceEngine {
+        if _localInferenceEngine == nil {
+            _localInferenceEngine = LocalInferenceEngine(catalogStore: localCatalogStore)
+        }
+        return _localInferenceEngine!
+    }
+
     func createMetadataService(apiKey: String) -> TMDBService {
         TMDBService(apiKey: apiKey)
     }
@@ -253,6 +325,7 @@ final class AppState {
                 try await migrate()
             } else {
                 try await database.migrate()
+                _ = try await database.runRetentionSweepIfNeeded()
             }
 
             if let initializeDebrid = testHooks.initializeDebrid {
@@ -294,30 +367,108 @@ final class AppState {
 
             setupRecommendationNeeded = !hasDebridConfig || !hasReadyDebridService
 
+            await localCatalogStore.seedCatalog()
+            await localInferenceEngine.startMonitoring()
             await configureAIProviders()
 
             runtimeDiagnosticsEnabled = (try? await settingsManager.getBool(
                 key: SettingsKeys.runtimeDiagnosticsEnabled,
                 default: false
             )) ?? false
+
+            // Auto-sync with Trakt on launch if credentials are available
+            Task { [weak self] in
+                guard let self else { return }
+                _ = await self.performTraktSyncAndRefreshLocalState()
+            }
         } catch {
             Self.logger.error("Bootstrap error: \(error.localizedDescription, privacy: .public)")
             isShowingSetup = true
         }
-            // Auto-sync with Trakt on launch if credentials are available
-            Task.detached { [weak self] in
-                guard let self else { return }
-                let orchestrator = await self.makeTraktSyncOrchestrator()
-                guard let orchestrator else { return }
-                let result = await orchestrator.sync()
-                if result.totalPulled + result.totalPushed > 0 {
-                    await MainActor.run {
-                        NotificationCenter.default.post(name: .tasteProfileDidChange, object: nil)
-                    }
-                }
-            }
 
         isBootstrapping = false
+    }
+
+    @discardableResult
+    func performTraktSyncAndRefreshLocalState() async -> TraktSyncOrchestrator.SyncResult? {
+        guard let orchestrator = await makeTraktSyncOrchestrator() else { return nil }
+
+        let result = await orchestrator.sync()
+        let removedHistoryEntryCount = (try? await database.runRetentionSweepIfNeeded()) ?? 0
+        applyTraktSyncLocalRefresh(for: result, removedHistoryEntryCount: removedHistoryEntryCount)
+        return result
+    }
+
+    func runQATraktRefreshIfRequested() async {
+        guard let fixturePath = QARuntimeOptions.traktRefreshFixturePath else { return }
+
+        if let delaySeconds = QARuntimeOptions.traktRefreshDelaySeconds, delaySeconds > 0 {
+            do {
+                try await Task.sleep(nanoseconds: QARuntimeOptions.sleepNanoseconds(for: delaySeconds))
+            } catch {
+                return
+            }
+        }
+
+        do {
+            let fileURL = URL(fileURLWithPath: fixturePath)
+            let data = try Data(contentsOf: fileURL)
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            let fixture = try decoder.decode(QATraktRefreshFixture.self, from: data)
+
+            let mediaItem = MediaItem(
+                id: fixture.media.id,
+                type: fixture.media.type,
+                title: fixture.media.title,
+                year: fixture.media.year,
+                posterPath: fixture.media.posterPath,
+                backdropPath: fixture.media.backdropPath,
+                overview: fixture.media.overview,
+                genres: fixture.media.genres ?? [],
+                imdbRating: fixture.media.imdbRating,
+                runtime: fixture.media.runtime,
+                status: fixture.media.status,
+                tmdbId: fixture.media.tmdbId,
+                lastFetched: Date()
+            )
+            try await database.saveMediaItem(mediaItem)
+
+            let history = WatchHistory(
+                id: fixture.history.id,
+                mediaId: fixture.history.mediaId ?? fixture.media.id,
+                episodeId: fixture.history.episodeId,
+                title: fixture.history.title,
+                progress: fixture.history.progress,
+                duration: fixture.history.duration,
+                quality: fixture.history.quality,
+                debridService: fixture.history.debridService,
+                streamURL: fixture.history.streamURL,
+                watchedAt: fixture.history.watchedAt,
+                isCompleted: fixture.history.isCompleted
+            )
+            try await database.saveWatchHistory(history)
+
+            applyTraktSyncLocalRefresh(for: .init(localRefreshTargets: [.library]))
+            Self.logger.notice("Applied QA Trakt refresh fixture from \(fixturePath, privacy: .public)")
+        } catch {
+            Self.logger.error("Failed to apply QA Trakt refresh fixture \(fixturePath, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    func applyTraktSyncLocalRefresh(
+        for result: TraktSyncOrchestrator.SyncResult,
+        removedHistoryEntryCount: Int = 0
+    ) {
+        // `libraryDidChange` is the existing invalidation bridge for local library,
+        // watchlist, folder, and history-backed library surfaces.
+        if result.localRefreshTargets.contains(.library) || removedHistoryEntryCount > 0 {
+            NotificationCenter.default.post(name: .libraryDidChange, object: nil)
+        }
+
+        if result.localRefreshTargets.contains(.tasteProfile) {
+            NotificationCenter.default.post(name: .tasteProfileDidChange, object: nil)
+        }
     }
 
     /// Loads saved API keys from settings and registers them with the AI assistant manager.
@@ -325,9 +476,11 @@ final class AppState {
     func configureAIProviders() async {
         let anthropicKey = (try? await settingsManager.getString(key: SettingsKeys.anthropicApiKey)) ?? ""
         let openAIKey = (try? await settingsManager.getString(key: SettingsKeys.openAIApiKey)) ?? ""
+        let geminiKey = (try? await settingsManager.getString(key: SettingsKeys.geminiApiKey)) ?? ""
         let ollamaURL = (try? await settingsManager.getString(key: SettingsKeys.ollamaEndpoint)) ?? "http://localhost:11434"
         let anthropicModel = try? await settingsManager.getString(key: SettingsKeys.anthropicModelPreset)
         let openAIModel = try? await settingsManager.getString(key: SettingsKeys.openAIModelPreset)
+        let geminiModel = try? await settingsManager.getString(key: SettingsKeys.geminiModelPreset)
         let ollamaModel = try? await settingsManager.getString(key: SettingsKeys.ollamaModelPreset)
 
         let manager = aiAssistantManager
@@ -339,11 +492,29 @@ final class AppState {
         if !openAIKey.isEmpty {
             await manager.configure(provider: .openAI, apiKey: openAIKey, model: openAIModel)
         }
+        if !geminiKey.isEmpty {
+            await manager.configure(provider: .gemini, apiKey: geminiKey, model: geminiModel)
+        }
         // Only register Ollama if no cloud provider is available,
         // to avoid connection-refused errors to localhost when Ollama isn't running.
-        let hasCloudProvider = !anthropicKey.isEmpty || !openAIKey.isEmpty
+        let hasCloudProvider = !anthropicKey.isEmpty || !openAIKey.isEmpty || !geminiKey.isEmpty
         if !hasCloudProvider {
             await manager.configure(provider: .ollama, apiKey: "", baseURL: ollamaURL, model: ollamaModel)
+        }
+
+        // Register local on-device provider if enabled and a model is downloaded
+        let localEnabled = (try? await settingsManager.getBool(key: SettingsKeys.localModelEnabled)) ?? false
+        if localEnabled {
+            let localModelID = (try? await settingsManager.getString(key: SettingsKeys.localModelPreset))
+                ?? AIModelCatalog.localSmolLM2.id
+            let downloadedModels = (try? await localCatalogStore.downloadedModels()) ?? []
+            if downloadedModels.contains(where: { $0.id == localModelID }) {
+                let provider = LocalMLXProvider(
+                    inferenceEngine: localInferenceEngine,
+                    modelID: localModelID
+                )
+                await manager.registerProvider(kind: .local, provider: provider)
+            }
         }
     }
 
@@ -401,7 +572,33 @@ final class AppState {
         // Reset the database by running a destructive wipe
         try await database.resetAllData()
 
+        // Clean up downloaded and environment files left on disk
+        // Actual storage paths are under Application Support/VPStudio/
+        let fm = FileManager.default
+        if let appSupport = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
+            let vpStudioDir = appSupport.appendingPathComponent("VPStudio", isDirectory: true)
+            try? fm.removeItem(at: vpStudioDir.appendingPathComponent("Downloads", isDirectory: true))
+            try? fm.removeItem(at: vpStudioDir.appendingPathComponent("Environments", isDirectory: true))
+        }
+
+        // Clear persisted UI state so reset behaves like a true fresh install.
+        let defaults = UserDefaults.standard
+        if let bundleIdentifier = Bundle.main.bundleIdentifier {
+            defaults.removePersistentDomain(forName: bundleIdentifier)
+        }
+        defaults.set(false, forKey: "onboarding.soft_setup_dismissed")
+        defaults.set("", forKey: "settings.last_destination")
+        defaults.set("", forKey: "settings.search_query")
+        defaults.synchronize()
+        NotificationCenter.default.post(name: .appDidResetAllData, object: nil)
+
         // Clear in-memory state
+        selectedTab = .discover
+        navigationLayout = .bottomTabBar
+        isShowingSetup = false
+        setupRecommendationNeeded = true
+        navigationResetID = UUID()
+        runtimeDiagnosticsEnabled = false
         activePlayerSession = nil
         activeAVPlayer = nil
         activeVideoRenderer = nil
@@ -412,6 +609,11 @@ final class AppState {
         isImmersiveTransitionInFlight = false
         shouldRestoreImmersiveAfterSuspension = false
         environmentBootstrapWarning = nil
+
+        // Drop cached service actors that can hold stale configuration/state after reset.
+        _debridManager = nil
+        _scrobbleCoordinator = nil
+        _traktSyncOrchestrator = nil
     }
 
     func reloadIndexers() async {

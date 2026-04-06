@@ -229,7 +229,10 @@ struct TraktSettingsView: View {
     private var advancedSection: some View {
         Section {
             DisclosureGroup("Trakt API Credentials", isExpanded: $showAdvanced) {
-                TextField("Client ID", text: $clientId)
+                HStack {
+                    TextField("Client ID", text: $clientId)
+                    PasteFieldButton { clientId = $0 }
+                }
                 HStack {
                     SecureField("Client Secret", text: $clientSecret)
                     PasteFieldButton { clientSecret = $0 }
@@ -385,12 +388,11 @@ struct TraktSettingsView: View {
         syncResultMessage = nil
         defer { isSyncing = false }
 
-        guard let orchestrator = await appState.makeTraktSyncOrchestrator() else {
+        guard let result = await appState.performTraktSyncAndRefreshLocalState() else {
             syncResultMessage = "Cannot sync: Trakt credentials are missing."
             return
         }
 
-        let result = await orchestrator.sync()
         syncResultMessage = result.summary
         lastSyncDate = try? await appState.settingsManager.getString(key: SettingsKeys.traktLastSyncDate)
     }

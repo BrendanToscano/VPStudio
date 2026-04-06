@@ -435,14 +435,16 @@ actor LibraryCSVImportService {
         addedAt: Date
     ) async throws -> Bool {
         let exists = try await database.isInLibrary(mediaId: mediaID, listType: listType)
-        let entry = UserLibraryEntry(
-            id: "\(mediaID)-\(listType.rawValue)",
-            mediaId: mediaID,
-            folderId: folderID,
-            listType: listType,
-            addedAt: addedAt
-        )
-        try await database.addToLibrary(entry)
+        if !exists {
+            let entry = UserLibraryEntry(
+                id: "\(mediaID)-\(listType.rawValue)",
+                mediaId: mediaID,
+                folderId: folderID,
+                listType: listType,
+                addedAt: addedAt
+            )
+            try await database.addToLibrary(entry)
+        }
         return !exists
     }
 
@@ -451,20 +453,22 @@ actor LibraryCSVImportService {
         let isDuplicate = existing?.isCompleted == true
             && abs((existing?.watchedAt.timeIntervalSince1970 ?? 0) - row.occurredAt.timeIntervalSince1970) < 1
 
-        let history = WatchHistory(
-            id: Self.historyID(mediaID: row.mediaID, occurredAt: row.occurredAt),
-            mediaId: row.mediaID,
-            episodeId: nil,
-            title: row.title,
-            progress: 1,
-            duration: 1,
-            quality: nil,
-            debridService: nil,
-            streamURL: nil,
-            watchedAt: row.occurredAt,
-            isCompleted: true
-        )
-        try await database.saveWatchHistory(history)
+        if !isDuplicate {
+            let history = WatchHistory(
+                id: Self.historyID(mediaID: row.mediaID, occurredAt: row.occurredAt),
+                mediaId: row.mediaID,
+                episodeId: nil,
+                title: row.title,
+                progress: 1,
+                duration: 1,
+                quality: nil,
+                debridService: nil,
+                streamURL: nil,
+                watchedAt: row.occurredAt,
+                isCompleted: true
+            )
+            try await database.saveWatchHistory(history)
+        }
         return !isDuplicate
     }
 

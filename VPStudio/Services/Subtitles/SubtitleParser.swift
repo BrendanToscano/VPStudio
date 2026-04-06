@@ -30,8 +30,9 @@ struct SubtitleParser {
     // MARK: - SRT Parser
 
     static func parseSRT(_ content: String) -> [SubtitleCue] {
+        let normalizedContent = normalizeNewlines(content)
         var cues: [SubtitleCue] = []
-        let blocks = content.components(separatedBy: "\n\n")
+        let blocks = normalizedContent.components(separatedBy: "\n\n")
 
         for block in blocks {
             let lines = block.trimmingCharacters(in: .whitespacesAndNewlines).components(separatedBy: "\n")
@@ -59,9 +60,10 @@ struct SubtitleParser {
     // MARK: - VTT Parser
 
     static func parseVTT(_ content: String) -> [SubtitleCue] {
+        let normalizedContent = normalizeNewlines(content)
         var cues: [SubtitleCue] = []
         // Skip WEBVTT header
-        let stripped = content.replacingOccurrences(of: "^WEBVTT[^\n]*\n", with: "", options: .regularExpression)
+        let stripped = normalizedContent.replacingOccurrences(of: "^WEBVTT[^\n]*\n", with: "", options: .regularExpression)
         let blocks = stripped.components(separatedBy: "\n\n")
         var index = 0
 

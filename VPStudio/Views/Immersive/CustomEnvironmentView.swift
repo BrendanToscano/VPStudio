@@ -14,6 +14,7 @@ struct CustomEnvironmentView: View {
     @State private var cinemaScreen: ModelEntity?
     @State private var controlsAnchor: Entity?
     @State private var lastMaterialSourceID: ObjectIdentifier?
+    @State private var subtitleEntity: Entity?
     @State private var autoDismissTask: Task<Void, Never>?
 
     var body: some View {
@@ -56,6 +57,24 @@ struct CustomEnvironmentView: View {
                 anchor.addChild(controlsPanel)
             }
 
+            // MARK: Subtitle attachment
+            if let subtitlePanel = attachments.entity(for: "immersiveSubtitle") {
+                // Position below the screen if found, otherwise a sensible default.
+                if let screen = cinemaScreen {
+                    let bounds = screen.visualBounds(relativeTo: nil)
+                    subtitlePanel.position = SIMD3<Float>(
+                        screen.position.x,
+                        screen.position.y + bounds.min.y - 0.15,
+                        screen.position.z
+                    )
+                    subtitlePanel.orientation = screen.orientation
+                } else {
+                    subtitlePanel.position = SIMD3<Float>(0, 0.6, -4)
+                }
+                content.add(subtitlePanel)
+                subtitleEntity = subtitlePanel
+            }
+
         } update: { content, attachments in
             // MARK: Cinema screen material (cached)
             if let screen = cinemaScreen {
@@ -77,6 +96,19 @@ struct CustomEnvironmentView: View {
                 }
             }
 
+            // MARK: Subtitle position tracking
+            if let subEnt = attachments.entity(for: "immersiveSubtitle"),
+               let screen = cinemaScreen {
+                let bounds = screen.visualBounds(relativeTo: nil)
+                subEnt.position = SIMD3<Float>(
+                    screen.position.x,
+                    screen.position.y + bounds.min.y - 0.15,
+                    screen.position.z
+                )
+                subEnt.orientation = screen.orientation
+                subtitleEntity = subEnt
+            }
+
             // MARK: Controls anchor tracking
             if headTracker.isTracking, let anchor = controlsAnchor {
                 let m = headTracker.headTransform
@@ -94,6 +126,18 @@ struct CustomEnvironmentView: View {
                     ImmersivePlayerControlsView()
                         .frame(width: 520)
                         .transition(.opacity.combined(with: .scale(0.92)))
+                }
+            }
+
+            Attachment(id: "immersiveSubtitle") {
+                if let subtitleText = engine.currentSubtitleText, !subtitleText.isEmpty {
+                    ImmersiveSubtitleRenderer(
+                        text: subtitleText,
+                        fontSize: ScreenSizePreset.cinema.subtitleFontSize,
+                        maxWidth: ScreenSizePreset.cinema.subtitleMaxWidth
+                    )
+                    .transition(.opacity)
+                    .animation(.easeInOut(duration: 0.15), value: subtitleText)
                 }
             }
         }
@@ -142,6 +186,7 @@ struct CustomEnvironmentView: View {
             // Break lingering RealityKit references.
             cinemaScreen = nil
             controlsAnchor = nil
+            subtitleEntity = nil
             lastMaterialSourceID = nil
         }
     }

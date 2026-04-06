@@ -45,6 +45,12 @@ final class VPPlayerEngine {
     var fps: Double = 0
     var videoBitrate: Int64 = 0
 
+    // MARK: - HDR Metadata
+
+    /// Mastering-display and content-light-level metadata extracted from the
+    /// active video track.  `nil` until the first video track is inspected.
+    var hdrMetadata: HDRDisplayMetadata?
+
     // MARK: - Dim Passthrough (visionOS)
 
     /// Whether the passthrough (real world) should be dimmed during playback.
@@ -96,9 +102,9 @@ final class VPPlayerEngine {
 
     // MARK: - Stereo Mode Detection
 
-    /// Infers and sets `stereoMode` from a media title or filename.
-    func updateStereoMode(from title: String) {
-        stereoMode = SpatialVideoTitleDetector.stereoMode(fromTitle: title)
+    /// Infers and sets `stereoMode` from a media title or filename and optional codec hint.
+    func updateStereoMode(from title: String, codecHint: String? = nil) {
+        stereoMode = SpatialVideoTitleDetector.stereoMode(fromTitle: title, codecHint: codecHint)
     }
 
     // MARK: - Track Selection

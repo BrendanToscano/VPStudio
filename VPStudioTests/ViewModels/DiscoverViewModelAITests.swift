@@ -13,7 +13,10 @@ struct DiscoverViewModelAITests {
         [{"title":"Test Movie","year":2024,"type":"movie","reason":"Great","tmdbId":123}]
         """
     ) async throws -> (db: DatabaseManager, settings: SettingsManager, aiManager: AIAssistantManager) {
-        let db = try DatabaseManager()
+        let dbPath = FileManager.default.temporaryDirectory
+            .appendingPathComponent("vpstudio-discover-ai-tests-\(UUID().uuidString).sqlite")
+            .path
+        let db = try DatabaseManager(path: dbPath)
         try await db.migrate()
         let secretStore = TestSecretStore()
         let settings = SettingsManager(database: db, secretStore: secretStore)
@@ -405,6 +408,74 @@ struct DiscoverViewModelAITests {
 
         #expect(vm.aiRecommendations.count == 1, "Only Movie C should survive filtering")
         #expect(vm.aiRecommendations.first?.title == "Movie C")
+    }
+
+    @Test
+    @MainActor
+    func refreshLocalPersonalizationStateReloadsContinueWatchingAndReappliesFilters() async throws {
+        let deps = try await Self.makeDependencies()
+        let vm = Self.makeViewModel(database: deps.db)
+
+        vm.aiRecommendations = [
+            Self.sampleRecommendation(title: "Watched Movie", tmdbId: 100),
+            Self.sampleRecommendation(title: "Rated Movie", tmdbId: 200),
+            Self.sampleRecommendation(title: "Watchlist Movie", tmdbId: 300),
+            Self.sampleRecommendation(title: "Fresh Movie", tmdbId: 400),
+        ]
+
+        try await deps.db.saveMediaItem(
+            MediaItem(
+                id: "ttcontinue1",
+                type: .movie,
+                title: "Continue Watching",
+                tmdbId: 900
+            )
+        )
+        try await deps.db.saveWatchHistory(
+            WatchHistory(
+                id: "continue-watching-history",
+                mediaId: "ttcontinue1",
+                title: "Continue Watching",
+                progress: 1800,
+                duration: 3600,
+                watchedAt: Date(),
+                isCompleted: false
+            )
+        )
+
+        try await deps.db.saveWatchHistory(
+            WatchHistory(
+                id: "watched-movie-history",
+                mediaId: "movie-tmdb-100",
+                title: "Watched Movie",
+                progress: 7200,
+                duration: 7200,
+                watchedAt: Date(),
+                isCompleted: true
+            )
+        )
+
+        try await deps.db.saveTasteEvent(
+            TasteEvent(
+                mediaId: "movie-tmdb-200",
+                eventType: .rated,
+                metadata: ["title": "Rated Movie", "rating": "8"]
+            )
+        )
+
+        try await Self.addLibraryEntry(
+            db: deps.db,
+            mediaId: "movie-tmdb-300",
+            title: "Watchlist Movie",
+            listType: .watchlist,
+            tmdbId: 300
+        )
+
+        await vm.refreshLocalPersonalizationState()
+
+        #expect(vm.continueWatching.count == 1)
+        #expect(vm.continueWatching.first?.preview.title == "Continue Watching")
+        #expect(vm.aiRecommendations.map(\.title) == ["Fresh Movie"])
     }
 
     // MARK: - Auto-generate Toggle

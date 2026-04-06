@@ -6,6 +6,7 @@ actor AllDebridService: DebridServiceProtocol {
     private let baseURL = "https://api.alldebrid.com/v4"
     private let session: URLSession
     private let agent = "VPStudio"
+    private var selectedFileIDsByTorrent: [String: Set<Int>] = [:]
 
     init(apiToken: String, session: URLSession = .shared) {
         self.apiToken = apiToken
@@ -63,7 +64,41 @@ actor AllDebridService: DebridServiceProtocol {
     }
 
     func selectFiles(torrentId: String, fileIds: [Int]) async throws {
-        // AllDebrid auto-selects files
+        if fileIds.isEmpty {
+            selectedFileIDsByTorrent.removeValue(forKey: torrentId)
+            return
+        }
+        selectedFileIDsByTorrent[torrentId] = Set(fileIds)
+    }
+
+    func selectMatchingEpisodeFile(
+        torrentId: String,
+        seasonNumber: Int,
+        episodeNumber: Int
+    ) async throws -> Bool {
+        let params = ["id": torrentId]
+        let response: ADResponse<ADMagnetStatus> = try await request(path: "/magnet/status", params: params)
+        guard let links = response.data.links else { return false }
+
+        var bestMatchIndex: Int?
+        var bestMatchSize: Int64 = 0
+        for (index, link) in links.enumerated() {
+            guard let fileName = link.filename,
+                  EpisodeTokenMatcher.matches(title: fileName, season: seasonNumber, episode: episodeNumber) else {
+                continue
+            }
+
+            let size = link.size ?? 0
+            if bestMatchIndex == nil || size > bestMatchSize {
+                bestMatchIndex = index
+                bestMatchSize = size
+            }
+        }
+
+        guard let bestMatchIndex else { return false }
+        // Use 1-based index as a stable surrogate ID for locally selecting a link.
+        try await selectFiles(torrentId: torrentId, fileIds: [bestMatchIndex + 1])
+        return true
     }
 
     func getStreamURL(torrentId: String) async throws -> StreamInfo {
@@ -75,10 +110,16 @@ actor AllDebridService: DebridServiceProtocol {
             throw DebridError.fileNotReady(status.status ?? "processing")
         }
 
-        guard let link = status.links?.first?.link else {
+        let selectedIDs = selectedFileIDsByTorrent[torrentId] ?? []
+        let selectedLink = status.links?.enumerated().first(where: { pair in
+            selectedIDs.contains(pair.offset + 1)
+        })?.element.link
+        let fallbackLink = status.links?.first?.link
+        guard let link = selectedLink ?? fallbackLink else {
             throw DebridError.torrentNotFound(torrentId)
         }
 
+        selectedFileIDsByTorrent.removeValue(forKey: torrentId)
         let url = try await unrestrict(link: link)
         let fileName = status.filename ?? "Unknown"
 

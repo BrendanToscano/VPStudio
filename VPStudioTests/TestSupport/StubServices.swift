@@ -45,12 +45,22 @@ actor StubDebridManager: DetailDebridManaging {
     var cacheResults: [String: (CacheStatus, DebridServiceType)] = [:]
     var resolvedStream = Fixtures.stream()
     var resolveError: Error?
+    private(set) var lastResolvedHash: String?
+    private(set) var lastResolvedSeasonNumber: Int?
+    private(set) var lastResolvedEpisodeNumber: Int?
+
+    func setResolvedStream(_ stream: StreamInfo) {
+        resolvedStream = stream
+    }
 
     func checkCacheAcrossServices(hashes: [String]) async throws -> [String: (CacheStatus, DebridServiceType)] {
         cacheResults
     }
 
-    func resolveStream(hash: String, preferredService: DebridServiceType?) async throws -> StreamInfo {
+    func resolveStream(hash: String, preferredService: DebridServiceType?, seasonNumber: Int?, episodeNumber: Int?) async throws -> StreamInfo {
+        lastResolvedHash = hash
+        lastResolvedSeasonNumber = seasonNumber
+        lastResolvedEpisodeNumber = episodeNumber
         if let resolveError { throw resolveError }
         return resolvedStream
     }

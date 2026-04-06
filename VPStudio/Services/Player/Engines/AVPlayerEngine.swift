@@ -56,14 +56,13 @@ struct AVPlayerEngine: PlayerEngine {
         let deadline = Date().addingTimeInterval(timeout)
 
         while Date() < deadline {
-            if let itemError = item.error {
-                throw PlayerEngineError.initializationFailed(.avPlayer, itemError.localizedDescription)
+            if item.error != nil {
+                throw PlayerEngineError.initializationFailed(.avPlayer, failureDescription(for: item))
             }
 
             switch item.status {
             case .failed:
-                let reason = item.error?.localizedDescription ?? "Unknown AVPlayer item error"
-                throw PlayerEngineError.initializationFailed(.avPlayer, reason)
+                throw PlayerEngineError.initializationFailed(.avPlayer, failureDescription(for: item))
 
             case .readyToPlay:
                 if player.rate > 0 || player.timeControlStatus == .playing {
@@ -88,5 +87,31 @@ struct AVPlayerEngine: PlayerEngine {
         }
 
         throw PlayerEngineError.startupTimeout(.avPlayer)
+    }
+
+    private static func failureDescription(for item: AVPlayerItem) -> String {
+        if let event = item.errorLog()?.events.last {
+            let statusCode = event.errorStatusCode
+            let comment = event.errorComment?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+
+            if statusCode > 0, let comment, !comment.isEmpty {
+                return "HTTP \(statusCode): \(comment)"
+            }
+
+            if statusCode > 0 {
+                return "HTTP \(statusCode) while loading stream."
+            }
+
+            if let comment, !comment.isEmpty {
+                return comment
+            }
+        }
+
+        if let itemError = item.error {
+            return itemError.localizedDescription
+        }
+
+        return "Unknown AVPlayer item error"
     }
 }

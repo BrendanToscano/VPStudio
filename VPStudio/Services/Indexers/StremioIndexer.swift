@@ -1,6 +1,8 @@
 import Foundation
+import os
 
 struct StremioIndexer: TorrentIndexer {
+    private static let logger = Logger(subsystem: "com.vpstudio", category: "stremio-indexer")
     let name: String
     private let baseURL: String
     private let endpointPath: String
@@ -42,9 +44,16 @@ struct StremioIndexer: TorrentIndexer {
 
     func searchByQuery(query: String, type: MediaType) async throws -> [TorrentResult] {
         guard let imdbID = query.range(of: "tt\\d+", options: .regularExpression).map({ String(query[$0]) }) else {
+            Self.logger.debug("Stremio search skipped — query has no IMDb ID: \(query, privacy: .public)")
             return []
         }
-        return try await search(imdbId: imdbID, type: type, season: nil, episode: nil)
+        let episodeContext = EpisodeTokenMatcher.context(fromQuery: query)
+        return try await search(
+            imdbId: imdbID,
+            type: type,
+            season: episodeContext?.season,
+            episode: episodeContext?.episode
+        )
     }
 
     private func makeManifestURL() throws -> URL {
@@ -106,9 +115,26 @@ struct StremioIndexer: TorrentIndexer {
                 ?? (stream["externalUrl"] as? String)
                 ?? ""
 
-            let infoHash = (stream["infoHash"] as? String)
-                ?? JSONValueParsing.extractInfoHash(from: urlString)
-                ?? JSONValueParsing.extractInfoHash(from: stream["magnet"] as? String)
+            let infoHash: String? = {
+                if let declared = stream["infoHash"] as? String {
+                    let normalized = declared.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !normalized.isEmpty { return normalized.lowercased() }
+                }
+
+                if let extracted = JSONValueParsing.extractInfoHash(from: urlString), !extracted.isEmpty {
+                    return extracted
+                }
+
+                if let external = stream["externalUrl"] as? String, let extracted = JSONValueParsing.extractInfoHash(from: external), !extracted.isEmpty {
+                    return extracted
+                }
+
+                if let extracted = JSONValueParsing.extractInfoHash(from: stream["magnet"] as? String), !extracted.isEmpty {
+                    return extracted
+                }
+
+                return nil
+            }()
             guard let infoHash, !infoHash.isEmpty else { return nil }
 
             let hints = stream["behaviorHints"] as? [String: Any]

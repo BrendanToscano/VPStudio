@@ -28,6 +28,18 @@ struct MediaItem: Codable, Sendable, Identifiable, Equatable, FetchableRecord, P
         return URL(string: "https://image.tmdb.org/t/p/original\(path)")
     }
 
+    var hasArtwork: Bool {
+        let hasPoster = posterPath?.isEmpty == false
+        let hasBackdrop = backdropPath?.isEmpty == false
+        return hasPoster || hasBackdrop
+    }
+
+    func withID(_ newID: String) -> MediaItem {
+        var copy = self
+        copy.id = newID
+        return copy
+    }
+
     var yearString: String {
         year.map(String.init) ?? ""
     }
@@ -129,6 +141,9 @@ struct MediaPreview: Sendable, Identifiable, Equatable, Hashable {
     var backdropPath: String?
     var imdbRating: Double?
     var tmdbId: Int?
+    var episodeId: String? = nil
+    var seasonNumber: Int? = nil
+    var episodeNumber: Int? = nil
 
     var posterURL: URL? {
         guard let path = posterPath else { return nil }

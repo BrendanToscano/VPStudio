@@ -39,8 +39,16 @@ struct EZTVIndexer: TorrentIndexer {
             for torrent in torrents {
                 guard let hash = torrent.hash, !hash.isEmpty else { continue }
 
-                if let season, let epSeason = torrent.season.flatMap({ Int($0) }), epSeason != 0, epSeason != season { continue }
-                if let episode, let epNum = torrent.episode.flatMap({ Int($0) }), epNum != 0, epNum != episode { continue }
+                if let season,
+                   let epSeason = positiveEpisodeComponent(from: torrent.season),
+                   epSeason != season {
+                    continue
+                }
+                if let episode,
+                   let epNum = positiveEpisodeComponent(from: torrent.episode),
+                   epNum != episode {
+                    continue
+                }
                 if let season, let episode {
                     let titleForMatch = torrent.title ?? torrent.filename ?? ""
                     guard EpisodeTokenMatcher.matches(title: titleForMatch, season: season, episode: episode) else { continue }
@@ -68,31 +76,72 @@ struct EZTVIndexer: TorrentIndexer {
 
     func searchByQuery(query: String, type: MediaType) async throws -> [TorrentResult] {
         guard type == .series else { return [] }
-        let url = try buildURL(queryItems: [
-            URLQueryItem(name: "search", value: query),
-            URLQueryItem(name: "limit", value: "100"),
-        ])
 
-        let (data, response) = try await session.data(from: url)
-        guard let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) else {
-            throw URLError(.badServerResponse)
-        }
-        let decoder = JSONDecoder()
-        decoder.keyDecodingStrategy = .convertFromSnakeCase
-        let eztvResponse = try decoder.decode(EZTVResponse.self, from: data)
+        let context = EpisodeTokenMatcher.context(fromQuery: query)
+        let maxPages = 3
+        var allResults: [TorrentResult] = []
 
-        return (eztvResponse.torrents ?? []).compactMap { torrent -> TorrentResult? in
-            guard let hash = torrent.hash, !hash.isEmpty else { return nil }
-            return TorrentResult.fromSearch(
-                infoHash: hash,
-                title: torrent.title ?? "Unknown",
-                sizeBytes: torrent.sizeBytes.flatMap { Int64($0) } ?? 0,
-                seeders: torrent.seeds ?? 0,
-                leechers: torrent.peers ?? 0,
-                indexerName: name,
-                magnetURI: torrent.magnetUrl
-            )
+        for page in 1...maxPages {
+            let url = try buildURL(queryItems: [
+                URLQueryItem(name: "search", value: query),
+                URLQueryItem(name: "limit", value: "100"),
+                URLQueryItem(name: "page", value: String(page)),
+            ])
+
+            let (data, response) = try await session.data(from: url)
+            guard let httpResponse = response as? HTTPURLResponse,
+                  (200...299).contains(httpResponse.statusCode) else {
+                throw URLError(.badServerResponse)
+            }
+
+            let decoder = JSONDecoder()
+            decoder.keyDecodingStrategy = .convertFromSnakeCase
+            let eztvResponse = try decoder.decode(EZTVResponse.self, from: data)
+            let torrents = eztvResponse.torrents ?? []
+            if torrents.isEmpty { break }
+
+            for torrent in torrents {
+                guard let hash = torrent.hash, !hash.isEmpty else { continue }
+
+                if let context {
+                    if let epSeason = positiveEpisodeComponent(from: torrent.season), epSeason != context.season {
+                        continue
+                    }
+                    if let epNum = positiveEpisodeComponent(from: torrent.episode), epNum != context.episode {
+                        continue
+                    }
+                    let titleForMatch = torrent.title ?? torrent.filename ?? ""
+                    guard EpisodeTokenMatcher.matches(
+                        title: titleForMatch,
+                        season: context.season,
+                        episode: context.episode
+                    ) else { continue }
+                }
+
+                allResults.append(TorrentResult.fromSearch(
+                    infoHash: hash,
+                    title: torrent.title ?? torrent.filename ?? "Unknown",
+                    sizeBytes: torrent.sizeBytes.flatMap { Int64($0) } ?? 0,
+                    seeders: torrent.seeds ?? 0,
+                    leechers: torrent.peers ?? 0,
+                    indexerName: name,
+                    magnetURI: torrent.magnetUrl
+                ))
+            }
+
+            if torrents.count < 100 { break }
         }
+
+        return allResults
+    }
+
+    private func positiveEpisodeComponent(from rawValue: String?) -> Int? {
+        guard let rawValue,
+              let parsed = Int(rawValue.trimmingCharacters(in: .whitespacesAndNewlines)),
+              parsed > 0 else {
+            return nil
+        }
+        return parsed
     }
 
     private func buildURL(queryItems: [URLQueryItem]) throws -> URL {

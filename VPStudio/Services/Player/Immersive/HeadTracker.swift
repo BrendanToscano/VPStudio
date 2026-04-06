@@ -106,15 +106,17 @@ final class HeadTracker {
         let alpha = smoothingFactor
 
         // Use Task.detached so the ARKit poll loop runs off the MainActor.
-        // Capture session and provider as local lets — they are NOT captured
-        // strongly on self, so stop() niling the instance properties lets ARC
-        // release them once the task exits.
+        // Capture self strongly inside the task (via `guard let self`) to avoid
+        // repeated optional lookups and to ensure loop invariants are updated
+        // consistently with `stop()` state changes.
         pollTask = Task.detached { [weak self] in
+            guard let self else { return }
+
             do {
                 try await session.run([provider])
             } catch {
                 logger.error("ARKit session failed to start: \(error.localizedDescription)")
-                await MainActor.run { self?.isRunning = false }
+                await MainActor.run { self.isRunning = false }
                 return
             }
 
@@ -124,6 +126,11 @@ final class HeadTracker {
             var hasSmoothed = false
 
             while !Task.isCancelled {
+                let continueTracking = await MainActor.run {
+                    self.isRunning
+                }
+                guard continueTracking else { break }
+
                 let timestamp = CACurrentMediaTime()
                 if let anchor = provider.queryDeviceAnchor(atTimestamp: timestamp) {
                     let raw = anchor.originFromAnchorTransform
@@ -149,22 +156,34 @@ final class HeadTracker {
                     // Recompose into a 4x4 matrix.
                     var mat = simd_float4x4(finalRot)
                     mat.columns.3 = SIMD4<Float>(finalPos.x, finalPos.y, finalPos.z, 1)
+                    let headMatrix = mat
 
                     await MainActor.run {
-                        guard let self else { return }
-                        self.headTransform = mat
+                        self.headTransform = headMatrix
                         if self.initialHeadTransform == nil {
-                            self.initialHeadTransform = mat
+                            self.initialHeadTransform = headMatrix
                         }
                         if !self.isTracking {
                             self.isTracking = true
                         }
                     }
                 }
-                let currentInterval = await MainActor.run { self?.isIdle == true } ? Self.idlePollInterval : interval
+
+                let currentInterval = await MainActor.run {
+                    Self.pollingInterval(isIdle: self.isIdle, activeInterval: interval)
+                }
                 try? await Task.sleep(for: currentInterval)
             }
+
+            await MainActor.run {
+                self.isRunning = false
+                self.isTracking = false
+            }
         }
+    }
+
+    nonisolated static func pollingInterval(isIdle: Bool, activeInterval: Duration) -> Duration {
+        isIdle ? idlePollInterval : activeInterval
     }
 
     func stop() {

@@ -70,12 +70,6 @@ actor RealDebridService: DebridServiceProtocol {
     }
 
     func addMagnet(hash: String) async throws -> String {
-        // Check if torrent already exists
-        let existing: [RDTorrentInfo] = try await request(method: "GET", path: "/torrents?limit=2500")
-        if let found = existing.first(where: { $0.hash?.lowercased() == hash.lowercased() }) {
-            return found.id
-        }
-
         let magnet = "magnet:?xt=urn:btih:\(hash)"
         let body = "magnet=\(magnet.addingPercentEncoding(withAllowedCharacters: Self.formEncodingAllowed) ?? magnet)"
         let response: RDAddMagnetResponse = try await request(method: "POST", path: "/torrents/addMagnet", body: body)
@@ -90,6 +84,15 @@ actor RealDebridService: DebridServiceProtocol {
         } catch is DecodingError {
             // 204 No Content — file selection succeeded
         }
+    }
+
+    func selectMatchingEpisodeFile(torrentId: String, seasonNumber: Int, episodeNumber: Int) async throws -> Bool {
+        let info: RDTorrentInfo = try await request(method: "GET", path: "/torrents/info/\(torrentId)")
+        guard let matchedFile = preferredEpisodeFile(in: info.files, seasonNumber: seasonNumber, episodeNumber: episodeNumber) else {
+            return false
+        }
+        try await selectFiles(torrentId: torrentId, fileIds: [matchedFile.id])
+        return true
     }
 
     func getStreamURL(torrentId: String) async throws -> StreamInfo {
@@ -126,6 +129,38 @@ actor RealDebridService: DebridServiceProtocol {
             throw DebridError.networkError("Invalid unrestrict URL")
         }
         return url
+    }
+
+    private func preferredEpisodeFile(
+        in files: [RDFile]?,
+        seasonNumber: Int,
+        episodeNumber: Int
+    ) -> RDFile? {
+        guard let files else { return nil }
+
+        let tokens = episodeMatchTokens(seasonNumber: seasonNumber, episodeNumber: episodeNumber)
+        let matchedVideoFiles = files.filter { file in
+            guard let path = file.path?.lowercased(), Self.isProbablyVideoFile(path) else { return false }
+            return tokens.contains { path.contains($0) }
+        }
+
+        return matchedVideoFiles.max(by: { ($0.bytes ?? 0) < ($1.bytes ?? 0) })
+    }
+
+    private func episodeMatchTokens(seasonNumber: Int, episodeNumber: Int) -> [String] {
+        let s2 = String(format: "%02d", seasonNumber)
+        let e2 = String(format: "%02d", episodeNumber)
+        return [
+            "s\(s2)e\(e2)",
+            "\(seasonNumber)x\(e2)",
+            "season \(seasonNumber) episode \(episodeNumber)",
+            "season.\(seasonNumber).episode.\(episodeNumber)",
+            "ep\(e2)"
+        ]
+    }
+
+    private static func isProbablyVideoFile(_ path: String) -> Bool {
+        [".mkv", ".mp4", ".avi", ".mov", ".m4v", ".ts"].contains { path.hasSuffix($0) }
     }
 
     private static let formEncodingAllowed: CharacterSet = {
@@ -200,8 +235,17 @@ private struct RDTorrentInfo: Sendable {
     let bytes: Int64?
     let status: String?
     let links: [String]?
+    let files: [RDFile]?
 }
 extension RDTorrentInfo: Decodable {}
+
+private struct RDFile: Sendable {
+    let id: Int
+    let path: String?
+    let bytes: Int64?
+    let selected: Int?
+}
+extension RDFile: Decodable {}
 
 private struct RDUnrestrictResponse: Sendable {
     let id: String

@@ -57,6 +57,33 @@ struct DatabaseMediaCacheTests {
         #expect(fetched?.title == "Dune: Part Two")
         #expect(fetched?.year == 2024)
     }
+
+    @Test func fetchMediaItemsResolvingAliasesMatchesTMDBBackedItems() async throws {
+        let (db, tempDir) = try await makeTemporaryDatabase(named: "media-cache-alias.sqlite")
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let canonical = MediaItem(
+            id: "tt1160419",
+            type: .movie,
+            title: "Dune",
+            year: 2021,
+            posterPath: "/poster.jpg",
+            tmdbId: 438631,
+            lastFetched: Date()
+        )
+        try await db.saveMediaItem(canonical)
+
+        let resolved = try await db.fetchMediaItemsResolvingAliases(ids: [
+            "movie-tmdb-438631",
+            "tt1160419",
+            "missing"
+        ])
+
+        #expect(resolved["tt1160419"]?.title == "Dune")
+        #expect(resolved["movie-tmdb-438631"]?.title == "Dune")
+        #expect(resolved["movie-tmdb-438631"]?.tmdbId == 438631)
+        #expect(resolved["missing"] == nil)
+    }
 }
 
 // MARK: - Database Watch History Tests
@@ -179,7 +206,7 @@ struct DatabaseRetentionPolicyTests {
         #expect(secondaryRetained.map(\.id) == ["evt-secondary-newest", "evt-secondary-expired"])
     }
 
-    @Test func saveWatchHistoryAutomaticallyPrunesExpiredEntries() async throws {
+    @Test func retentionSweepPrunesExpiredEntries() async throws {
         let (db, tempDir) = try await makeTemporaryDatabase(named: "watch-history-auto-retention.sqlite")
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
@@ -206,6 +233,12 @@ struct DatabaseRetentionPolicyTests {
 
         try await db.saveWatchHistory(stale)
         try await db.saveWatchHistory(fresh)
+
+        // Retention is now deferred to explicit sweep (not inline on save)
+        let beforeSweep = try await db.fetchWatchHistory(limit: 10)
+        #expect(beforeSweep.count == 2)
+
+        _ = try await db.runRetentionSweepIfNeeded(interval: 0)
 
         let retained = try await db.fetchWatchHistory(limit: 10)
         #expect(retained.map(\.id) == [fresh.id])

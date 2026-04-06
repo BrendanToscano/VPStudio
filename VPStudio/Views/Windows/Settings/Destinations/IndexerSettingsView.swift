@@ -8,8 +8,8 @@ struct IndexerSettingsView: View {
     @State private var configs: [IndexerConfig] = []
     @State private var isShowingEditor = false
     @State private var draft = IndexerDraft.new()
-    @State private var saveErrorMessage: String?
-    @State private var testMessage: String?
+    @State private var surfaceError: AppError?
+    @State private var notice: SettingsInlineNotice?
     @State private var testingConfigID: String?
 
     var body: some View {
@@ -24,20 +24,22 @@ struct IndexerSettingsView: View {
             .sheet(isPresented: $isShowingEditor) {
                 editorSheet
             }
-            .alert("Indexer Error", isPresented: saveErrorPresented) {
-                Button("OK", role: .cancel) {}
-            } message: {
-                Text(saveErrorMessage ?? "Unknown error")
-            }
-            .alert("Connection Test", isPresented: testMessagePresented) {
-                Button("OK", role: .cancel) {}
-            } message: {
-                Text(testMessage ?? "")
-            }
     }
 
     private var indexerList: some View {
         List {
+            if let notice {
+                Section {
+                    SettingsNoticeBanner(notice: notice)
+                }
+            }
+
+            if let surfaceError {
+                Section {
+                    SettingsErrorBanner(error: surfaceError)
+                }
+            }
+
             Section("Configured Indexers") {
                 if configs.isEmpty {
                     Text("No indexers configured")
@@ -154,24 +156,6 @@ struct IndexerSettingsView: View {
         }
     }
 
-    private var saveErrorPresented: Binding<Bool> {
-        Binding(
-            get: { saveErrorMessage != nil },
-            set: { isPresented in
-                if !isPresented { saveErrorMessage = nil }
-            }
-        )
-    }
-
-    private var testMessagePresented: Binding<Bool> {
-        Binding(
-            get: { testMessage != nil },
-            set: { isPresented in
-                if !isPresented { testMessage = nil }
-            }
-        )
-    }
-
     @ViewBuilder
     private func indexerRow(_ config: IndexerConfig) -> some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -258,14 +242,16 @@ struct IndexerSettingsView: View {
         do {
             let fetched = try await appState.database.fetchAllIndexerConfigs()
             configs = fetched.sorted { $0.priority < $1.priority }
+            surfaceError = nil
         } catch {
-            saveErrorMessage = error.localizedDescription
+            surfaceError = AppError(error)
         }
     }
 
     private func saveDraft() async {
         guard draft.validationError == nil else {
-            saveErrorMessage = draft.validationError
+            notice = .warning(draft.validationError ?? "Indexer validation failed.")
+            surfaceError = nil
             return
         }
 
@@ -305,9 +291,12 @@ struct IndexerSettingsView: View {
         do {
             try await saveConfigs(updated)
             configs = try await appState.database.fetchAllIndexerConfigs()
+            notice = .success("Indexer settings saved.")
+            surfaceError = nil
             isShowingEditor = false
         } catch {
-            saveErrorMessage = error.localizedDescription
+            surfaceError = AppError(error)
+            notice = nil
         }
     }
 
@@ -318,8 +307,9 @@ struct IndexerSettingsView: View {
         do {
             try await saveConfigs(updated)
             configs = try await appState.database.fetchAllIndexerConfigs()
+            surfaceError = nil
         } catch {
-            saveErrorMessage = error.localizedDescription
+            surfaceError = AppError(error)
         }
     }
 
@@ -328,8 +318,11 @@ struct IndexerSettingsView: View {
             try await appState.database.deleteIndexerConfig(id: configID)
             await appState.reloadIndexers()
             configs = try await appState.database.fetchAllIndexerConfigs()
+            notice = .success("Indexer removed.")
+            surfaceError = nil
         } catch {
-            saveErrorMessage = error.localizedDescription
+            surfaceError = AppError(error)
+            notice = nil
         }
     }
 
@@ -357,8 +350,11 @@ struct IndexerSettingsView: View {
         do {
             try await saveConfigs(reordered)
             configs = reordered
+            notice = .success("Indexer order updated.")
+            surfaceError = nil
         } catch {
-            saveErrorMessage = error.localizedDescription
+            surfaceError = AppError(error)
+            notice = nil
         }
     }
 
@@ -368,9 +364,11 @@ struct IndexerSettingsView: View {
 
         do {
             try await IndexerConnectivityTester.testConnection(for: config)
-            testMessage = "\(config.name): connection succeeded."
+            notice = .success("\(config.name): connection succeeded.")
+            surfaceError = nil
         } catch {
-            testMessage = "\(config.name): \(error.localizedDescription)"
+            notice = nil
+            surfaceError = AppError(error)
         }
     }
 
@@ -391,8 +389,11 @@ struct IndexerSettingsView: View {
             try await saveConfigs(updated)
             configs = try await appState.database.fetchAllIndexerConfigs()
                 .sorted { $0.priority < $1.priority }
+            notice = .success("Built-in indexer added.")
+            surfaceError = nil
         } catch {
-            saveErrorMessage = error.localizedDescription
+            surfaceError = AppError(error)
+            notice = nil
         }
     }
 

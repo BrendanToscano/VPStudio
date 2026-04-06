@@ -128,11 +128,27 @@ enum ExternalPlayerRouting {
         let hasPlaceholder = normalizedTemplate.contains(encodedURLPlaceholder)
             || normalizedTemplate.contains(rawURLPlaceholder)
 
-        let resolved = normalizedTemplate
-            .replacingOccurrences(of: encodedURLPlaceholder, with: encodedStreamURL)
-            .replacingOccurrences(of: rawURLPlaceholder, with: streamURL.absoluteString)
+        if hasPlaceholder {
+            let resolved = normalizedTemplate
+                .replacingOccurrences(of: encodedURLPlaceholder, with: encodedStreamURL)
+                .replacingOccurrences(of: rawURLPlaceholder, with: streamURL.absoluteString)
+            return URL(string: resolved)
+        }
 
-        return URL(string: hasPlaceholder ? resolved : resolved + encodedStreamURL)
+        guard let templateComponents = URLComponents(string: normalizedTemplate) else {
+            guard let url = URL(string: normalizedTemplate) else { return nil }
+            var delimiter = "?"
+            if url.absoluteString.contains("?") {
+                delimiter = url.absoluteString.hasSuffix("?") || url.absoluteString.hasSuffix("&") ? "" : "&"
+            }
+            return URL(string: "\(url.absoluteString)\(delimiter)url=\(encodedStreamURL)") ?? url
+        }
+
+        var components = templateComponents
+        var queryItems = components.queryItems ?? []
+        queryItems.append(URLQueryItem(name: "url", value: streamURL.absoluteString))
+        components.queryItems = queryItems
+        return components.url
     }
 
     nonisolated private static func normalizedTemplate(_ template: String?) -> String? {
@@ -142,7 +158,8 @@ enum ExternalPlayerRouting {
     }
 
     nonisolated private static func encodeForQueryValue(_ value: String) -> String {
-        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+        var allowed = CharacterSet.urlQueryAllowed
+        allowed.remove(charactersIn: "&=?+")
         return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
     }
 }

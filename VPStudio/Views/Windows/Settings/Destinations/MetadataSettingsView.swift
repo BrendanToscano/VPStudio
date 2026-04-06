@@ -9,29 +9,8 @@ struct MetadataSettingsView: View {
     @State private var initialTMDBApiKey = ""
     @State private var isSaved = false
     @State private var isTestingApiKey = false
-    @State private var saveErrorMessage: String?
-    @State private var apiKeyTestStatus: APIKeyTestStatus?
-
-    private struct APIKeyTestStatus {
-        let message: String
-        let isSuccess: Bool
-
-        var symbolName: String {
-            isSuccess ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"
-        }
-
-        var tint: Color {
-            isSuccess ? .green : .red
-        }
-
-        static func success(_ message: String) -> Self {
-            Self(message: message, isSuccess: true)
-        }
-
-        static func failure(_ message: String) -> Self {
-            Self(message: message, isSuccess: false)
-        }
-    }
+    @State private var surfaceError: AppError?
+    @State private var notice: SettingsInlineNotice?
 
     var body: some View {
         Form {
@@ -61,35 +40,23 @@ struct MetadataSettingsView: View {
                         .foregroundStyle(.green)
                 }
 
-                if let status = apiKeyTestStatus {
-                    Label(status.message, systemImage: status.symbolName)
-                        .font(.caption)
-                        .foregroundStyle(status.tint)
+                if let notice {
+                    SettingsNoticeBanner(notice: notice)
+                }
+
+                if let surfaceError {
+                    SettingsErrorBanner(error: surfaceError)
                 }
             }
         }
-        .navigationTitle("TMDB API")
+        .navigationTitle("Movie & TV Metadata (TMDB)")
         .task {
-            tmdbApiKey = (try? await appState.settingsManager.getString(key: SettingsKeys.tmdbApiKey)) ?? ""
-            initialTMDBApiKey = tmdbApiKey
-            isSaved = !tmdbApiKey.isEmpty
+            await loadTMDBAPIKey()
         }
         .onChange(of: tmdbApiKey) { _, _ in
             isSaved = false
-            apiKeyTestStatus = nil
-        }
-        .alert(
-            "Could Not Save TMDB Key",
-            isPresented: Binding(
-                get: { saveErrorMessage != nil },
-                set: { isPresented in
-                    if !isPresented { saveErrorMessage = nil }
-                }
-            )
-        ) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text(saveErrorMessage ?? "Unknown error")
+            notice = nil
+            surfaceError = nil
         }
     }
 
@@ -108,17 +75,20 @@ struct MetadataSettingsView: View {
             tmdbApiKey = normalized ?? ""
             initialTMDBApiKey = tmdbApiKey
             isSaved = true
-            saveErrorMessage = nil
+            surfaceError = nil
+            notice = .success("TMDB API key saved.")
             NotificationCenter.default.post(name: .tmdbApiKeyDidChange, object: nil)
         } catch {
             isSaved = false
-            saveErrorMessage = error.localizedDescription
+            notice = nil
+            surfaceError = AppError(error)
         }
     }
 
     private func testTMDBAPIKey() async {
         guard let apiKey = normalizedTMDBApiKey else {
-            apiKeyTestStatus = .failure("Enter an API key before testing.")
+            notice = .warning("Enter an API key before testing.")
+            surfaceError = nil
             return
         }
 
@@ -128,10 +98,25 @@ struct MetadataSettingsView: View {
         do {
             let service = appState.createMetadataService(apiKey: apiKey)
             _ = try await service.getTrending(type: .movie, timeWindow: .week, page: 1)
-            apiKeyTestStatus = .success("TMDB API key is valid.")
+            notice = .success("TMDB API key is valid.")
+            surfaceError = nil
         } catch {
-            apiKeyTestStatus = .failure("TMDB validation failed: \(error.localizedDescription)")
+            notice = nil
+            surfaceError = AppError(error, fallback: .unknown("TMDB validation failed."))
+        }
+    }
+
+    private func loadTMDBAPIKey() async {
+        do {
+            tmdbApiKey = (try await appState.settingsManager.getString(key: SettingsKeys.tmdbApiKey)) ?? ""
+            initialTMDBApiKey = tmdbApiKey
+            isSaved = !tmdbApiKey.isEmpty
+            surfaceError = nil
+        } catch {
+            tmdbApiKey = ""
+            initialTMDBApiKey = ""
+            isSaved = false
+            surfaceError = AppError(error)
         }
     }
 }
-

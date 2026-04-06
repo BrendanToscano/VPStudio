@@ -135,6 +135,7 @@ struct ContentView: View {
                let layout = NavigationLayout(rawValue: savedLayout) {
                 appState.navigationLayout = layout
             }
+            await appState.runQATraktRefreshIfRequested()
             RuntimeMemoryDiagnostics.capture(
                 event: .appBootstrapCompleted,
                 enabled: appState.runtimeDiagnosticsEnabled
@@ -213,9 +214,16 @@ struct ContentView: View {
     }
 
     private func handleTabSelection(_ tab: SidebarTab, state: AppState) {
+        let isReselectingCurrentTab = (state.selectedTab == tab)
+
         withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
             state.selectedTab = tab
-            state.navigationResetID = UUID()
+
+            // Only hard-reset the navigation stack when re-selecting the already-active tab.
+            // Resetting on every tab change causes unnecessary full-stack rebuilds and visible hitches.
+            if isReselectingCurrentTab {
+                state.navigationResetID = UUID()
+            }
         }
         Task { try? await appState.settingsManager.setValue(tab.rawValue, forKey: SettingsKeys.lastSelectedTab) }
         RuntimeMemoryDiagnostics.capture(
@@ -339,13 +347,43 @@ struct VPBottomTabBar: View {
     /// Counts driving badge visibility — wired by parent or defaults to 0.
     var activeDownloadCount: Int = 0
     var settingsWarningCount: Int = 0
-
-    #if os(macOS)
     @State private var hoveredTab: SidebarTab?
+
+    #if os(visionOS)
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
+
+    /// Vision Pro compact layouts need a slightly larger hit target than legacy baseline,
+    /// while regular layouts keep the current 25% upscale from production.
+    private var chromeScale: CGFloat {
+        if QARuntimeOptions.forceCompactNavScale {
+            return 1.1
+        }
+
+        if horizontalSizeClass == .compact || verticalSizeClass == .compact {
+            return 1.1
+        }
+        return 1.25
+    }
+    #else
+    private var chromeScale: CGFloat { 1 }
     #endif
 
+    private var stackSpacing: CGFloat { 8 * chromeScale }
+    private var horizontalPadding: CGFloat { 14 * chromeScale }
+    private var verticalPadding: CGFloat { 9 * chromeScale }
+    private var iconLabelSpacing: CGFloat { 5 * chromeScale }
+    private var tabWidth: CGFloat { 68 * chromeScale }
+    private var tabHeight: CGFloat { 50 * chromeScale }
+    private var separatorHeight: CGFloat { 30 * chromeScale }
+    private var separatorPadding: CGFloat { 3 * chromeScale }
+    private var iconSize: CGFloat { 17 * chromeScale }
+    private var textSize: CGFloat { 10 * chromeScale }
+    private var badgeSize: CGFloat { 7 * chromeScale }
+    private var containerInset: CGFloat { 4 * chromeScale }
+
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: stackSpacing) {
             ForEach(SidebarTab.mainTabs, id: \.self) { tab in
                 tabButton(tab: tab, isSelected: selectedTab == tab) {
                     switch BottomTabRoutingPolicy.action(
@@ -363,37 +401,38 @@ struct VPBottomTabBar: View {
             // Thin separator between main tabs and settings
             Capsule()
                 .fill(.white.opacity(0.15))
-                .frame(width: 1, height: 28)
-                .padding(.horizontal, 2)
+                .frame(width: 1, height: separatorHeight)
+                .padding(.horizontal, separatorPadding)
 
             tabButton(tab: .settings, isSelected: selectedTab == .settings) {
                 onTabSelection(.settings)
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
+        .padding(containerInset)
+        .padding(.horizontal, horizontalPadding)
+        .padding(.vertical, verticalPadding)
         .background(.regularMaterial, in: Capsule())
         .overlay {
             Capsule()
                 .strokeBorder(
                     LinearGradient(
-                        colors: [.white.opacity(0.28), .white.opacity(0.06)],
+                        colors: [.white.opacity(0.30), .white.opacity(0.08)],
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
                     ),
-                    lineWidth: 0.5
+                    lineWidth: 0.8
                 )
         }
-        .shadow(color: .black.opacity(0.07), radius: 24, y: 0)
-        .shadow(color: .black.opacity(0.13), radius: 8, y: 4)
+        .shadow(color: .black.opacity(0.10), radius: 28, y: 6)
+        .shadow(color: .black.opacity(0.18), radius: 12, y: 8)
     }
 
     private func tabButton(tab: SidebarTab, isSelected: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            VStack(spacing: 4) {
+            VStack(spacing: iconLabelSpacing) {
                 ZStack(alignment: .topTrailing) {
                     Image(systemName: tab.icon)
-                        .font(.system(size: 16, weight: isSelected ? .semibold : .medium))
+                        .font(.system(size: iconSize, weight: isSelected ? .semibold : .medium))
 
                     // Badge dot
                     if TabBadgePolicy.shouldShowBadge(
@@ -403,16 +442,16 @@ struct VPBottomTabBar: View {
                     ) {
                         Circle()
                             .fill(TabBadgePolicy.badgeColor(for: tab))
-                            .frame(width: 7, height: 7)
-                            .offset(x: 4, y: -2)
+                            .frame(width: badgeSize, height: badgeSize)
+                            .offset(x: 4 * chromeScale, y: -2 * chromeScale)
                     }
                 }
 
                 Text(tab.rawValue)
-                    .font(.system(size: 9, weight: .medium))
+                    .font(.system(size: textSize, weight: .medium))
             }
             .foregroundStyle(isSelected ? .white : .white.opacity(0.5))
-            .frame(width: 64, height: 48)
+            .frame(width: tabWidth, height: tabHeight)
             .background {
                 #if os(macOS)
                 if isSelected {

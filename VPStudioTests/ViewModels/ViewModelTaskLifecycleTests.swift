@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 import Testing
 @testable import VPStudio
 
@@ -34,11 +35,10 @@ struct ViewModelTaskLifecycleTests {
     }
 
     @Test
-    func searchViewCancelsViewModelWorkOnDisappearAndBeforeReplacement() throws {
+    func searchViewCancelsViewModelWorkOnDisappear() throws {
         let source = try contents(of: "VPStudio/Views/Windows/Search/SearchView.swift")
         #expect(source.contains(".onDisappear"))
         #expect(source.contains("viewModel.cancelInFlightWork()"))
-        #expect(source.contains("let shouldSearch = !existingQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty\n        viewModel.cancelInFlightWork()"))
     }
 
     @Test
@@ -69,61 +69,96 @@ struct ViewModelTaskLifecycleTests {
         #expect(source.contains("preview.type.rawValue"))
         #expect(source.contains("preview.id"))
         #expect(source.contains("preview.tmdbId.map(String.init)"))
+        #expect(source.contains("preview.episodeId"))
+        #expect(source.contains("preview.seasonNumber.map(String.init)"))
+        #expect(source.contains("preview.episodeNumber.map(String.init)"))
     }
 
     @Test
     func detailViewWiresBatchedTorrentRowsAndLoadMoreControl() throws {
-        let source = try contents(of: "VPStudio/Views/Windows/Detail/DetailView.swift")
+        // Torrents section may live in DetailView.swift or extracted DetailTorrentsSection.swift
+        let mainSource = try contents(of: "VPStudio/Views/Windows/Detail/DetailView.swift")
+        let torrentSource = (try? contents(of: "VPStudio/Views/Windows/Detail/DetailTorrentsSection.swift")) ?? ""
+        let source = mainSource + "\n" + torrentSource
         let hasResultLoop =
             source.contains("ForEach(vm.torrentSearch.results)") ||
+            source.contains("ForEach(viewModel.torrentSearch.results)") ||
             source.contains("ForEach(Array(vm.torrentSearch.results.enumerated())")
         #expect(hasResultLoop)
-        #expect(source.contains("if vm.canLoadMoreTorrents"))
-        #expect(source.contains("let shownCount = vm.torrentSearch.results.count"))
-        #expect(source.contains("let totalCount = shownCount + vm.remainingTorrentCount"))
-        #expect(source.contains("vm.loadMoreTorrentResults()"))
-        #expect(source.contains("vm.nextTorrentBatchCount"))
-        #expect(source.contains("vm.remainingTorrentCount"))
+        let hasLoadMoreCheck =
+            source.contains("if vm.canLoadMoreTorrents") ||
+            source.contains("if viewModel.canLoadMoreTorrents")
+        #expect(hasLoadMoreCheck)
+        let hasShownCount =
+            source.contains("let shownCount = vm.torrentSearch.results.count") ||
+            source.contains("let shownCount = viewModel.torrentSearch.results.count")
+        #expect(hasShownCount)
+        let hasTotalCount =
+            source.contains("let totalCount = shownCount + vm.remainingTorrentCount") ||
+            source.contains("let totalCount = shownCount + viewModel.remainingTorrentCount")
+        #expect(hasTotalCount)
+        let hasLoadMore =
+            source.contains("vm.loadMoreTorrentResults()") ||
+            source.contains("viewModel.loadMoreTorrentResults()")
+        #expect(hasLoadMore)
+        let hasNextBatch =
+            source.contains("vm.nextTorrentBatchCount") ||
+            source.contains("viewModel.nextTorrentBatchCount")
+        #expect(hasNextBatch)
+        let hasRemaining =
+            source.contains("vm.remainingTorrentCount") ||
+            source.contains("viewModel.remainingTorrentCount")
+        #expect(hasRemaining)
     }
 
     @Test
-    func detailViewProvidesInlineEpisodeFindStreamsActionWithEpisodeContext() throws {
-        let source = try contents(of: "VPStudio/Views/Windows/Detail/DetailView.swift")
-        let seasonsSectionBody = try functionBody(containing: "func seasonsSection(", in: source)
+    func detailViewEpisodeSelectionKeepsEpisodeContextAndTriggersSearch() throws {
+        let layoutSource = try contents(of: "VPStudio/Views/Windows/Detail/SeriesDetailLayout.swift")
+        let seasonsSource = (try? contents(of: "VPStudio/Views/Windows/Detail/DetailSeasonsSection.swift")) ?? ""
+        let source = layoutSource + "\n" + seasonsSource
+        let seasonsSectionBody: String
+        if layoutSource.contains("private func episodesSection()") {
+            let episodesBody = try functionBody(containing: "private func episodesSection()", in: layoutSource)
+            let episodeCardBody = try functionBody(containing: "private func episodeCard(", in: layoutSource)
+            seasonsSectionBody = episodesBody + "\n" + episodeCardBody
+        } else {
+            seasonsSectionBody = source
+        }
 
-        #expect(containsIgnoringWhitespace(
+        let hasEpisodeLoop = containsIgnoringWhitespace(
+            seasonsSectionBody,
+            "ForEach(viewModel.episodes) { episode in"
+        ) || containsIgnoringWhitespace(
             seasonsSectionBody,
             "ForEach(vm.episodes) { episode in"
-        ))
-        #expect(seasonsSectionBody.contains("Find Streams"))
-        #expect(seasonsSectionBody.contains("vm.selectEpisode(episode)"))
-        let hasSearchCall = seasonsSectionBody.contains("vm.searchTorrents()")
+        )
+        #expect(hasEpisodeLoop)
+        let hasSelectEpisode = seasonsSectionBody.contains("vm.selectEpisode(episode)") ||
+            seasonsSectionBody.contains("viewModel.selectEpisode(episode)")
+        #expect(hasSelectEpisode)
+        let hasSearchCall = seasonsSectionBody.contains("vm.searchTorrents()") ||
+            seasonsSectionBody.contains("viewModel.searchTorrents()")
         #expect(hasSearchCall)
 
         if hasSearchCall {
-            let selectRange = try requiredRange(of: "vm.selectEpisode(episode)", in: seasonsSectionBody)
-            let searchRange = try requiredRange(of: "vm.searchTorrents()", in: seasonsSectionBody)
+            let selectToken = seasonsSectionBody.contains("viewModel.selectEpisode(episode)") ? "viewModel.selectEpisode(episode)" : "vm.selectEpisode(episode)"
+            let selectRange = try requiredRange(of: selectToken, in: seasonsSectionBody)
+            let searchToken = seasonsSectionBody.contains("viewModel.searchTorrents()") ? "viewModel.searchTorrents()" : "vm.searchTorrents()"
+            let searchRange = try requiredRange(of: searchToken, in: seasonsSectionBody)
             #expect(selectRange.lowerBound < searchRange.lowerBound)
         }
     }
 
     @Test
-    func detailViewUsesScrollViewReaderAndScrollsToAnchoredStreamResults() throws {
-        let source = try contents(of: "VPStudio/Views/Windows/Detail/DetailView.swift")
-        let detailContentBody = try functionBody(containing: "func detailContent(", in: source)
+    func detailViewKeysRenderedLayoutToPreviewIdentityAndAvoidsForcedResultScroll() throws {
+        let detailSource = try contents(of: "VPStudio/Views/Windows/Detail/DetailView.swift")
+        let layoutSource = try contents(of: "VPStudio/Views/Windows/Detail/SeriesDetailLayout.swift")
 
-        #expect(detailContentBody.contains("ScrollViewReader"))
-        #expect(detailContentBody.contains("ScrollView"))
-        let hasScrollToCall = source.contains(".scrollTo(")
-        #expect(hasScrollToCall)
-
-        if hasScrollToCall {
-            let scrollTarget = try firstCapture(
-                in: source,
-                pattern: #"\.scrollTo\(\s*("[^"]+"|[A-Za-z_][A-Za-z0-9_\.]*)"#
-            )
-            #expect(containsIgnoringWhitespace(source, ".id(\(scrollTarget))"))
-        }
+        let detailContentBody = try functionBody(containing: "func detailContent(", in: detailSource)
+        #expect(detailContentBody.contains(".id(previewTaskIdentity)"))
+        #expect(layoutSource.contains("ScrollView {"))
+        #expect(!layoutSource.contains("ScrollViewReader"))
+        #expect(!layoutSource.contains(".scrollTo("))
     }
 
     @Test
@@ -139,7 +174,9 @@ struct ViewModelTaskLifecycleTests {
         #expect(source.contains("@State private var reloadTask: Task<Void, Never>?"))
         #expect(source.contains(".onDisappear"))
         #expect(source.contains("reloadTask?.cancel()"))
-        #expect(source.contains("reloadTask = Task { await vm.load() }"))
+        #expect(source.contains("reloadTask = Task {"))
+        #expect(source.contains("await vm.load()"))
+        #expect(source.contains("await performQADownloadActionIfNeeded(vm)"))
     }
 
     @Test

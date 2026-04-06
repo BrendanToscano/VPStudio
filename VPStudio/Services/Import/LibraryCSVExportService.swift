@@ -31,7 +31,7 @@ actor LibraryCSVExportService {
 
             if listType == .history {
                 // History has no folders — export as a single file
-                let entries = try await database.fetchWatchHistory(limit: 10000)
+                let entries = try await fetchAllWatchHistory()
                 if !entries.isEmpty {
                     let mediaItems = await fetchMediaItems(for: entries.map(\.mediaId))
                     let ratings = await fetchRatings(for: entries.map(\.mediaId))
@@ -84,7 +84,7 @@ actor LibraryCSVExportService {
         folderId: String?
     ) async throws -> (csv: String, itemCount: Int) {
         if listType == .history {
-            let entries = try await database.fetchWatchHistory(limit: 10000)
+            let entries = try await fetchAllWatchHistory()
             let mediaItems = await fetchMediaItems(for: entries.map(\.mediaId))
             let ratings = await fetchRatings(for: entries.map(\.mediaId))
             let csv = buildHistoryCSV(entries: entries, mediaItems: mediaItems, ratings: ratings)
@@ -176,11 +176,7 @@ actor LibraryCSVExportService {
     ) -> String {
         var lines: [String] = [Self.ratingsHeaders.joined(separator: ",")]
 
-        // Deduplicate by mediaId (keep latest)
-        var seen = Set<String>()
-        let unique = entries.filter { seen.insert($0.mediaId).inserted }
-
-        for entry in unique {
+        for entry in entries {
             let item = mediaItems[entry.mediaId]
             let rating = ratings[entry.mediaId]
 
@@ -215,6 +211,22 @@ actor LibraryCSVExportService {
         return f
     }()
 
+    private func fetchAllWatchHistory() async throws -> [WatchHistory] {
+        let pageSize = 1000
+        var offset = 0
+        var allEntries: [WatchHistory] = []
+
+        while true {
+            let page = try await database.fetchWatchHistory(limit: pageSize, offset: offset)
+            if page.isEmpty { break }
+            allEntries.append(contentsOf: page)
+            if page.count < pageSize { break }
+            offset += page.count
+        }
+
+        return allEntries
+    }
+
     private func fetchMediaItems(for mediaIds: [String]) async -> [String: MediaItem] {
         var result: [String: MediaItem] = [:]
         let unique = Set(mediaIds)
@@ -227,16 +239,34 @@ actor LibraryCSVExportService {
     }
 
     private func fetchRatings(for mediaIds: [String]) async -> [String: TasteEvent] {
-        let events = (try? await database.fetchTasteEvents(eventType: .rated, limit: 5000)) ?? []
-        var dict: [String: TasteEvent] = [:]
-        for event in events {
-            if let mediaId = event.mediaId {
-                dict[mediaId] = event
-            }
-        }
-        // Filter to only the mediaIds we care about
         let relevant = Set(mediaIds)
-        return dict.filter { relevant.contains($0.key) }
+        guard !relevant.isEmpty else { return [:] }
+
+        var dict: [String: TasteEvent] = [:]
+        let pageSize = 1000
+        var offset = 0
+
+        while true {
+            let events = (try? await database.fetchTasteEvents(
+                eventType: .rated,
+                limit: pageSize,
+                offset: offset
+            )) ?? []
+            if events.isEmpty { break }
+
+            for event in events {
+                guard let mediaId = event.mediaId, relevant.contains(mediaId) else { continue }
+                // fetchTasteEvents is ordered DESC by createdAt, so first one is newest.
+                if dict[mediaId] == nil {
+                    dict[mediaId] = event
+                }
+            }
+
+            if events.count < pageSize || dict.count == relevant.count { break }
+            offset += events.count
+        }
+
+        return dict
     }
 
     private func ratingValue(from event: TasteEvent?) -> String {

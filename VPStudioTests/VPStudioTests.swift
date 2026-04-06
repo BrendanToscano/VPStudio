@@ -119,6 +119,27 @@ struct VPStudioTests {
         return (database, tempDir)
     }
 
+    private func requestBodyData(from request: URLRequest) -> Data? {
+        if let body = request.httpBody { return body }
+        guard let stream = request.httpBodyStream else { return nil }
+
+        stream.open()
+        defer { stream.close() }
+
+        var data = Data()
+        let bufferSize = 4096
+        var buffer = [UInt8](repeating: 0, count: bufferSize)
+
+        while stream.hasBytesAvailable {
+            let readCount = stream.read(&buffer, maxLength: bufferSize)
+            if readCount < 0 { return nil }
+            if readCount == 0 { break }
+            data.append(buffer, count: readCount)
+        }
+
+        return data.isEmpty ? nil : data
+    }
+
     @Test func sourceTypeDoesNotClassifyDTSAsCam() {
         let source = SourceType.parse(from: "Example.Movie.2024.1080p.DTS.x264")
         #expect(source == .unknown)
@@ -284,6 +305,51 @@ struct VPStudioTests {
         #expect(stream.streamURL.absoluteString == adStream.streamURL.absoluteString)
         #expect(rdCalls.isEmpty)
         #expect(adCalls == ["add:hash-1", "select:torrent-hash-1", "stream:torrent-hash-1"])
+    }
+
+    @Test func qaDebridServiceReturnsSequentialFixtureURLsForRepeatedRequests() async throws {
+        let fixture = QADebridFixture(
+            hash: "0123456789abcdef0123456789abcdef01234567",
+            serviceType: .realDebrid,
+            streamURLs: [
+                URL(string: "https://fixtures.example/stream.mp4?token=expired")!,
+                URL(string: "https://fixtures.example/stream.mp4?token=fresh")!,
+            ],
+            fileName: "Example.Movie.2025.720p.WEB-DL.x264.AAC.mp4"
+        )
+        let service = QADebridService(fixture: fixture)
+
+        let torrentId = try await service.addMagnet(hash: fixture.hash)
+        try await service.selectFiles(torrentId: torrentId, fileIds: [])
+
+        let first = try await service.getStreamURL(torrentId: torrentId)
+        let second = try await service.getStreamURL(torrentId: torrentId)
+        let cache = try await service.checkCache(hashes: [fixture.hash, "deadbeef"])
+
+        #expect(first.streamURL.absoluteString == fixture.streamURLs[0].absoluteString)
+        #expect(second.streamURL.absoluteString == fixture.streamURLs[1].absoluteString)
+        #expect(first.debridService == DebridServiceType.realDebrid.rawValue)
+        #expect(second.fileName == fixture.fileName)
+
+        guard let cachedEntry = cache[fixture.hash] else {
+            Issue.record("Expected cached QA fixture entry")
+            return
+        }
+        if case .cached(_, let cachedFileName, _) = cachedEntry {
+            #expect(cachedFileName == fixture.fileName)
+        } else {
+            Issue.record("Expected fixture hash to be reported as cached")
+        }
+
+        guard let missEntry = cache["deadbeef"] else {
+            Issue.record("Expected non-fixture hash to be present")
+            return
+        }
+        if case .notCached = missEntry {
+            // expected
+        } else {
+            Issue.record("Expected non-fixture hash to be reported as not cached")
+        }
     }
 
     @Test func streamInfoIdIsStableAcrossTokenChanges() {
@@ -1091,5 +1157,532 @@ struct VPStudioTests {
         #expect(state.watchlistRequestCount == 2)
         #expect(state.secondAuthHeader == "Bearer new-access-token")
     }
+
+    @Test func episodeTokenMatcherExtractsEpisodeContextFromCommonPatterns() {
+        let contextA = EpisodeTokenMatcher.context(fromQuery: "Some.Show.s03e14.2025.REPACK")
+        #expect(contextA?.season == 3)
+        #expect(contextA?.episode == 14)
+
+        let contextB = EpisodeTokenMatcher.context(fromQuery: "Some.Show - 2x07")
+        #expect(contextB?.season == 2)
+        #expect(contextB?.episode == 7)
+
+        let contextC = EpisodeTokenMatcher.context(fromQuery: "season 5 episode 09")
+        #expect(contextC?.season == 5)
+        #expect(contextC?.episode == 9)
+
+        #expect(EpisodeTokenMatcher.matches(title: "Pilot (S01E01)", season: 1, episode: 1))
+        #expect(EpisodeTokenMatcher.matches(title: "The Show 2x3", season: 2, episode: 3))
+        #expect(!EpisodeTokenMatcher.matches(title: "Movie 2019", season: 1, episode: 1))
+    }
+
+    @Test func eztvIndexerFiltersByEpisodeContextFromQuery() async throws {
+        let session = makeStubSession { request in
+            let responseURL = request.url ?? URL(string: "https://eztvx.to/api/get-torrents")!
+            let components = URLComponents(url: responseURL, resolvingAgainstBaseURL: false)
+            let page = components?.queryItems?.first(where: { $0.name == "page" })?.value
+
+            let body: String
+            if page == "1" {
+                body = """
+                {
+                  "torrents": [
+                    { "hash": "hash-0101", "title": "Wrong.Episode", "season": "1", "episode": "1", "size_bytes": "1234" },
+                    { "hash": "hash-0102", "title": "Correct Episode S01E02", "season": "1", "episode": "2", "size_bytes": "4321" }
+                  ]
+                }
+                """
+            } else {
+                body = "{ \"torrents\": [] }"
+            }
+
+            let response = HTTPURLResponse(url: responseURL, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (response, Data(body.utf8))
+        }
+
+        let indexer = EZTVIndexer(session: session)
+        let results = try await indexer.searchByQuery(query: "My.Show S01E02", type: .series)
+
+        #expect(results.count == 1)
+        #expect(results.first?.infoHash == "hash-0102")
+    }
+
+    @Test func zileanIndexerFiltersByEpisodeContextFromQuery() async throws {
+        let session = makeStubSession { request in
+            let responseURL = request.url ?? URL(string: "https://zilean.example/dmm/search")!
+            let payload = """
+            [
+                { "info_hash": "z-mismatch", "raw_title": "Show 1x01", "size": 1000 },
+                { "info_hash": "z-match", "raw_title": "Show S01E02", "size": 2000 }
+            ]
+            """
+            let response = HTTPURLResponse(url: responseURL, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (response, Data(payload.utf8))
+        }
+
+        let indexer = ZileanIndexer(baseURL: "https://zilean.example", session: session)
+        let results = try await indexer.searchByQuery(query: "Some.Show s01e02", type: .series)
+
+        #expect(results.count == 1)
+        #expect(results.first?.infoHash == "z-match")
+    }
+
+    @Test func stremioSearchByQueryUsesSeriesEpisodeIDForStreamURL() async throws {
+        final class StreamState: @unchecked Sendable { var streamPath: String? }
+        let state = StreamState()
+
+        let session = makeStubSession { request in
+            let url = request.url ?? URL(string: "https://stremio.example/stream/series/tt1234567:1:2.json")!
+            state.streamPath = url.path
+
+            if url.path.contains("/stream/series/tt1234567:1:2.json") {
+                let body = """
+                {
+                  "streams": [
+                    {
+                      "title": "Source",
+                      "url": "magnet:?xt=urn:btih:abc",
+                      "infoHash": "abc",
+                      "behaviorHints": { "videoSize": 12345, "seeders": 9, "leechers": 0 }
+                    }
+                  ]
+                }
+                """
+                let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+                return (response, Data(body.utf8))
+            }
+
+            throw URLError(.unsupportedURL)
+        }
+
+        let indexer = StremioIndexer(name: "stremio", baseURL: "https://stremio.example", session: session)
+        let results = try await indexer.searchByQuery(query: "Movie: tt1234567 s01e02", type: .series)
+
+        #expect(results.count == 1)
+        #expect(state.streamPath == "/stream/series/tt1234567:1:2.json")
+    }
+
+    @Test func offcloudValidateTokenReturnsFalseWhenUnauthorized() async throws {
+        let session = makeStubSession { request in
+            let response = HTTPURLResponse(
+                url: request.url ?? URL(string: "https://offcloud.com/api/cloud/history")!,
+                statusCode: 401,
+                httpVersion: nil,
+                headerFields: nil
+            )!
+            return (response, Data())
+        }
+
+        let service = OffcloudService(apiToken: "offcloud-token", session: session)
+        let isValid = try await service.validateToken()
+
+        #expect(isValid == false)
+    }
+
+    @Test func offcloudSelectFilesUsesRequestedFileId() async throws {
+        let session = makeStubSession { request in
+            let url = request.url ?? URL(string: "https://offcloud.com/api")!
+            if url.path == "/cloud/status" {
+                let body = """
+                {"requestId":"req-123","fileName":"show.mkv","status":"downloaded"}
+                """
+                let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+                return (response, Data(body.utf8))
+            }
+
+            if url.path == "/cloud/explore/req-123" {
+                let body = """
+                [
+                  "https://cdn.example.com/first.mkv",
+                  "https://cdn.example.com/second.mkv",
+                  "https://cdn.example.com/third.mp4"
+                ]
+                """
+                let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+                return (response, Data(body.utf8))
+            }
+
+            let bad = HTTPURLResponse(url: url, statusCode: 404, httpVersion: nil, headerFields: nil)!
+            return (bad, Data())
+        }
+
+        let service = OffcloudService(apiToken: "offcloud-token", session: session)
+        try await service.selectFiles(torrentId: "req-123", fileIds: [2])
+        let stream = try await service.getStreamURL(torrentId: "req-123")
+
+        #expect(stream.streamURL.absoluteString == "https://cdn.example.com/second.mkv")
+    }
+
+    @Test func allDebridGetsExplicitlySelectedLinkWhenAvailable() async throws {
+        final class RequestState: @unchecked Sendable {
+            var unlockedLink: String?
+        }
+
+        let state = RequestState()
+        let session = makeStubSession { request in
+            let url = request.url ?? URL(string: "https://api.alldebrid.com/v4")!
+
+            if url.path == "/v4/magnet/status" {
+                let body = """
+                {
+                  "status": "success",
+                  "data": {
+                    "id": 55,
+                    "filename": "Show.S01E02.mkv",
+                    "status": "finished",
+                    "statusCode": 4,
+                    "size": 2048,
+                    "links": [
+                      {"link": "https://cdn.example.com/ep1.mkv", "filename": "S01E01", "size": 100},
+                      {"link": "https://cdn.example.com/ep2.mkv", "filename": "S01E02", "size": 200}
+                    ]
+                  }
+                }
+                """
+                let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+                return (response, Data(body.utf8))
+            }
+
+            if url.path == "/v4/link/unlock" {
+                let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+                state.unlockedLink = components?.queryItems?.first(where: { $0.name == "link" })?.value
+                let linkValue = state.unlockedLink ?? ""
+                let body = """
+                {
+                  "status": "success",
+                  "data": { "link": "\(linkValue)", "filename": "selected", "filesize": 200 }
+                }
+                """
+                let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+                return (response, Data(body.utf8))
+            }
+
+            let notFound = HTTPURLResponse(url: url, statusCode: 404, httpVersion: nil, headerFields: nil)!
+            return (notFound, Data())
+        }
+
+        let service = AllDebridService(apiToken: "ad-token", session: session)
+        try await service.selectFiles(torrentId: "55", fileIds: [2])
+        let stream = try await service.getStreamURL(torrentId: "55")
+
+        #expect(state.unlockedLink == "https://cdn.example.com/ep2.mkv")
+        #expect(stream.streamURL.absoluteString == "https://cdn.example.com/ep2.mkv")
+    }
+
+    @Test func debridLinkUsesRequestedFileIdWhenSelectingFiles() async throws {
+        let session = makeStubSession { request in
+            let url = request.url ?? URL(string: "https://debrid-link.com/api/v2/seedbox/list")!
+            let body = """
+            {
+              "success": true,
+              "value": [
+                {
+                  "name": "Show.S01",
+                  "totalSize": 4000,
+                  "downloadPercent": 100,
+                  "files": [
+                    { "id": 1, "name": "eps1", "size": 100, "download_url": "https://cdn.example.com/eps1.mkv" },
+                    { "id": 2, "name": "eps2", "size": 120, "download_url": "https://cdn.example.com/eps2.mkv" }
+                  ]
+                }
+              ]
+            }
+            """
+            let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (response, Data(body.utf8))
+        }
+
+        let service = DebridLinkService(apiToken: "dl-token", session: session)
+        try await service.selectFiles(torrentId: "req-55", fileIds: [2])
+        let stream = try await service.getStreamURL(torrentId: "req-55")
+
+        #expect(stream.streamURL.absoluteString == "https://cdn.example.com/eps2.mkv")
+    }
+
+    @Test func traktAddToHistorySendsEpisodePayloadWhenEpisodeIdProvided() async throws {
+        final class State: @unchecked Sendable {
+            var sawEpisodePayload = false
+            var requestBody: [String: Any]?
+        }
+
+        let state = State()
+        let expectedDate = Date(timeIntervalSince1970: 1_700_000_000)
+        let expectedWatchedAt = ISO8601DateFormatter().string(from: expectedDate)
+
+        let session = makeStubSession { request in
+            let url = request.url ?? URL(string: "https://api.trakt.tv/sync/history")!
+            let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+
+            if request.httpMethod == "POST", url.path.contains("/sync/history"), let bodyData = requestBodyData(from: request) {
+                let parsed = (try JSONSerialization.jsonObject(with: bodyData, options: []) as? [String: Any])
+                state.requestBody = parsed
+
+                if let episodes = parsed?["episodes"] as? [[String: Any]],
+                   let first = episodes.first,
+                   let ids = first["ids"] as? [String: Any],
+                   let episodeId = ids["imdb"] as? String,
+                   episodeId == "tt9999999",
+                   let watchedAt = first["watched_at"] as? String,
+                   watchedAt == expectedWatchedAt {
+                    state.sawEpisodePayload = true
+                }
+            }
+
+            return (response, Data("{}".utf8))
+        }
+
+        let service = TraktSyncService(clientId: TraktDefaults.clientId, clientSecret: TraktDefaults.clientSecret, session: session)
+        await service.setTokens(access: "token", refresh: "refresh")
+        try await service.addToHistory(imdbId: "tt1234567", type: .series, episodeId: "tt9999999", watchedAt: expectedDate)
+
+        #expect(state.sawEpisodePayload)
+        #expect(state.requestBody != nil)
+        #expect(state.requestBody?["episodes"] != nil)
+    }
+
+    @Test func databaseFetchCompletedHistorySupportsPagination() async throws {
+        let (database, tempDir) = try await makeTemporaryDatabase(named: "vpstudio-completed-history.sqlite")
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        for index in 0..<3 {
+            try await database.saveWatchHistory(WatchHistory(
+                id: UUID().uuidString,
+                mediaId: "tt100\(index)",
+                episodeId: nil,
+                title: "Episode \(index)",
+                progress: 0,
+                duration: 0,
+                quality: nil,
+                debridService: nil,
+                streamURL: nil,
+                watchedAt: Date(timeIntervalSinceNow: Double(-index * 10)),
+                isCompleted: true
+            ))
+        }
+
+        let firstPage = try await database.fetchCompletedWatchHistory(limit: 2, offset: 0)
+        let secondPage = try await database.fetchCompletedWatchHistory(limit: 2, offset: 2)
+
+        #expect(firstPage.count == 2)
+        #expect(secondPage.count == 1)
+
+        let allIds = firstPage.map(\.id) + secondPage.map(\.id)
+        #expect(Set(allIds).count == 3)
+    }
+
+    @Test func simklMarkWatchedIncludesWatchedAtTimestamp() async throws {
+        final class State: @unchecked Sendable { var sawWatchedAt = false }
+        let state = State()
+        let expectedDate = Date(timeIntervalSince1970: 1_700_000_000)
+        let expectedWatchedAt = ISO8601DateFormatter().string(from: expectedDate)
+
+        let session = makeStubSession { request in
+            let url = request.url ?? URL(string: "https://api.simkl.com/sync/history")!
+            let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+
+            if request.httpMethod == "POST",
+               request.url?.path.contains("/sync/history") == true,
+               let bodyData = requestBodyData(from: request),
+               let bodyString = String(data: bodyData, encoding: .utf8),
+               bodyString.contains(expectedWatchedAt) {
+                state.sawWatchedAt = true
+            }
+
+            let payload = "{\"added\":{\"movies\":1},\"not_found\":{}}"
+            return (response, Data(payload.utf8))
+        }
+
+        let service = SimklSyncService(clientId: "simkl-client-id", session: session)
+        await service.setAccessToken("simkl-token")
+        try await service.markWatched(imdbId: "tt9876543", type: .movie, watchedAt: expectedDate)
+
+        #expect(state.sawWatchedAt)
+    }
+
+    @Test @MainActor func appStateResetClearsCachedServiceActors() async throws {
+        let (database, tempDir) = try await makeTemporaryDatabase(named: "vpstudio-appstate-reset.sqlite")
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let appState = AppState(database: database, secretStore: TestSecretStore())
+        let beforeDebridManager = appState.debridManager
+        let beforeScrobble = appState.scrobbleCoordinator
+
+        try await appState.resetAllData()
+
+        let afterDebridManager = appState.debridManager
+        let afterScrobble = appState.scrobbleCoordinator
+
+        #expect(beforeDebridManager !== afterDebridManager)
+        #expect(beforeScrobble !== afterScrobble)
+    }
+
+    @Test func libraryCSVExportHistoryReturnsAllRowsIncludingEpisodeDuplicatesAndLatestRating() async throws {
+        let (database, tempDir) = try await makeTemporaryDatabase(named: "vpstudio-export-history.sqlite")
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        try await database.saveWatchHistory(WatchHistory(
+            id: UUID().uuidString,
+            mediaId: "tt1234567",
+            episodeId: "s01e01",
+            title: "Episode 1",
+            progress: 0,
+            duration: 0,
+            quality: nil,
+            debridService: nil,
+            streamURL: nil,
+            watchedAt: Date(timeIntervalSinceNow: -300),
+            isCompleted: true
+        ))
+        try await database.saveWatchHistory(WatchHistory(
+            id: UUID().uuidString,
+            mediaId: "tt1234567",
+            episodeId: "s01e02",
+            title: "Episode 2",
+            progress: 0,
+            duration: 0,
+            quality: nil,
+            debridService: nil,
+            streamURL: nil,
+            watchedAt: Date(),
+            isCompleted: true
+        ))
+
+        try await database.saveTasteEvent(TasteEvent(
+            id: UUID().uuidString,
+            mediaId: "tt1234567",
+            eventType: .rated,
+            feedbackScale: .oneToTen,
+            feedbackValue: 10,
+            createdAt: Date(timeIntervalSinceNow: -120)
+        ))
+        try await database.saveTasteEvent(TasteEvent(
+            id: UUID().uuidString,
+            mediaId: "tt1234567",
+            eventType: .rated,
+            feedbackScale: .oneToTen,
+            feedbackValue: 5,
+            createdAt: Date(timeIntervalSinceNow: -600)
+        ))
+
+        let exportService = LibraryCSVExportService(database: database)
+        let (csv, itemCount) = try await exportService.exportFolder(listType: .history, folderId: nil)
+
+        #expect(itemCount == 2)
+
+        let lines = csv.split(whereSeparator: \.isNewline)
+        #expect(lines.count == 3)
+
+        let mediaRows = lines.dropFirst().filter { $0.hasPrefix("tt1234567,") }
+        #expect(mediaRows.count == 2)
+        #expect(mediaRows.allSatisfy { $0.split(separator: ",")[1] == "10" })
+
+        _ = csv
+    }
+
+    @Test func libraryCSVExportHistorySupportsPaginationBeyondSinglePage() async throws {
+        let (database, tempDir) = try await makeTemporaryDatabase(named: "vpstudio-export-history-pagination.sqlite")
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        for index in 0..<1_050 {
+            try await database.saveWatchHistory(WatchHistory(
+                id: UUID().uuidString,
+                mediaId: "tt\(index)",
+                episodeId: nil,
+                title: "Episode \(index)",
+                progress: 0,
+                duration: 0,
+                quality: nil,
+                debridService: nil,
+                streamURL: nil,
+                watchedAt: Date(timeIntervalSinceNow: Double(-index * 10)),
+                isCompleted: true
+            ))
+        }
+
+        let exportService = LibraryCSVExportService(database: database)
+        let (csv, itemCount) = try await exportService.exportFolder(listType: .history, folderId: nil)
+
+        #expect(itemCount == 1_050)
+        let lines = csv.split(whereSeparator: \.isNewline)
+        #expect(lines.count == 1_051)
+    }
+
+    @Test func laneC_environmentCatalog_resolvesNilYawOffsets() {
+        #expect(EnvironmentCatalogManager.resolveHdriYawOffset(from: nil) == 0)
+        #expect(EnvironmentCatalogManager.resolveHdriYawOffset(from: 17.75) == 17.75)
+    }
+
+    @Test func laneC_assistantManager_usesCanonicalFallbackModels() {
+        #expect(AIAssistantManager.fallbackModelID(for: .openAI) == AIModelCatalog.gpt4o.id)
+        #expect(AIAssistantManager.fallbackModelID(for: .anthropic) == AIModelCatalog.claudeSonnet4.id)
+        #expect(AIAssistantManager.fallbackModelID(for: .gemini) == AIModelCatalog.gemini25Flash.id)
+
+        #expect(
+            AIAssistantManager.resolvedModelID(
+                provider: .openAI,
+                catalogDefault: AIModelCatalog.gpt52.id,
+                configuredModel: nil
+            ) == AIModelCatalog.gpt4o.id
+        )
+    }
+
+    @Test @MainActor func laneC_spatialModeDetection_prefersCodecMetadataOverFilename() {
+        let engine = VPPlayerEngine()
+        engine.updateStereoMode(from: "A regular movie file", codecHint: "hevc_mv")
+        #expect(engine.stereoMode == .mvHevc)
+
+        engine.updateStereoMode(from: "movie_sidebyside.mkv", codecHint: nil)
+        #expect(engine.stereoMode == .sideBySide)
+    }
+
+    @Test func laneC_externalPlayerRouting_appendsEncodedStreamToCustomTemplate() {
+        let streamURL = URL(string: "https://cdn.example.com/video.mp4?foo=bar&baz=1")!
+
+        let placeholderTemplate = ExternalPlayerPreference(app: .custom, customURLTemplate: "videoplayer://play?url={url}")
+        let placeholderURL = ExternalPlayerRouting.launchURL(for: streamURL, preference: placeholderTemplate)
+        #expect(placeholderURL != nil)
+        if let placeholderURL,
+           let components = URLComponents(url: placeholderURL, resolvingAgainstBaseURL: false),
+           let streamParam = components.queryItems?.first(where: { $0.name == "url" })?.value {
+            #expect(streamParam == streamURL.absoluteString)
+        } else {
+            Issue.record("Expected url query param when launching with placeholder template")
+        }
+
+        let noPlaceholderTemplate = ExternalPlayerPreference(app: .custom, customURLTemplate: "videoplayer://play")
+        let noPlaceholderURL = ExternalPlayerRouting.launchURL(for: streamURL, preference: noPlaceholderTemplate)
+        #expect(noPlaceholderURL != nil)
+        if let noPlaceholderURL,
+           let components = URLComponents(url: noPlaceholderURL, resolvingAgainstBaseURL: false),
+           let streamParam = components.queryItems?.first(where: { $0.name == "url" })?.value {
+            #expect(streamParam == streamURL.absoluteString)
+        } else {
+            Issue.record("Expected appended url query param when template has no placeholder")
+        }
+
+        let noApp = ExternalPlayerPreference(app: .builtIn, customURLTemplate: nil)
+        #expect(ExternalPlayerRouting.launchURL(for: streamURL, preference: noApp) == nil)
+    }
+
+    @Test func laneC_playerView_refreshGuardProtectsOldStream() {
+        #expect(PlayerView.audioTrackRefreshShouldRun(requestedStreamID: "current", currentStreamID: "current"))
+        #expect(!PlayerView.audioTrackRefreshShouldRun(requestedStreamID: "current", currentStreamID: "next"))
+    }
+
+    #if os(visionOS)
+    @Test func laneC_apmpInjector_reportsModeSpecificMetadata() {
+        let sbs = APMPInjector.stereoMetadataExtensions(for: .sideBySide)
+        let ou = APMPInjector.stereoMetadataExtensions(for: .overUnder)
+
+        #expect(sbs["ViewPackingKind"] as? String == "SideBySide")
+        #expect(ou["ViewPackingKind"] as? String == "OverUnder")
+        #expect((sbs["ViewPackingKind"] as? String) != (ou["ViewPackingKind"] as? String))
+    }
+
+    @Test func laneC_headTracker_pollingIntervalHonorsIdleMode() {
+        #expect(HeadTracker.pollingInterval(isIdle: true, activeInterval: .milliseconds(100)) == .milliseconds(500))
+        #expect(HeadTracker.pollingInterval(isIdle: false, activeInterval: .milliseconds(100)) == .milliseconds(100))
+    }
+    #endif
 
 }

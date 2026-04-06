@@ -15,6 +15,7 @@ struct SetupWizardView: View {
     @State private var selectedSubtitleLanguage: SubtitleLanguageOption = .none
     @State private var saveError: String?
     @State private var appeared = false
+    @State private var didRunQAAutoAdvance = false
 
     private let totalSteps = 5
 
@@ -80,6 +81,44 @@ struct SetupWizardView: View {
         .onAppear {
             withAnimation(.easeOut(duration: 0.6)) {
                 appeared = true
+            }
+
+            guard QARuntimeOptions.setupAutoAdvance else { return }
+            guard !didRunQAAutoAdvance else { return }
+            didRunQAAutoAdvance = true
+
+            if let tmdbKey = QARuntimeOptions.setupTMDBApiKey {
+                tmdbApiKey = tmdbKey
+            }
+            if let preferredQuality = QARuntimeOptions.setupPreferredQuality {
+                selectedQuality = preferredQuality
+            }
+            if let subtitleLanguage = QARuntimeOptions.setupSubtitleLanguage {
+                selectedSubtitleLanguage = subtitleLanguage
+            }
+
+            Task {
+                try? await Task.sleep(for: .milliseconds(350))
+                guard !Task.isCancelled else { return }
+                await MainActor.run {
+                    advanceStep()
+                }
+
+                while !Task.isCancelled {
+                    let shouldContinue = await MainActor.run {
+                        currentStep > 0 && currentStep < totalSteps - 1
+                    }
+                    guard shouldContinue else { break }
+                    try? await Task.sleep(for: .milliseconds(250))
+                    await handleNextStep()
+                }
+
+                let isCompleteStep = await MainActor.run { currentStep == totalSteps - 1 }
+                guard !Task.isCancelled, isCompleteStep else { return }
+                try? await Task.sleep(for: .milliseconds(250))
+                await MainActor.run {
+                    appState.isShowingSetup = false
+                }
             }
         }
     }

@@ -12,6 +12,7 @@ actor ScrobbleCoordinator {
     private var traktService: TraktSyncService?
     private var activeMediaId: String?
     private var activeMediaType: MediaType?
+    private var activeEpisodeId: String?
     private var isScrobbling = false
 
     init(settingsManager: SettingsManager, secretStore: any SecretStore) {
@@ -20,9 +21,15 @@ actor ScrobbleCoordinator {
     }
 
     /// Call when playback begins for a media item.
-    func startPlayback(mediaId: String, mediaType: MediaType, progress: Double) async {
+    func startPlayback(
+        mediaId: String,
+        mediaType: MediaType,
+        progress: Double,
+        episodeId: String? = nil
+    ) async {
         activeMediaId = mediaId
         activeMediaType = mediaType
+        activeEpisodeId = episodeId
 
         guard await isTraktScrobbleEnabled() else { return }
         guard let service = await traktServiceIfAvailable() else { return }
@@ -72,12 +79,17 @@ actor ScrobbleCoordinator {
 
         // Also add to history if enabled and progress is meaningful (>80%)
         if progress > 80, await isTraktHistoryEnabled() {
-            try? await service.addToHistory(imdbId: mediaId, type: mediaType)
+            try? await service.addToHistory(
+                imdbId: mediaId,
+                type: mediaType,
+                episodeId: activeEpisodeId
+            )
         }
 
         isScrobbling = false
         activeMediaId = nil
         activeMediaType = nil
+        activeEpisodeId = nil
     }
 
     // MARK: - Private

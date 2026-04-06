@@ -23,14 +23,33 @@ actor AIAssistantManager {
     }
 
     func configure(provider: AIProviderKind, apiKey: String, baseURL: String? = nil, model: String? = nil) {
-        let defaultModelID = AIModelCatalog.defaultModel(for: provider)?.id
+        let configuredModel = model?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let catalogDefaultModelID = AIModelCatalog.defaultModel(for: provider)?.id
+        let resolvedModel = Self.resolvedModelID(
+            provider: provider,
+            catalogDefault: catalogDefaultModelID,
+            configuredModel: configuredModel
+        )
+
         switch provider {
         case .anthropic:
-            providers[.anthropic] = AnthropicProvider(apiKey: apiKey, model: model ?? defaultModelID ?? "claude-sonnet-4-6")
+            providers[.anthropic] = AnthropicProvider(apiKey: apiKey, model: resolvedModel)
         case .openAI:
-            providers[.openAI] = OpenAIProvider(apiKey: apiKey, model: model ?? defaultModelID ?? "gpt-5.2")
+            providers[.openAI] = OpenAIProvider(apiKey: apiKey, model: resolvedModel)
         case .ollama:
-            providers[.ollama] = OllamaProvider(baseURL: baseURL ?? "http://localhost:11434", model: model ?? defaultModelID ?? "llama3.1")
+            providers[.ollama] = OllamaProvider(
+                baseURL: baseURL ?? "http://localhost:11434",
+                model: resolvedModel
+            )
+        case .gemini:
+            providers[.gemini] = GeminiProvider(apiKey: apiKey, model: resolvedModel)
+        case .openRouter:
+            providers[.openRouter] = OpenRouterProvider(
+                apiKey: apiKey,
+                model: resolvedModel
+            )
+        case .local:
+            break // Local provider is registered directly via registerProvider in AppState
         }
     }
 
@@ -94,6 +113,43 @@ actor AIAssistantManager {
 
         let response = try await ask(prompt: prompt, context: AssistantContext())
         return try parsePersonalizedAnalysis(from: response.content)
+    }
+
+    nonisolated static func resolvedModelID(
+        provider: AIProviderKind,
+        catalogDefault: String?,
+        configuredModel: String?
+    ) -> String {
+        if let configuredModel, !configuredModel.isEmpty {
+            return configuredModel
+        }
+
+        if provider == .anthropic || provider == .openAI {
+            return fallbackModelID(for: provider)
+        }
+
+        if provider == .gemini {
+            return catalogDefault ?? fallbackModelID(for: provider)
+        }
+
+        return catalogDefault ?? fallbackModelID(for: provider)
+    }
+
+    nonisolated static func fallbackModelID(for provider: AIProviderKind) -> String {
+        switch provider {
+        case .anthropic:
+            return AIModelCatalog.claudeSonnet4.id
+        case .openAI:
+            return AIModelCatalog.gpt4o.id
+        case .gemini:
+            return AIModelCatalog.gemini25Flash.id
+        case .ollama:
+            return AIModelCatalog.llama31.id
+        case .openRouter:
+            return AIModelCatalog.openRouterGeminiFlashLite.id
+        case .local:
+            return AIModelCatalog.localSmolLM2.id
+        }
     }
 
     private func parsePersonalizedAnalysis(from content: String) throws -> AIPersonalizedAnalysis {

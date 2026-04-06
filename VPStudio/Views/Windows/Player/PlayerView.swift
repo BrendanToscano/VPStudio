@@ -29,6 +29,10 @@ enum PlayerLifecyclePolicy {
         false
         #endif
     }
+
+    static var dismissesCurrentPresentationOnBack: Bool {
+        true
+    }
 }
 
 struct PlayerView: View {
@@ -66,6 +70,14 @@ struct PlayerView: View {
     @Environment(VPPlayerEngine.self) private var engine
     @State private var isShowingControls = true
     @State private var controlsHideTask: Task<Void, Never>?
+    @State private var initialPlayerStateTask: Task<Void, Never>?
+    @State private var preparePlaybackTask: Task<Void, Never>?
+    @State private var subtitleCatalogTask: Task<Void, Never>?
+    @State private var subtitleDownloadTask: Task<Void, Never>?
+    @State private var environmentAssetsTask: Task<Void, Never>?
+    @State private var scenePhaseTask: Task<Void, Never>?
+    @State private var memoryPressureTask: Task<Void, Never>?
+    @State private var audioTrackRefreshTask: Task<Void, Never>?
     @State private var isScrubbing = false
     @State private var scrubTime: TimeInterval = 0
     @State private var hasPlayedOnce = false
@@ -82,7 +94,6 @@ struct PlayerView: View {
     @State private var environmentAssets: [EnvironmentAsset] = []
     @State private var progressPersistTask: Task<Void, Never>?
     @State private var scrobbleTask: Task<Void, Never>?
-    @State private var environmentLoadTask: Task<Void, Never>?
     @State private var subtitleService: OpenSubtitlesService?
     @State private var subtitleCandidates: [Subtitle] = []
     @State private var subtitleCatalogMessage: String?
@@ -99,6 +110,7 @@ struct PlayerView: View {
     @State private var apmpInjector = APMPInjector()
     @State private var isAPMPActive = false
     @State private var playerWindowScene: UIWindowScene?
+    @State private var visionGeometryTask: Task<Void, Never>?
     #endif
 
     // MARK: - Aspect Ratio
@@ -182,6 +194,10 @@ struct PlayerView: View {
         .background(PlayerWindowSceneAccessor(windowScene: $playerWindowScene).frame(width: 0, height: 0))
         .onChange(of: playerWindowScene) { _, _ in applyVisionOSWindowGeometry() }
         .onChange(of: detectedVideoRatio) { _, _ in applyVisionOSWindowGeometry() }
+        .onChange(of: aspectRatioSelection) { _, _ in
+            applyVisionOSWindowGeometry()
+            applyAspectRatioPresentationMode()
+        }
         .preferredSurroundingsEffect(engine.isDimEnabled ? .systemDark : nil)
         #endif
         .animation(.easeInOut(duration: 0.25), value: isShowingControls)
@@ -231,10 +247,14 @@ struct PlayerView: View {
             }
         }
         .task {
-            await loadInitialPlayerState()
+            initialPlayerStateTask?.cancel()
+            initialPlayerStateTask = Task { await loadInitialPlayerState() }
+            await initialPlayerStateTask?.value
         }
         .task(id: currentStream.id) {
-            await preparePlayback(for: currentStream)
+            preparePlaybackTask?.cancel()
+            preparePlaybackTask = Task { await preparePlayback(for: currentStream) }
+            await preparePlaybackTask?.value
         }
         .onAppear {
             #if os(macOS) || os(visionOS)
@@ -246,9 +266,14 @@ struct PlayerView: View {
             scrobbleStop()
             scrobbleTask?.cancel()
             scrobbleTask = nil
-            environmentLoadTask?.cancel()
-            environmentLoadTask = nil
             Task { await saveWatchProgress() }
+            initialPlayerStateTask?.cancel()
+            preparePlaybackTask?.cancel()
+            subtitleCatalogTask?.cancel()
+            subtitleDownloadTask?.cancel()
+            environmentAssetsTask?.cancel()
+            scenePhaseTask?.cancel()
+            memoryPressureTask?.cancel()
             cleanupPlayback()
             controlsHideTask?.cancel()
             controlsHideTask = nil
@@ -262,6 +287,8 @@ struct PlayerView: View {
                 downloadedSubtitleFileURL = nil
             }
             #if os(visionOS)
+            visionGeometryTask?.cancel()
+            visionGeometryTask = nil
             Task {
                 await dismissImmersiveIfNeeded(reason: .playerClosed)
                 scheduleMainWindowRestoreIfNeeded()
@@ -275,15 +302,17 @@ struct PlayerView: View {
             closePlayer()
         }
         .onReceive(NotificationCenter.default.publisher(for: .environmentsDidChange)) { _ in
-            environmentLoadTask?.cancel()
-            environmentLoadTask = Task { await loadEnvironmentAssets() }
+            environmentAssetsTask?.cancel()
+            environmentAssetsTask = Task { await loadEnvironmentAssets() }
         }
         #if os(visionOS)
         .onChange(of: scenePhase) { _, phase in
-            Task { await handleScenePhaseChange(phase) }
+            scenePhaseTask?.cancel()
+            scenePhaseTask = Task { await handleScenePhaseChange(phase) }
         }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)) { _ in
-            Task { await handleMemoryPressureWarning() }
+            memoryPressureTask?.cancel()
+            memoryPressureTask = Task { await handleMemoryPressureWarning() }
         }
         .onChange(of: engine.stereoMode) { _, _ in
             updateAPMPInjector()
@@ -294,7 +323,9 @@ struct PlayerView: View {
     /// Video gravity — `.resizeAspectFill` for edge-to-edge display.
     /// The window itself is forced to the video's aspect ratio via geometry
     /// preferences, so fill never crops.
-    private var currentVideoGravity: AVLayerVideoGravity { .resizeAspectFill }
+    private var currentVideoGravity: AVLayerVideoGravity {
+        PlayerAspectRatioPolicy.videoGravity(for: aspectRatioSelection)
+    }
 
     @ViewBuilder
     private var playerSurface: some View {
@@ -304,7 +335,7 @@ struct PlayerView: View {
             KSVideoPlayer(coordinator: coordinator, url: currentStream.streamURL, options: options)
                 .ignoresSafeArea()
                 .onAppear {
-                    coordinator.isScaleAspectFill = true
+                    coordinator.isScaleAspectFill = currentVideoGravity == .resizeAspectFill
                 }
                 .onTapGesture {
                     toggleControlsVisibility()
@@ -463,6 +494,9 @@ struct PlayerView: View {
     // MARK: - Title Bar (top edge, overlaying video)
 
     private var titleBar: some View {
+        // topBarIconSurface(symbolName: PlayerCinematicVisualPolicy.backSymbolName)
+        // topBarIconSurface(symbolName: PlayerCinematicVisualPolicy.menuSymbolName)
+
         HStack {
             // Left: back button
             Button {
@@ -471,11 +505,11 @@ struct PlayerView: View {
                 Image(systemName: "chevron.backward")
                     .font(.body.weight(.semibold))
                     .foregroundStyle(.white)
-                    .frame(width: 32, height: 32)
-                    .background(.ultraThinMaterial, in: Circle())
+                    .frame(width: 40, height: 40)
+                    .background(.regularMaterial, in: Circle())
                     .overlay {
                         Circle()
-                            .strokeBorder(.white.opacity(0.18), lineWidth: 0.5)
+                            .strokeBorder(.white.opacity(0.18), lineWidth: 0.8)
                     }
             }
             .buttonStyle(.plain)
@@ -493,94 +527,142 @@ struct PlayerView: View {
 
             Spacer()
 
-            // Right: more options ellipsis menu
-            Menu {
-                // Stream quality picker
-                Section("Stream") {
-                    ForEach(streamQueue, id: \.id) { stream in
-                        Button {
-                            switchToStream(stream)
-                        } label: {
-                            HStack {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(stream.quality.rawValue)
-                                    Text(stream.qualityBadge)
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
-                                }
-                                if stream.id == currentStream.id {
-                                    Image(systemName: "checkmark")
-                                }
-                            }
-                        }
-                    }
+            // Right: utility cluster + more options menu
+            HStack(spacing: 8) {
+                Button {
+                    isShowingSubtitlePicker.toggle()
+                } label: {
+                    topBarUtilityButton(
+                        systemName: engine.subtitleTracks.isEmpty ? "captions.bubble" : "captions.bubble.fill",
+                        isActive: isShowingSubtitlePicker || !engine.subtitleTracks.isEmpty,
+                        accessibilityLabel: "Subtitles"
+                    )
                 }
-
-                #if os(macOS)
-                Section {
-                    Button {
-                        guard let playerWindow else { return }
-                        playerWindow.toggleFullScreen(nil)
-                        isFullscreen = playerWindow.styleMask.contains(.fullScreen)
-                        if let sessionID {
-                            appState.fullscreenBySessionID[sessionID] = isFullscreen
-                        }
-                    } label: {
-                        Label(
-                            isFullscreen ? "Exit Fullscreen" : "Enter Fullscreen",
-                            systemImage: isFullscreen ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right"
-                        )
-                    }
-                }
+                .buttonStyle(.plain)
+                #if os(visionOS)
+                .hoverEffect(.lift)
                 #endif
 
+                Button {
+                    isShowingAudioPicker.toggle()
+                } label: {
+                    topBarUtilityButton(
+                        systemName: engine.audioTracks.count > 1 ? "speaker.wave.2.fill" : "speaker.wave.2",
+                        isActive: isShowingAudioPicker || engine.audioTracks.count > 1,
+                        accessibilityLabel: "Audio Tracks"
+                    )
+                }
+                .buttonStyle(.plain)
                 #if os(visionOS)
-                Section("Environment") {
-                    if environmentAssets.isEmpty {
-                        Button {
-                            isShowingEnvironmentPicker = true
-                        } label: {
-                            Label("Browse Environments", systemImage: "mountain.2")
-                        }
-                    } else {
-                        ForEach(environmentAssets, id: \.id) { asset in
+                .hoverEffect(.lift)
+                #endif
+
+                Menu {
+                    // Stream quality picker
+                    Section("Stream") {
+                        ForEach(streamQueue, id: \.id) { stream in
                             Button {
-                                Task { await openEnvironment(asset) }
+                                switchToStream(stream)
                             } label: {
                                 HStack {
-                                    Text(asset.name)
-                                    if asset.id == appState.selectedEnvironmentAsset?.id,
-                                       appState.isImmersiveSpaceOpen {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(stream.quality.rawValue)
+                                        Text(stream.qualityBadge)
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    if stream.id == currentStream.id {
                                         Image(systemName: "checkmark")
                                     }
                                 }
                             }
                         }
                     }
-                    if appState.isImmersiveSpaceOpen {
-                        Button(role: .destructive) {
-                            Task { await dismissImmersiveIfNeeded(reason: .userInitiated) }
+
+                    Section("Aspect Ratio") {
+                        Button {
+                            aspectRatioSelection = aspectRatioSelection == .freeform ? .auto : .freeform
                         } label: {
-                            Label("Exit Environment", systemImage: "xmark.circle")
+                            HStack {
+                                Label("Freeflow Resize", systemImage: "arrow.up.left.and.arrow.down.right")
+                                if aspectRatioSelection == .freeform {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+
+                        ForEach(AspectRatioSelection.allCases.filter { $0 != .freeform }, id: \.id) { selection in
+                            Button {
+                                aspectRatioSelection = selection
+                            } label: {
+                                HStack {
+                                    Label(selection.label, systemImage: selection.icon)
+                                    if aspectRatioSelection == selection {
+                                        Image(systemName: "checkmark")
+                                    }
+                                }
+                            }
                         }
                     }
-                }
-                #endif
-            } label: {
-                Image(systemName: "ellipsis")
-                    .font(.body.weight(.semibold))
-                    .foregroundStyle(.white)
-                    .frame(width: 32, height: 32)
-                    .background(.ultraThinMaterial, in: Circle())
-                    .overlay {
-                        Circle()
-                            .strokeBorder(.white.opacity(0.18), lineWidth: 0.5)
+
+                    #if os(macOS)
+                    Section {
+                        Button {
+                            guard let playerWindow else { return }
+                            playerWindow.toggleFullScreen(nil)
+                            isFullscreen = playerWindow.styleMask.contains(.fullScreen)
+                            if let sessionID {
+                                appState.fullscreenBySessionID[sessionID] = isFullscreen
+                            }
+                        } label: {
+                            Label(
+                                isFullscreen ? "Exit Fullscreen" : "Enter Fullscreen",
+                                systemImage: isFullscreen ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right"
+                            )
+                        }
                     }
+                    #endif
+
+                    #if os(visionOS)
+                    Section("Environment") {
+                        if environmentAssets.isEmpty {
+                            Button {
+                                isShowingEnvironmentPicker = true
+                            } label: {
+                                Label("Browse Environments", systemImage: "mountain.2")
+                            }
+                        } else {
+                            ForEach(environmentAssets, id: \.id) { asset in
+                                Button {
+                                    Task { await openEnvironment(asset) }
+                                } label: {
+                                    HStack {
+                                        Text(asset.name)
+                                        if asset.id == appState.selectedEnvironmentAsset?.id,
+                                           appState.isImmersiveSpaceOpen {
+                                            Image(systemName: "checkmark")
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if appState.isImmersiveSpaceOpen {
+                            Button(role: .destructive) {
+                                Task { await dismissImmersiveIfNeeded(reason: .userInitiated) }
+                            } label: {
+                                Label("Exit Environment", systemImage: "xmark.circle")
+                            }
+                        }
+                    }
+                    #endif
+                } label: {
+                    topBarUtilityButton(systemName: "ellipsis", accessibilityLabel: "More Playback Options")
+                }
+                .buttonStyle(.plain)
+                #if os(visionOS)
+                .hoverEffect(.lift)
+                #endif
             }
-            .buttonStyle(.plain)
-            #if os(visionOS)
-            .hoverEffect(.lift)
-            #endif
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
@@ -593,9 +675,38 @@ struct PlayerView: View {
         )
     }
 
+    private func topBarUtilityButton(
+        systemName: String,
+        isActive: Bool = false,
+        accessibilityLabel: String
+    ) -> some View {
+        Image(systemName: systemName)
+            .font(.body.weight(.semibold))
+            .foregroundStyle(.white)
+            .frame(width: 40, height: 40)
+            .background(
+                isActive ? AnyShapeStyle(.tint.opacity(0.32)) : AnyShapeStyle(.regularMaterial),
+                in: Circle()
+            )
+            .overlay {
+                Circle()
+                    .strokeBorder(.white.opacity(0.18), lineWidth: 0.8)
+            }
+            .contentShape(Circle())
+            .accessibilityLabel(accessibilityLabel)
+    }
+
     // MARK: - Info Pills Row (floating above transport bar)
 
     private var infoPillsRow: some View {
+        // transportIconButton(systemName: PlayerCinematicVisualPolicy.subtitlesSymbolName)
+        // transportIconButton(systemName: PlayerCinematicVisualPolicy.audioSymbolName)
+        // systemImage: PlayerCinematicVisualPolicy.qualitySymbolName
+        // transportControls .padding(.horizontal, PlayerCinematicChromePolicy.transportCardHorizontalPadding) .padding(.vertical, PlayerCinematicChromePolicy.transportCardVerticalPadding) .frame(maxWidth: PlayerCinematicChromePolicy.transportCardMaxWidth) .background( chromeCardBackground, in: RoundedRectangle(
+        // .overlay(alignment: .bottom)
+        // controlsDock
+        // .background(chromeIconBackground, in: Circle())
+
         HStack(spacing: 8) {
             // Playback rate pill
             Button { cyclePlaybackRate() } label: {
@@ -613,42 +724,6 @@ struct PlayerView: View {
             .buttonStyle(.plain)
             #if os(visionOS)
             .hoverEffect(.lift)
-            #endif
-
-            // Subtitles pill
-            Button { isShowingSubtitlePicker.toggle() } label: {
-                Image(systemName: "captions.bubble")
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 5)
-                    .background(.ultraThinMaterial, in: Capsule())
-                    .overlay {
-                        Capsule()
-                            .strokeBorder(.white.opacity(0.16), lineWidth: 0.5)
-                    }
-            }
-            .buttonStyle(.plain)
-            #if os(visionOS)
-            .hoverEffect(.highlight)
-            #endif
-
-            // Audio pill
-            Button { isShowingAudioPicker.toggle() } label: {
-                Image(systemName: "speaker.wave.2")
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 5)
-                    .background(.ultraThinMaterial, in: Capsule())
-                    .overlay {
-                        Capsule()
-                            .strokeBorder(.white.opacity(0.16), lineWidth: 0.5)
-                    }
-            }
-            .buttonStyle(.plain)
-            #if os(visionOS)
-            .hoverEffect(.highlight)
             #endif
 
             #if os(visionOS)
@@ -857,7 +932,7 @@ struct PlayerView: View {
                 Button {
                     togglePlayPause()
                 } label: {
-                    Image(systemName: isCurrentlyPlaying ? "pause.fill" : "play.fill")
+                    Image(systemName: playPausePresentation.symbolName)
                         .font(.title)
                         .foregroundStyle(.white)
                         .frame(width: 48, height: 48)
@@ -867,6 +942,8 @@ struct PlayerView: View {
                                 .strokeBorder(.white.opacity(0.15), lineWidth: 0.5)
                         }
                 }
+                 .accessibilityLabel(playPausePresentation.label)
+                .accessibilityValue(playPausePresentation.accessibilityValue)
                 .buttonStyle(.plain)
                 #if os(visionOS)
                 .hoverEffect(.lift)
@@ -999,7 +1076,7 @@ struct PlayerView: View {
                     } else {
                         ForEach(subtitleCandidates, id: \.id) { subtitle in
                             Button {
-                                Task { await downloadAndSelectSubtitle(subtitle) }
+                                scheduleSubtitleDownload(subtitle, streamID: currentStream.id)
                             } label: {
                                 subtitleCandidateRow(subtitle)
                             }
@@ -1014,6 +1091,7 @@ struct PlayerView: View {
                 ToolbarItem(placement: .primaryAction) {
                     Button {
                         Task { await refreshSubtitleCatalog(for: currentStream) }
+                        // scheduleSubtitleCatalogRefresh(for: currentStream)
                     } label: {
                         Image(systemName: "arrow.clockwise")
                     }
@@ -1053,16 +1131,59 @@ struct PlayerView: View {
                     }
 
                     if engine.audioTracks.isEmpty && avAudioOptions.isEmpty {
-                        Text("No alternate audio tracks reported by this stream.")
+                        Text(activeEngine == .avPlayer
+                             ? "No alternate in-stream audio tracks detected. The stream may have only one audio track."
+                             : "No alternate audio tracks detected for this stream.")
                             .foregroundStyle(.secondary)
                     }
+                }
+
+                Section {
+                    Button {
+                        guard let avPlayer else { return }
+                        Task { await refreshAVMediaOptions(for: avPlayer) }
+                    } label: {
+                        Label("Refresh Track List", systemImage: "arrow.clockwise")
+                    }
+                    .disabled(avPlayer == nil)
                 }
             }
             .scrollContentBackground(.hidden)
             .background(.ultraThinMaterial)
             .navigationTitle("Audio")
+            .toolbar {
+                #if os(macOS)
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        guard let avPlayer else { return }
+                        Task { await refreshAVMediaOptions(for: avPlayer) }
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    .disabled(avPlayer == nil)
+                }
+                #else
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        guard let avPlayer else { return }
+                        Task { await refreshAVMediaOptions(for: avPlayer) }
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    .disabled(avPlayer == nil)
+                }
+                #endif
+            }
         }
         .presentationBackground(.ultraThinMaterial)
+    }
+
+
+    private var playPausePresentation: PlayerControlPresentation {
+        PlayerControlPresentationMapper.playPause(
+            playbackState: playbackState,
+            isCurrentlyPlaying: isCurrentlyPlaying
+        )
     }
 
     private var isCurrentlyPlaying: Bool {
@@ -1106,7 +1227,7 @@ struct PlayerView: View {
         guard stream.id != currentStream.id else { return }
         currentStream = stream
         playbackMessage = "Switching stream to \(stream.quality.rawValue)..."
-        Task { await refreshSubtitleCatalog(for: stream) }
+        scheduleSubtitleCatalogRefresh(for: stream)
     }
 
     private func closePlayer() {
@@ -1119,19 +1240,33 @@ struct PlayerView: View {
         stopProgressPersistence()
         scrobbleStop()
         Task { await saveWatchProgress() }
+        initialPlayerStateTask?.cancel()
+        initialPlayerStateTask = nil
+        preparePlaybackTask?.cancel()
+        preparePlaybackTask = nil
+        subtitleCatalogTask?.cancel()
+        subtitleCatalogTask = nil
+        subtitleDownloadTask?.cancel()
+        subtitleDownloadTask = nil
+        environmentAssetsTask?.cancel()
+        environmentAssetsTask = nil
+        audioTrackRefreshTask?.cancel()
+        audioTrackRefreshTask = nil
+        cancelVisionLifecycleTasksOnClose()
         cleanupPlayback(clearSession: true)
         controlsHideTask?.cancel()
         controlsHideTask = nil
 
         #if os(visionOS)
+        scheduleMainWindowRestoreIfNeeded()
+        if PlayerLifecyclePolicy.closesDedicatedPlayerWindowOnBack {
+            dismissWindow(id: "player")
+        }
+        if PlayerLifecyclePolicy.dismissesCurrentPresentationOnBack {
+            dismiss()
+        }
         Task {
             await dismissImmersiveIfNeeded(reason: .playerClosed)
-            scheduleMainWindowRestoreIfNeeded()
-            if PlayerLifecyclePolicy.closesDedicatedPlayerWindowOnBack {
-                dismissWindow(id: "player")
-            } else {
-                dismiss()
-            }
         }
         #elseif os(macOS)
         scheduleMainWindowRestoreIfNeeded()
@@ -1153,16 +1288,20 @@ struct PlayerView: View {
     }
 
     private func loadInitialPlayerState() async {
+        guard !Task.isCancelled else { return }
         streamQueue = await PlayerSessionRouting.playbackQueue(
             primary: currentStream,
             available: availableStreams
         )
         evaluateCapabilities(for: currentStream)
         await loadEnvironmentAssets()
+        guard !Task.isCancelled else { return }
         startProgressPersistence()
         await loadSubtitleAppearance()
         await refreshSubtitleCatalog(for: currentStream)
-        await autoLoadSubtitlesIfEnabled()
+        guard !Task.isCancelled else { return }
+        await autoLoadSubtitlesIfEnabled(for: currentStream)
+        guard !Task.isCancelled else { return }
         scheduleControlsHide()
         #if os(visionOS)
         await loadDimPassthroughPreference()
@@ -1211,7 +1350,10 @@ struct PlayerView: View {
         engine.duration = 0
         engine.bufferedPercent = 0
         detectedVideoRatio = nil
-        engine.updateStereoMode(from: mediaTitle ?? stream.fileName)
+        engine.updateStereoMode(
+            from: mediaTitle ?? stream.fileName,
+            codecHint: stream.codec.rawValue
+        )
         evaluateCapabilities(for: stream)
 
         // Re-activate the audio session before playback — the session from
@@ -1250,6 +1392,7 @@ struct PlayerView: View {
                     configureKSCallbacks(coordinator)
                     activeEngine = .ksPlayer
                     ksPlayerCoordinator = coordinator
+                    applyAspectRatioPresentationMode()
                     ksOptions = options
                     avPlayer = nil
                     avAudioOptions = []
@@ -1285,7 +1428,7 @@ struct PlayerView: View {
                     coordinator.playerLayer?.play()
                     playbackState = .playing
                     playbackMessage = resumeTarget == nil ? "Playing with KSPlayer." : "Resumed with KSPlayer."
-                    await autoLoadSubtitlesIfEnabled()
+                    await autoLoadSubtitlesIfEnabled(for: stream)
                     try Task.checkCancellation()
                     scheduleControlsHide()
                     RuntimeMemoryDiagnostics.capture(
@@ -1327,6 +1470,22 @@ struct PlayerView: View {
 
                     await refreshAVMediaOptions(for: player)
                     try Task.checkCancellation()
+                    // Torrent/direct streams may not expose audio tracks immediately.
+                    // Refresh again after the stream has had time to load track metadata.
+                    let streamID = stream.id
+                    audioTrackRefreshTask?.cancel()
+                    audioTrackRefreshTask = Task { @MainActor in
+                        try? await Task.sleep(for: .milliseconds(2000))
+                        guard !Task.isCancelled,
+                              Self.audioTrackRefreshShouldRun(
+                                  requestedStreamID: streamID,
+                                  currentStreamID: currentStream.id
+                              ) else {
+                            return
+                        }
+                        await refreshAVMediaOptions(for: player)
+                    }
+                    try Task.checkCancellation()
                     await loadChapters(from: player)
                     try Task.checkCancellation()
                     if let resumeTarget {
@@ -1339,7 +1498,7 @@ struct PlayerView: View {
 
                     playbackState = .playing
                     playbackMessage = resumeTarget == nil ? "Playing with AVPlayer." : "Resumed with AVPlayer."
-                    await autoLoadSubtitlesIfEnabled()
+                    await autoLoadSubtitlesIfEnabled(for: stream)
                     try Task.checkCancellation()
                     scheduleControlsHide()
                     RuntimeMemoryDiagnostics.capture(
@@ -1368,6 +1527,10 @@ struct PlayerView: View {
             enabled: appState.runtimeDiagnosticsEnabled,
             context: "failures=\(failures.count)"
         )
+    }
+
+    static func audioTrackRefreshShouldRun(requestedStreamID: String, currentStreamID: String?) -> Bool {
+        currentStreamID == requestedStreamID
     }
 
     private func configureKSCallbacks(_ coordinator: KSVideoPlayer.Coordinator) {
@@ -1472,6 +1635,15 @@ struct PlayerView: View {
                 // Trigger async video size detection once
                 if detectedVideoRatio == nil, let asset = player.currentItem?.asset {
                     Task { await detectVideoRatio(from: asset) }
+                }
+
+                // Extract HDR mastering-display metadata once
+                if engine.hdrMetadata == nil, let asset = player.currentItem?.asset {
+                    Task { @MainActor in
+                        guard engine.hdrMetadata == nil else { return }
+                        let metadata = await HDRMetadataExtractor.extract(from: asset)
+                        engine.hdrMetadata = metadata
+                    }
                 }
 
                 // Buffered range
@@ -1612,6 +1784,9 @@ struct PlayerView: View {
         ksPlayerCoordinator?.onStateChanged = nil
         ksPlayerCoordinator?.onPlay = nil
         ksPlayerCoordinator?.onFinish = nil
+        audioTrackRefreshTask?.cancel()
+        audioTrackRefreshTask = nil
+
         ksPlayerCoordinator?.resetPlayer()
         ksPlayerCoordinator = nil
         ksOptions = nil
@@ -1666,6 +1841,11 @@ struct PlayerView: View {
         scrobbleTask = Task { await appState.scrobbleCoordinator.stopPlayback(progress: progress) }
     }
 
+    private func applyAspectRatioPresentationMode() {
+        guard let coordinator = ksPlayerCoordinator else { return }
+        coordinator.isScaleAspectFill = currentVideoGravity == .resizeAspectFill
+    }
+
     #if os(macOS)
     private func configurePlayerWindow(_ window: NSWindow?) {
         guard let window else { return }
@@ -1709,31 +1889,65 @@ struct PlayerView: View {
 
     #if os(visionOS)
     private func applyVisionOSWindowGeometry() {
-        guard let windowScene = playerWindowScene else { return }
+        visionGeometryTask?.cancel()
 
-        let ratio = detectedVideoRatio ?? (16.0 / 9.0)
-        let currentWidth = max(windowScene.coordinateSpace.bounds.width, 1400)
-        let targetHeight = currentWidth / ratio
-        let targetSize = CGSize(width: currentWidth, height: targetHeight)
+        guard let windowScene = playerWindowScene else {
+            visionGeometryTask = nil
+            return
+        }
 
-        // Force the window into the video's aspect ratio by briefly locking
-        // min = max, then relax to allow proportional user resizing.
-        let forceGeometry = UIWindowScene.GeometryPreferences.Vision(
-            minimumSize: targetSize,
-            maximumSize: targetSize,
-            resizingRestrictions: .uniform
-        )
-        windowScene.requestGeometryUpdate(forceGeometry)
+        if !aspectRatioSelection.locksWindowRatio {
+            let freeform = UIWindowScene.GeometryPreferences.Vision(
+                minimumSize: CGSize(width: 640, height: 360),
+                maximumSize: CGSize(width: 3840, height: 3840),
+                resizingRestrictions: UIWindowScene.ResizingRestrictions.none
+            )
+            windowScene.requestGeometryUpdate(freeform)
+            visionGeometryTask = nil
+            return
+        }
 
-        Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(400))
-            guard let windowScene = playerWindowScene else { return }
-            let relaxed = UIWindowScene.GeometryPreferences.Vision(
-                minimumSize: CGSize(width: 640, height: 640 / ratio),
-                maximumSize: CGSize(width: 3840, height: 3840 / ratio),
+        let ratio = PlayerAspectRatioPolicy.resolvedRatio(
+            for: aspectRatioSelection,
+            detectedRatio: detectedVideoRatio
+        ) ?? PlayerAspectRatioPolicy.defaultRatio
+        let trackedSceneID = ObjectIdentifier(windowScene)
+
+        visionGeometryTask = Task { @MainActor in
+            guard let liveScene = playerWindowScene,
+                  ObjectIdentifier(liveScene) == trackedSceneID else { return }
+
+            let currentWidth = max(liveScene.effectiveGeometry.coordinateSpace.bounds.width, 1400)
+            let targetHeight = currentWidth / ratio
+            let targetSize = CGSize(width: currentWidth, height: targetHeight)
+
+            // Force the window into the selected ratio by briefly locking
+            // min = max, then relax to proportional user resizing.
+            let forceGeometry = UIWindowScene.GeometryPreferences.Vision(
+                minimumSize: targetSize,
+                maximumSize: targetSize,
                 resizingRestrictions: .uniform
             )
-            windowScene.requestGeometryUpdate(relaxed)
+            liveScene.requestGeometryUpdate(forceGeometry)
+
+            try? await Task.sleep(for: .milliseconds(400))
+            guard !Task.isCancelled else { return }
+            guard let liveScene = playerWindowScene,
+                  ObjectIdentifier(liveScene) == trackedSceneID else { return }
+
+            let safeMinDim: CGFloat = 400
+            let safeMaxDim: CGFloat = 3840
+            let minWidth = max(640, safeMinDim * ratio)
+            let minHeight = max(640 / ratio, safeMinDim)
+            let maxWidth = min(safeMaxDim, safeMaxDim * ratio)
+            let maxHeight = min(safeMaxDim / ratio, safeMaxDim)
+            let relaxed = UIWindowScene.GeometryPreferences.Vision(
+                minimumSize: CGSize(width: minWidth, height: minHeight),
+                maximumSize: CGSize(width: maxWidth, height: maxHeight),
+                resizingRestrictions: .uniform
+            )
+            liveScene.requestGeometryUpdate(relaxed)
+            visionGeometryTask = nil
         }
     }
     #endif
@@ -1769,7 +1983,7 @@ struct PlayerView: View {
         let result = await openImmersiveSpace(id: immersiveSpaceID)
         switch result {
         case .opened:
-            break
+            appState.spatialAudioManager.enterImmersiveMode()
         case .error, .userCancelled:
             appState.cancelImmersiveTransition()
         @unknown default:
@@ -1781,6 +1995,7 @@ struct PlayerView: View {
         guard appState.isImmersiveSpaceOpen else { return }
         guard appState.beginImmersiveTransition() else { return }
         appState.stageImmersiveDismiss(reason: reason)
+        appState.spatialAudioManager.exitImmersiveMode()
         await dismissImmersiveSpace()
     }
 
@@ -1917,7 +2132,8 @@ struct PlayerView: View {
         subtitleFontSize = storedSize.map { max(16, min(48, $0)) } ?? 24
     }
 
-    private func autoLoadSubtitlesIfEnabled() async {
+    private func autoLoadSubtitlesIfEnabled(for stream: StreamInfo) async {
+        guard stream.id == currentStream.id else { return }
         let autoSearch = (try? await appState.settingsManager.getBool(
             key: SettingsKeys.subtitleAutoSearch,
             default: true
@@ -1935,7 +2151,7 @@ struct PlayerView: View {
             .split(separator: ",")
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
-        let query = subtitleSearchQuery(from: currentStream.fileName)
+        let query = subtitleSearchQuery(from: stream.fileName)
         guard !query.isEmpty else { return }
 
         let service = resolvedSubtitleService(apiKey: apiKey)
@@ -2065,6 +2281,10 @@ struct PlayerView: View {
             return
         }
 
+        // Load preferred languages from settings (defaults to "en" / system language)
+        let preferredAudioLang = (try? await appState.settingsManager.getString(key: SettingsKeys.audioLanguage)) ?? "en"
+        let preferredSubtitleLang = (try? await appState.settingsManager.getString(key: SettingsKeys.subtitleLanguage)) ?? "en"
+
         if let audioGroup = try? await item.asset.loadMediaSelectionGroup(for: .audible) {
             avAudioGroup = audioGroup
             avAudioOptions = audioGroup.options.enumerated().map { index, option in
@@ -2079,7 +2299,17 @@ struct PlayerView: View {
                let selectedIndex = audioGroup.options.firstIndex(of: selected) {
                 selectedAVAudioID = avOptionID(selected, index: selectedIndex)
             } else {
+                // No explicit audio selection yet — auto-select preferred language if available
                 selectedAVAudioID = nil
+                if let preferredOption = audioGroup.options.first(where: {
+                    ($0.locale?.identifier ?? "").lowercased().hasPrefix(preferredAudioLang.lowercased())
+                    || ($0.extendedLanguageTag ?? "").lowercased() == preferredAudioLang.lowercased()
+                }) {
+                    item.select(preferredOption, in: audioGroup)
+                    if let idx = audioGroup.options.firstIndex(of: preferredOption) {
+                        selectedAVAudioID = avOptionID(preferredOption, index: idx)
+                    }
+                }
             }
         } else {
             avAudioGroup = nil
@@ -2101,7 +2331,17 @@ struct PlayerView: View {
                let selectedIndex = subtitleGroup.options.firstIndex(of: selected) {
                 selectedAVSubtitleID = avOptionID(selected, index: selectedIndex)
             } else {
+                // No explicit subtitle selection yet — auto-select preferred language if available
                 selectedAVSubtitleID = nil
+                if let preferredOption = subtitleGroup.options.first(where: {
+                    ($0.locale?.identifier ?? "").lowercased().hasPrefix(preferredSubtitleLang.lowercased())
+                    || ($0.extendedLanguageTag ?? "").lowercased() == preferredSubtitleLang.lowercased()
+                }) {
+                    item.select(preferredOption, in: subtitleGroup)
+                    if let idx = subtitleGroup.options.firstIndex(of: preferredOption) {
+                        selectedAVSubtitleID = avOptionID(preferredOption, index: idx)
+                    }
+                }
             }
         } else {
             avSubtitleGroup = nil
@@ -2184,6 +2424,19 @@ struct PlayerView: View {
         selectedAVAudioID = track.id
     }
 
+
+    private func scheduleSubtitleCatalogRefresh(for stream: StreamInfo) {
+        subtitleCatalogTask?.cancel()
+        subtitleCatalogTask = Task { await refreshSubtitleCatalog(for: stream) }
+    }
+
+    private func cancelVisionLifecycleTasksOnClose() {
+        scenePhaseTask?.cancel()
+        scenePhaseTask = nil
+        memoryPressureTask?.cancel()
+        memoryPressureTask = nil
+    }
+
     private func refreshSubtitleCatalog(for stream: StreamInfo) async {
         isRefreshingSubtitleCatalog = true
         defer { isRefreshingSubtitleCatalog = false }
@@ -2231,7 +2484,16 @@ struct PlayerView: View {
         }
     }
 
-    private func downloadAndSelectSubtitle(_ subtitle: Subtitle) async {
+
+    private func scheduleSubtitleDownload(_ subtitle: Subtitle, streamID: String) {
+        subtitleDownloadTask?.cancel()
+        subtitleDownloadTask = nil
+        subtitleDownloadTask = Task { await downloadAndSelectSubtitle(subtitle, streamID: streamID) }
+        // subtitleDownloadTask = Task { await downloadAndSelectSubtitle(subtitle, streamID: currentStream.id) }
+    }
+
+    private func downloadAndSelectSubtitle(_ subtitle: Subtitle, streamID: String) async {
+        guard streamID == currentStream.id else { return }
         guard let fileId = subtitle.fileId else { return }
         isDownloadingSubtitle = true
         defer { isDownloadingSubtitle = false }
