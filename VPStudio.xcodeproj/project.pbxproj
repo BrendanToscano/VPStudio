@@ -9,6 +9,8 @@
 /* Begin PBXBuildFile section */
 		AA000001AAAA000100000001 /* GRDB in Frameworks */ = {isa = PBXBuildFile; productRef = AA000001AAAA000100000002 /* GRDB */; };
 		AA000001AAAA000100000003 /* KSPlayer in Frameworks */ = {isa = PBXBuildFile; productRef = AA000001AAAA000100000004 /* KSPlayer */; };
+		FF2DC6702F80F54100FEBFFD /* Hub in Frameworks */ = {isa = PBXBuildFile; productRef = AA000001AAAA00010000000E /* Hub */; };
+		FF2DC6712F80F54100FEBFFD /* Tokenizers in Frameworks */ = {isa = PBXBuildFile; productRef = AA000001AAAA00010000000F /* Tokenizers */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -44,6 +46,8 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				FF2DC6712F80F54100FEBFFD /* Tokenizers in Frameworks */,
+				FF2DC6702F80F54100FEBFFD /* Hub in Frameworks */,
 				AA000001AAAA000100000001 /* GRDB in Frameworks */,
 				AA000001AAAA000100000003 /* KSPlayer in Frameworks */,
 			);
@@ -108,6 +112,8 @@
 			packageProductDependencies = (
 				AA000001AAAA000100000002 /* GRDB */,
 				AA000001AAAA000100000004 /* KSPlayer */,
+				AA000001AAAA00010000000E /* Hub */,
+				AA000001AAAA00010000000F /* Tokenizers */,
 			);
 			productName = VPStudio;
 			productReference = C626B5422F47E175008624B6 /* VPStudio.app */;
@@ -142,7 +148,7 @@
 			attributes = {
 				BuildIndependentTargetsInParallel = 1;
 				LastSwiftUpdateCheck = 2610;
-				LastUpgradeCheck = 2610;
+				LastUpgradeCheck = 2640;
 				TargetAttributes = {
 					C626B5412F47E175008624B6 = {
 						CreatedOnToolsVersion = 26.1.1;
@@ -165,6 +171,7 @@
 			packageReferences = (
 				AA000001AAAA000100000005 /* XCRemoteSwiftPackageReference "GRDB" */,
 				AA000001AAAA000100000006 /* XCRemoteSwiftPackageReference "KSPlayer" */,
+				AA000001AAAA00010000000D /* XCRemoteSwiftPackageReference "swift-transformers" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = C626B5432F47E175008624B6 /* Products */;
@@ -243,6 +250,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = H2Q3F2444J;
@@ -261,12 +269,16 @@
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SUPPORTED_PLATFORMS = "xros xrsimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = NO;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = nonisolated;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = 7;
+				XROS_DEPLOYMENT_TARGET = 26.0;
 			};
 			name = Debug;
 		};
@@ -275,6 +287,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = H2Q3F2444J;
@@ -293,12 +306,16 @@
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SUPPORTED_PLATFORMS = "xros xrsimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = NO;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = nonisolated;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = 7;
+				XROS_DEPLOYMENT_TARGET = 26.0;
 			};
 			name = Release;
 		};
@@ -360,9 +377,10 @@
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
 				SDKROOT = xros;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
-				XROS_DEPLOYMENT_TARGET = 26.1;
+				XROS_DEPLOYMENT_TARGET = 2.0;
 			};
 			name = Debug;
 		};
@@ -417,9 +435,10 @@
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				SDKROOT = xros;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_COMPILATION_MODE = wholemodule;
 				VALIDATE_PRODUCT = YES;
-				XROS_DEPLOYMENT_TARGET = 26.1;
+				XROS_DEPLOYMENT_TARGET = 2.0;
 			};
 			name = Release;
 		};
@@ -444,7 +463,7 @@
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = 7;
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/VPStudio.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/VPStudio";
-				XROS_DEPLOYMENT_TARGET = 26.1;
+				XROS_DEPLOYMENT_TARGET = 26.0;
 			};
 			name = Debug;
 		};
@@ -469,7 +488,7 @@
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = 7;
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/VPStudio.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/VPStudio";
-				XROS_DEPLOYMENT_TARGET = 26.1;
+				XROS_DEPLOYMENT_TARGET = 26.0;
 			};
 			name = Release;
 		};
@@ -522,6 +541,14 @@
 				minimumVersion = 2.0.0;
 			};
 		};
+		AA000001AAAA00010000000D /* XCRemoteSwiftPackageReference "swift-transformers" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/huggingface/swift-transformers";
+			requirement = {
+				kind = upToNextMinorVersion;
+				minimumVersion = 1.1.0;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -534,6 +561,16 @@
 			isa = XCSwiftPackageProductDependency;
 			package = AA000001AAAA000100000006 /* XCRemoteSwiftPackageReference "KSPlayer" */;
 			productName = KSPlayer;
+		};
+		AA000001AAAA00010000000E /* Hub */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AA000001AAAA00010000000D /* XCRemoteSwiftPackageReference "swift-transformers" */;
+			productName = Hub;
+		};
+		AA000001AAAA00010000000F /* Tokenizers */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AA000001AAAA00010000000D /* XCRemoteSwiftPackageReference "swift-transformers" */;
+			productName = Tokenizers;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

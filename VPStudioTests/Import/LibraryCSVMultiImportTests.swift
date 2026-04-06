@@ -35,7 +35,7 @@ struct LibraryCSVMultiImportTests {
             tt0111161,2024-01-10,The Shawshank Redemption,movie,1994
             tt0068646,2024-01-11,The Godfather,movie,1972
             """,
-            name: "Watchlist.csv",
+            name: "Watchlist Import.csv",
             in: tempDir
         )
 
@@ -57,7 +57,7 @@ struct LibraryCSVMultiImportTests {
         )
         let summary1 = try await service.importCSV(from: watchlistCSV, options: opts1)
         #expect(summary1.rowsImported == 2)
-        #expect(summary1.targetFolderName == "Watchlist")
+        #expect(summary1.targetFolderName == "Watchlist Import")
 
         // Import second file into its folder
         let opts2 = LibraryCSVImportOptions(
@@ -73,7 +73,7 @@ struct LibraryCSVMultiImportTests {
         let customFolders = folders.filter { !$0.isSystem }
         #expect(customFolders.count == 2)
         let folderNames = Set(customFolders.map(\.name))
-        #expect(folderNames.contains("Watchlist"))
+        #expect(folderNames.contains("Watchlist Import"))
         #expect(folderNames.contains("Horror Picks"))
     }
 

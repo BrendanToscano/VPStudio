@@ -89,7 +89,8 @@ struct ExploreUIPolishTests {
     @Test func phaseTransitionsFromSearchingToEmptyOnNoResults() {
         let viewModel = SearchViewModel()
         viewModel.isSearching = false
-        viewModel.query = "no matches here"
+        // Use the real submit path so `hasAttemptedTextSearch` is set.
+        viewModel.search(queryText: "no matches here")
         viewModel.results = []
         #expect(viewModel.explorePhase == .empty)
     }
@@ -229,8 +230,8 @@ struct ExploreUIPolishTests {
         #expect(result == "3 languages")
     }
 
-    @Test func commonLanguagesHasSeventeenOptions() {
-        #expect(SearchLanguageOption.common.count == 17)
+    @Test func commonLanguagesHasNineteenOptions() {
+        #expect(SearchLanguageOption.common.count == 19)
     }
 
     @Test func commonLanguageCodesAreUnique() {

@@ -292,27 +292,49 @@ struct ExploreSkeletonView: View {
 struct ExploreErrorView: View {
     let error: AppError
     let onRetry: () -> Void
+    var onOpenSettings: (() -> Void)? = nil
 
     var body: some View {
-        VStack(spacing: 16) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .font(.system(size: 40))
-                .foregroundStyle(.yellow)
+        CinematicStateCard(
+            accent: .orange,
+            artworkName: "genre-art-action",
+            minHeight: 228
+        ) {
+            VStack(alignment: .leading, spacing: 16) {
+                HStack(alignment: .top, spacing: 14) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 26, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .frame(width: 50, height: 50)
+                        .background(Color.orange.opacity(0.26), in: Circle())
+                        .overlay {
+                            Circle()
+                                .strokeBorder(.white.opacity(0.16), lineWidth: 1)
+                        }
 
-            Text(error.errorDescription ?? "Something went wrong.")
-                .font(.headline)
-                .multilineTextAlignment(.center)
+                    VStack(alignment: .leading, spacing: 6) {
+                        GlassTag(text: "Need a quick retry?", tintColor: .orange.opacity(0.22), symbol: "arrow.clockwise")
+                        Text(error.errorDescription ?? "Something went wrong.")
+                            .font(.title3.weight(.semibold))
+                            .multilineTextAlignment(.leading)
+                        Text(error.recoverySuggestion ?? "Check your connection, then try again. You can keep browsing moods while this recovers.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
 
-            if let suggestion = error.recoverySuggestion {
-                Text(suggestion)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
+                    Spacer(minLength: 0)
+                }
+
+                FlowLayout(spacing: 10) {
+                    if error.requiresTMDBSetupAction, let onOpenSettings {
+                        SpatialButton(title: "Open Settings", icon: "gearshape.fill", tint: .yellow, action: onOpenSettings)
+                    }
+
+                    SpatialButton(title: "Retry Search", icon: "arrow.clockwise", tint: .orange, action: onRetry)
+                }
             }
-
-            SpatialButton(title: "Retry", icon: "arrow.clockwise", action: onRetry)
         }
-        .padding(32)
     }
 }
 
@@ -321,21 +343,37 @@ struct ExploreEmptyView: View {
     let query: String
 
     var body: some View {
-        VStack(spacing: 16) {
-            Image(systemName: "magnifyingglass")
-                .font(.system(size: 40))
-                .foregroundStyle(.secondary)
+        CinematicStateCard(
+            accent: .teal,
+            artworkName: "genre-art-mystery",
+            minHeight: 228
+        ) {
+            VStack(alignment: .leading, spacing: 16) {
+                HStack(alignment: .top, spacing: 14) {
+                    Image(systemName: "sparkle.magnifyingglass")
+                        .font(.system(size: 24, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .frame(width: 50, height: 50)
+                        .background(Color.teal.opacity(0.25), in: Circle())
+                        .overlay {
+                            Circle()
+                                .strokeBorder(.white.opacity(0.16), lineWidth: 1)
+                        }
 
-            Text("No results for \"\(query)\"")
-                .font(.headline)
+                    VStack(alignment: .leading, spacing: 6) {
+                        GlassTag(text: "No perfect match yet", tintColor: .teal.opacity(0.22), symbol: "wand.and.stars")
+                        Text("Nothing matched \"\(query)\"")
+                            .font(.title3.weight(.semibold))
+                        Text("Try a shorter title, loosen the year filter, or jump into a mood card below to keep the search moving.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
 
-            Text("Try adjusting your search, using different keywords, or broadening your filters.")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: 340)
+                    Spacer(minLength: 0)
+                }
+            }
         }
-        .padding(32)
     }
 }
 

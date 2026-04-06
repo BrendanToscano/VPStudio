@@ -11,7 +11,8 @@ enum Fixtures {
         hdr: HDRFormat = .sdr,
         fileName: String = "video.mkv",
         sizeBytes: Int64? = 1_000,
-        debridService: String = DebridServiceType.realDebrid.rawValue
+        debridService: String = DebridServiceType.realDebrid.rawValue,
+        recoveryContext: StreamRecoveryContext? = nil
     ) -> StreamInfo {
         StreamInfo(
             streamURL: URL(string: url)!,
@@ -22,7 +23,8 @@ enum Fixtures {
             hdr: hdr,
             fileName: fileName,
             sizeBytes: sizeBytes,
-            debridService: debridService
+            debridService: debridService,
+            recoveryContext: recoveryContext
         )
     }
 

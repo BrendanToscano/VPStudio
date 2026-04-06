@@ -334,13 +334,36 @@ struct OpenSubtitlesDownloadTests {
 
     @Test func getDownloadURLSendsFileIdInBody() async throws {
         final class CapturedState: @unchecked Sendable {
-            var capturedBody: [String: Any]?
+            private let lock = NSLock()
+            private var _capturedBody: [String: Any]?
+            func set(_ body: [String: Any]?) {
+                lock.lock(); defer { lock.unlock() }
+                _capturedBody = body
+            }
+            var capturedBody: [String: Any]? {
+                lock.lock(); defer { lock.unlock() }
+                return _capturedBody
+            }
         }
         let state = CapturedState()
 
         let session = makeSubtitleStubSession { request in
+            // Capture either httpBody or streamed body from httpBodyStream
             if let body = request.httpBody {
-                state.capturedBody = try? JSONSerialization.jsonObject(with: body) as? [String: Any]
+                let parsed = try? JSONSerialization.jsonObject(with: body) as? [String: Any]
+                state.set(parsed)
+            } else if let stream = request.httpBodyStream {
+                stream.open(); defer { stream.close() }
+                var data = Data()
+                let bufSize = 1024
+                var buf = [UInt8](repeating: 0, count: bufSize)
+                while stream.hasBytesAvailable {
+                    let n = stream.read(&buf, maxLength: bufSize)
+                    if n > 0 { data.append(buf, count: n) }
+                    else { break }
+                }
+                let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+                state.set(parsed)
             }
             let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
             return (response, Data(#"{"link":"https://example.com/dl"}"#.utf8))
@@ -348,6 +371,12 @@ struct OpenSubtitlesDownloadTests {
 
         let service = OpenSubtitlesService(apiKey: "key", session: session)
         _ = try await service.getDownloadURL(fileId: 42)
+
+        // URLProtocol callbacks can happen off the main task; give the stub a moment to capture.
+        for _ in 0..<150 {
+            if state.capturedBody?["file_id"] as? Int == 42 { break }
+            try await Task.sleep(nanoseconds: 20_000_000) // 20ms
+        }
 
         #expect(state.capturedBody?["file_id"] as? Int == 42)
     }

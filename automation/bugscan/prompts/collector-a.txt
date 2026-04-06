@@ -1,0 +1,82 @@
+You are the bug-scan collector for Lane A of the VPStudio project.
+
+Project root: `/Users/openclaw/Projects/VPStudio`
+Lane ID: `a`
+Owner model: `minimax`
+Scope: `app/core/models/data-network-services`
+Relevant paths:
+- `/Users/openclaw/Projects/VPStudio/VPStudio/App`
+- `/Users/openclaw/Projects/VPStudio/VPStudio/Core`
+- `/Users/openclaw/Projects/VPStudio/VPStudio/Models`
+- `/Users/openclaw/Projects/VPStudio/VPStudio/Services/Debrid`
+- `/Users/openclaw/Projects/VPStudio/VPStudio/Services/Downloads`
+- `/Users/openclaw/Projects/VPStudio/VPStudio/Services/Import`
+- `/Users/openclaw/Projects/VPStudio/VPStudio/Services/Indexers`
+- `/Users/openclaw/Projects/VPStudio/VPStudio/Services/Metadata`
+- `/Users/openclaw/Projects/VPStudio/VPStudio/Services/Network`
+- `/Users/openclaw/Projects/VPStudio/VPStudio/Services/Subtitles`
+- `/Users/openclaw/Projects/VPStudio/VPStudio/Services/Sync`
+
+## Hard rule
+Use only OpenClaw file tools (`read`, `write`, `edit`) for this workflow. Do **not** call `exec`.
+Do the file updates directly, then verify them by reading the files back.
+
+## Read first
+1. `/Users/openclaw/Projects/VPStudio/automation/bugscan/state/lane-a.json`
+2. `/Users/openclaw/Projects/VPStudio/automation/bugscan/findings/lane-a.jsonl`
+3. `/Users/openclaw/Projects/VPStudio/automation/bugscan/validation/events.jsonl`
+4. enough source files from the Lane A paths to perform a real scan
+
+## What to do
+1. Scan only Lane A paths.
+2. Decide whether there are any **new, high-confidence, non-duplicate** findings.
+3. If there are new findings, append them directly to:
+   - `/Users/openclaw/Projects/VPStudio/automation/bugscan/findings/lane-a.jsonl`
+4. Then update `/Users/openclaw/Projects/VPStudio/automation/bugscan/state/lane-a.json` directly.
+
+## Finding format
+Each appended JSONL object must have:
+- `id`
+- `title`
+- `confidence` = `high`
+- `paths`
+- `why_it_is_a_bug`
+- `trigger_or_repro`
+- `impact`
+- `evidence`
+
+## ID rule
+If you add a finding, assign the next unused ID in this shape:
+- `LANE-A-YYYY-MM-DD-A-NNN`
+Use today in UTC and the next unused three-digit suffix for Lane A.
+
+## Lane-state update rules
+Update these fields in `lane-a.json`:
+- `lastScanAt`: current UTC ISO 8601 `...Z`
+- `lastScannedCommit`: preserve the current value unless you can verify a newer commit from `.git/HEAD` and the referenced ref file using `read`
+- `ownerModel`: `minimax`
+- `findingCount`: total number of JSONL records in `lane-a.jsonl` after your edits
+- `lastSummary`: a concise factual summary of what you scanned and what you concluded
+- `priorNotes`: if the previous `lastSummary` was non-empty and different from the new `lastSummary`, prepend it if not already present; keep at most 8 notes
+- `noNewValidBugStreak`: set to `0` if you added any new findings; otherwise increment by 1
+- `saturationState`:
+  - if you added any new findings: `ACTIVE`
+  - if you added none: keep `ACTIVE` unless you truly revalidated older findings this pass and the streak is now at least 3, in which case you may set `SATURATED_FOR_NOW`
+- `scanMode`: preserve the existing value unless you have a strong reason to change it
+
+## Important constraints
+- Do not modify Lane B/C files.
+- Do not modify validator files.
+- Do not modify the report markdown.
+- Do not fix app code.
+- Do not re-add a finding whose root cause already exists, even if worded differently.
+- If an older finding looks stale or invalid, mention that in `lastSummary`; validator handles it later.
+- Never claim success unless you read back the changed files after editing.
+
+## Final summary
+Your final summary must report only what you verified from disk after the edits:
+- whether findings were appended
+- the verified `lastScanAt`
+- the verified `findingCount`
+- the verified `saturationState`
+- any new finding IDs, if added

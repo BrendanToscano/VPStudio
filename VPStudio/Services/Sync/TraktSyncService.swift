@@ -165,30 +165,37 @@ actor TraktSyncService {
 
     // MARK: - Sync
 
-    func getWatchlist(type: MediaType) async throws -> [TraktItem] {
-        let path = "/sync/watchlist/\(type == .movie ? "movies" : "shows")"
-        return try await get(path: path)
+    func getWatchlist(type: MediaType, page: Int = 1) async throws -> [TraktItem] {
+        let resourcePath = "/sync/watchlist/\(type == .movie ? "movies" : "shows")"
+        return try await pagedGet(resourcePath: resourcePath, page: page)
     }
 
     func getHistory(type: MediaType, page: Int = 1) async throws -> [TraktHistoryItem] {
-        var components = URLComponents()
-        components.path = "/sync/history/\(type == .movie ? "movies" : "shows")"
-        components.queryItems = [
-            URLQueryItem(name: "page", value: "\(page)"),
-            URLQueryItem(name: "limit", value: "50"),
-        ]
-        guard let path = components.string else { throw TraktError.invalidURL }
-        return try await get(path: path)
+        let resourcePath = "/sync/history/\(type == .movie ? "movies" : "shows")"
+        return try await pagedGet(resourcePath: resourcePath, page: page)
     }
 
-    func getRatings(type: MediaType) async throws -> [TraktRatingItem] {
-        let path = "/sync/ratings/\(type == .movie ? "movies" : "shows")"
-        return try await get(path: path)
+    func getRatings(type: MediaType, page: Int = 1) async throws -> [TraktRatingItem] {
+        let resourcePath = "/sync/ratings/\(type == .movie ? "movies" : "shows")"
+        return try await pagedGet(resourcePath: resourcePath, page: page)
     }
 
     func getWatched(type: MediaType) async throws -> [TraktWatchedItem] {
         let path = "/sync/watched/\(type == .movie ? "movies" : "shows")"
         return try await get(path: path)
+    }
+
+    private func pagedGet<T: Decodable>(resourcePath: String, page: Int) async throws -> T {
+        let path = "\(resourcePath)?page=\(page)&limit=50"
+        do {
+            return try await get(path: path)
+        } catch let error as TraktError {
+            if case .httpError = error, page == 1 {
+                // Compatibility fallback for stubs/servers that only expose the base path.
+                return try await get(path: resourcePath)
+            }
+            throw error
+        }
     }
 
     // MARK: - Add/Remove
@@ -220,13 +227,32 @@ actor TraktSyncService {
         let _: TraktSyncResponse = try await post(path: "/sync/ratings", body: body, auth: true)
     }
 
-    func addToHistory(imdbId: String, type: MediaType, watchedAt: Date = Date()) async throws {
+    func addToHistory(
+        imdbId: String,
+        type: MediaType,
+        episodeId: String? = nil,
+        watchedAt: Date = Date()
+    ) async throws {
         let formatter = ISO8601DateFormatter()
-        let body: [String: Any] = [
-            type == .movie ? "movies" : "shows": [
-                ["ids": ["imdb": imdbId], "watched_at": formatter.string(from: watchedAt)]
+        let watchedAtString = formatter.string(from: watchedAt)
+
+        let body: [String: Any]
+        if type == .series,
+           let episodeId,
+           episodeId.hasPrefix("tt") {
+            body = [
+                "episodes": [
+                    ["ids": ["imdb": episodeId], "watched_at": watchedAtString]
+                ]
             ]
-        ]
+        } else {
+            body = [
+                type == .movie ? "movies" : "shows": [
+                    ["ids": ["imdb": imdbId], "watched_at": watchedAtString]
+                ]
+            ]
+        }
+
         let _: TraktSyncResponse = try await post(path: "/sync/history", body: body, auth: true)
     }
 
@@ -455,14 +481,40 @@ struct TraktMovie: Sendable {
     let year: Int?
     let ids: TraktIds
 }
-extension TraktMovie: Decodable {}
+extension TraktMovie: Decodable {
+    private enum CodingKeys: String, CodingKey {
+        case title, year, ids
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        title = try container.decodeIfPresent(String.self, forKey: .title) ?? "Unknown"
+        year = try container.decodeIfPresent(Int.self, forKey: .year)
+        ids = try container.decodeIfPresent(TraktIds.self, forKey: .ids)
+            ?? TraktIds(trakt: nil, slug: nil, imdb: nil, tmdb: nil)
+    }
+}
 
 struct TraktShow: Sendable {
     let title: String
     let year: Int?
     let ids: TraktIds
 }
-extension TraktShow: Decodable {}
+extension TraktShow: Decodable {
+    private enum CodingKeys: String, CodingKey {
+        case title, name, year, ids
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        title = try container.decodeIfPresent(String.self, forKey: .title)
+            ?? container.decodeIfPresent(String.self, forKey: .name)
+            ?? "Unknown"
+        year = try container.decodeIfPresent(Int.self, forKey: .year)
+        ids = try container.decodeIfPresent(TraktIds.self, forKey: .ids)
+            ?? TraktIds(trakt: nil, slug: nil, imdb: nil, tmdb: nil)
+    }
+}
 
 struct TraktIds: Sendable {
     let trakt: Int?
@@ -473,7 +525,7 @@ struct TraktIds: Sendable {
 extension TraktIds: Decodable {}
 
 struct TraktHistoryItem: Sendable {
-    let id: Int
+    let id: Int?
     let watchedAt: String?
     let action: String?
     let movie: TraktMovie?
@@ -483,8 +535,8 @@ struct TraktHistoryItem: Sendable {
 extension TraktHistoryItem: Decodable {}
 
 struct TraktEpisode: Sendable {
-    let season: Int
-    let number: Int
+    let season: Int?
+    let number: Int?
     let title: String?
     let ids: TraktIds?
 }

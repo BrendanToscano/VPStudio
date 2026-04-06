@@ -152,12 +152,132 @@ enum AIModelCatalog {
         isDefault: false
     )
 
+    // MARK: Gemini Models
+
+    static let gemini25Flash = AIModelDefinition(
+        id: "gemini-2.5-flash",
+        displayName: "Gemini 2.5 Flash",
+        provider: .gemini,
+        inputCostPer1MTokens: 0.15,
+        outputCostPer1MTokens: 0.60,
+        maxContextTokens: 1_000_000,
+        isDefault: true
+    )
+
+    static let gemini25Pro = AIModelDefinition(
+        id: "gemini-2.5-pro",
+        displayName: "Gemini 2.5 Pro",
+        provider: .gemini,
+        inputCostPer1MTokens: 1.25,
+        outputCostPer1MTokens: 10.0,
+        maxContextTokens: 1_000_000,
+        isDefault: false
+    )
+
+    // MARK: OpenRouter Models
+
+    static let openRouterGeminiFlashLite = AIModelDefinition(
+        id: "openrouter/google/gemini-2.5-flash-lite-preview",
+        displayName: "Gemini 2.5 Flash Lite (OpenRouter)",
+        provider: .openRouter,
+        inputCostPer1MTokens: 0.10,
+        outputCostPer1MTokens: 0.40,
+        maxContextTokens: 100_000,
+        isDefault: true
+    )
+
+    static let openRouterClaudeHaiku = AIModelDefinition(
+        id: "openrouter/anthropic/claude-3.5-haiku",
+        displayName: "Claude 3.5 Haiku (OpenRouter)",
+        provider: .openRouter,
+        inputCostPer1MTokens: 0.80,
+        outputCostPer1MTokens: 4.0,
+        maxContextTokens: 200_000,
+        isDefault: false
+    )
+
+    static let openRouterGPT4oMini = AIModelDefinition(
+        id: "openrouter/openai/gpt-4o-mini",
+        displayName: "GPT-4o Mini (OpenRouter)",
+        provider: .openRouter,
+        inputCostPer1MTokens: 0.15,
+        outputCostPer1MTokens: 0.60,
+        maxContextTokens: 128_000,
+        isDefault: false
+    )
+
+    static let openRouterLlama3 = AIModelDefinition(
+        id: "openrouter/meta-llama/llama-3.1-8b-instruct",
+        displayName: "Llama 3.1 8B (OpenRouter)",
+        provider: .openRouter,
+        inputCostPer1MTokens: 0.04,
+        outputCostPer1MTokens: 0.04,
+        maxContextTokens: 128_000,
+        isDefault: false
+    )
+
+    static let openRouterMistralNemo = AIModelDefinition(
+        id: "openrouter/mistralai/mistral-nemo",
+        displayName: "Mistral Nemo (OpenRouter)",
+        provider: .openRouter,
+        inputCostPer1MTokens: 0.15,
+        outputCostPer1MTokens: 0.15,
+        maxContextTokens: 128_000,
+        isDefault: false
+    )
+
+    static let openRouterQwen = AIModelDefinition(
+        id: "openrouter/qwen/qwen-2.5-72b-instruct",
+        displayName: "Qwen 2.5 72B (OpenRouter)",
+        provider: .openRouter,
+        inputCostPer1MTokens: 0.90,
+        outputCostPer1MTokens: 0.90,
+        maxContextTokens: 32_000,
+        isDefault: false
+    )
+
+    // MARK: Local (On-Device CoreML) Models
+
+    static let localSmolLM2 = AIModelDefinition(
+        id: "apple/SmolLM2-360M-Instruct-CoreML",
+        displayName: "SmolLM2 360M (On-Device)",
+        provider: .local,
+        inputCostPer1MTokens: 0,
+        outputCostPer1MTokens: 0,
+        maxContextTokens: 2_048,
+        isDefault: true
+    )
+
+    static let localPhi3Mini = AIModelDefinition(
+        id: "apple/Phi-3-mini-128k-instruct-CoreML",
+        displayName: "Phi-3 Mini (On-Device)",
+        provider: .local,
+        inputCostPer1MTokens: 0,
+        outputCostPer1MTokens: 0,
+        maxContextTokens: 4_096,
+        isDefault: false
+    )
+
+    static let localOpenELM3B = AIModelDefinition(
+        id: "apple/OpenELM-3B-Instruct-CoreML",
+        displayName: "OpenELM 3B (On-Device)",
+        provider: .local,
+        inputCostPer1MTokens: 0,
+        outputCostPer1MTokens: 0,
+        maxContextTokens: 2_048,
+        isDefault: false
+    )
+
     // MARK: All Models
 
     static let allModels: [AIModelDefinition] = [
         claudeOpus46, claudeSonnet46, claudeOpus4, claudeSonnet4, claudeHaiku35,
         gpt52, gpt5, gpt4o, gpt4oMini, o1,
         llama31, llama32, mistral,
+        gemini25Flash, gemini25Pro,
+        openRouterGeminiFlashLite, openRouterClaudeHaiku, openRouterGPT4oMini,
+        openRouterLlama3, openRouterMistralNemo, openRouterQwen,
+        localSmolLM2, localPhi3Mini, localOpenELM3B,
     ]
 
     // MARK: Lookup
@@ -284,6 +404,36 @@ enum AIModelFetcher {
                 inputCostPer1MTokens: 0,
                 outputCostPer1MTokens: 0,
                 maxContextTokens: catalogMatch?.maxContextTokens ?? 128_000,
+                isDefault: catalogMatch?.isDefault ?? false
+            )
+        }
+        .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+    }
+
+    /// Fetches available models from the Google Gemini API.
+    static func fetchGeminiModels(apiKey: String) async -> [AIModelDefinition] {
+        guard !apiKey.isEmpty else { return [] }
+        var request = URLRequest(url: URL(string: "https://generativelanguage.googleapis.com/v1beta/models?key=\(apiKey)")!)
+        request.timeoutInterval = 15
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              let http = response as? HTTPURLResponse, http.statusCode == 200 else { return [] }
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let items = json["models"] as? [[String: Any]] else { return [] }
+
+        return items.compactMap { item -> AIModelDefinition? in
+            guard let name = item["name"] as? String else { return nil }
+            // name is "models/gemini-2.5-flash" — extract the model ID
+            let id = name.hasPrefix("models/") ? String(name.dropFirst(7)) : name
+            guard id.lowercased().contains("gemini") else { return nil }
+            let displayName = item["displayName"] as? String
+            let catalogMatch = AIModelCatalog.model(byID: id)
+            return AIModelDefinition(
+                id: id,
+                displayName: catalogMatch?.displayName ?? displayName ?? formatModelID(id),
+                provider: .gemini,
+                inputCostPer1MTokens: catalogMatch?.inputCostPer1MTokens ?? 0,
+                outputCostPer1MTokens: catalogMatch?.outputCostPer1MTokens ?? 0,
+                maxContextTokens: catalogMatch?.maxContextTokens ?? 1_000_000,
                 isDefault: catalogMatch?.isDefault ?? false
             )
         }

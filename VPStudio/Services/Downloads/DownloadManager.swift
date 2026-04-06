@@ -1,16 +1,68 @@
 import Foundation
 
+final class DownloadCancellationController: @unchecked Sendable {
+    private let lock = NSLock()
+    private var isCancelledFlag = false
+    private var callbacks: [@Sendable () -> Void] = []
+
+    var isCancelled: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return isCancelledFlag
+    }
+
+    func register(_ callback: @escaping @Sendable () -> Void) {
+        let shouldInvokeImmediately: Bool
+        lock.lock()
+        if isCancelledFlag {
+            shouldInvokeImmediately = true
+        } else {
+            callbacks.append(callback)
+            shouldInvokeImmediately = false
+        }
+        lock.unlock()
+
+        if shouldInvokeImmediately {
+            callback()
+        }
+    }
+
+    func cancel() {
+        let pendingCallbacks: [@Sendable () -> Void]
+        lock.lock()
+        guard !isCancelledFlag else {
+            lock.unlock()
+            return
+        }
+        isCancelledFlag = true
+        pendingCallbacks = callbacks
+        callbacks.removeAll()
+        lock.unlock()
+
+        for callback in pendingCallbacks {
+            callback()
+        }
+    }
+}
+
 actor DownloadManager {
-    typealias DownloadPerformer = @Sendable (URL, @escaping @Sendable (Int64, Int64, Int64) -> Void) async throws -> (URL, URLResponse)
+    typealias DownloadPerformer = @Sendable (URL, @escaping @Sendable (Int64, Int64, Int64) -> Void, DownloadCancellationController) async throws -> (URL, URLResponse)
+    typealias LinkRefresher = @Sendable (StreamRecoveryContext) async throws -> URL
     typealias SleepClosure = @Sendable (Duration) async throws -> Void
 
     private let database: DatabaseManager
     private let fileManager: FileManager
     private let downloadsDirectory: URL
     private let performer: DownloadPerformer
+    private let linkRefresher: LinkRefresher?
     private let sleep: SleepClosure
 
-    private var jobs: [String: Task<Void, Never>] = [:]
+    private struct DownloadJob {
+        let task: Task<Void, Never>
+        let cancellationController: DownloadCancellationController
+    }
+
+    private var jobs: [String: DownloadJob] = [:]
     private var reservedDestinationByTaskID: [String: URL] = [:]
     private var reservedDestinationPaths: Set<String> = []
 
@@ -19,12 +71,14 @@ actor DownloadManager {
         fileManager: FileManager = .default,
         downloadsDirectory: URL? = nil,
         performer: DownloadPerformer? = nil,
+        linkRefresher: LinkRefresher? = nil,
         sleep: @escaping SleepClosure = { duration in
             try await Task.sleep(for: duration)
         }
     ) {
         self.database = database
         self.fileManager = fileManager
+        self.linkRefresher = linkRefresher
         self.sleep = sleep
 
         if let downloadsDirectory {
@@ -41,6 +95,12 @@ actor DownloadManager {
     }
 
     func enqueueDownload(stream: StreamInfo, mediaId: String, episodeId: String?, mediaTitle: String = "", mediaType: String = "movie", posterPath: String? = nil, seasonNumber: Int? = nil, episodeNumber: Int? = nil, episodeTitle: String? = nil) async throws -> DownloadTask {
+        var recoveryJSON: String?
+        if let ctx = stream.recoveryContext,
+           let data = try? JSONEncoder().encode(ctx) {
+            recoveryJSON = String(data: data, encoding: .utf8)
+        }
+
         let task = DownloadTask(
             mediaId: mediaId,
             episodeId: episodeId,
@@ -51,7 +111,8 @@ actor DownloadManager {
             posterPath: posterPath,
             seasonNumber: seasonNumber,
             episodeNumber: episodeNumber,
-            episodeTitle: episodeTitle
+            episodeTitle: episodeTitle,
+            recoveryContextJSON: recoveryJSON
         )
 
         try await database.saveDownloadTask(task)
@@ -66,13 +127,21 @@ actor DownloadManager {
     }
 
     func cancelDownload(id: String) async {
-        jobs[id]?.cancel()
-        jobs[id] = nil
+        if let job = jobs[id] {
+            job.cancellationController.cancel()
+            job.task.cancel()
+        }
         try? await database.updateDownloadTaskStatus(id: id, status: .cancelled, errorMessage: nil)
         notifyDownloadsChanged()
     }
 
     func retryDownload(id: String) async throws {
+        if let job = jobs[id] {
+            job.cancellationController.cancel()
+            job.task.cancel()
+            await waitForJobTeardown(id: id)
+        }
+
         guard let existing = try await database.fetchDownloadTask(id: id) else { return }
 
         let resetTask = DownloadTask(
@@ -87,6 +156,12 @@ actor DownloadManager {
             totalBytes: nil,
             destinationPath: nil,
             errorMessage: nil,
+            mediaTitle: existing.mediaTitle,
+            mediaType: existing.mediaType,
+            posterPath: existing.posterPath,
+            seasonNumber: existing.seasonNumber,
+            episodeNumber: existing.episodeNumber,
+            episodeTitle: existing.episodeTitle,
             createdAt: existing.createdAt,
             updatedAt: Date()
         )
@@ -98,8 +173,11 @@ actor DownloadManager {
     }
 
     func removeDownload(id: String) async throws {
-        jobs[id]?.cancel()
-        jobs[id] = nil
+        if let job = jobs[id] {
+            job.cancellationController.cancel()
+            job.task.cancel()
+            await waitForJobTeardown(id: id)
+        }
 
         if let existing = try await database.fetchDownloadTask(id: id),
            let destination = existing.destinationURL,
@@ -108,6 +186,7 @@ actor DownloadManager {
         }
 
         try await database.deleteDownloadTask(id: id)
+        releaseReservedDestination(for: id)
         notifyDownloadsChanged()
     }
 
@@ -122,12 +201,20 @@ actor DownloadManager {
     private func startJob(for id: String) {
         guard jobs[id] == nil else { return }
 
-        jobs[id] = Task {
-            await self.processDownload(id: id)
+        let cancellationController = DownloadCancellationController()
+        let task = Task {
+            await self.processDownload(id: id, cancellationController: cancellationController)
+        }
+        jobs[id] = DownloadJob(task: task, cancellationController: cancellationController)
+    }
+
+    private func waitForJobTeardown(id: String) async {
+        while jobs[id] != nil {
+            try? await sleep(.milliseconds(25))
         }
     }
 
-    private func processDownload(id: String) async {
+    private func processDownload(id: String, cancellationController: DownloadCancellationController) async {
         defer {
             jobs[id] = nil
             releaseReservedDestination(for: id)
@@ -148,38 +235,11 @@ actor DownloadManager {
         try? await database.updateDownloadTaskStatus(id: id, status: .downloading, errorMessage: nil)
         notifyDownloadsChanged()
 
-        // Throttle DB writes to at most once per second
-        let lastUpdateTime = ManagedAtomic<UInt64>(0)
+        var currentURL = streamURL
+        var linkRefreshAttempted = false
 
         do {
-            let (tempURL, _) = try await withTaskCancellationHandler(
-                operation: {
-                    try await performer(streamURL) { bytesWritten, totalBytesWritten, totalBytesExpected in
-                        let now = DispatchTime.now().uptimeNanoseconds
-                        let last = lastUpdateTime.load()
-                        let elapsed = now - last
-                        // Update at most once per second (1_000_000_000 ns)
-                        guard elapsed > 1_000_000_000 || totalBytesWritten == totalBytesExpected else { return }
-                        lastUpdateTime.store(now)
-
-                        let progress = totalBytesExpected > 0
-                            ? Double(totalBytesWritten) / Double(totalBytesExpected)
-                            : 0.0
-                        let db = self.database
-                        Task {
-                            try? await db.updateDownloadTaskProgress(
-                                id: id,
-                                progress: min(progress, 0.99),
-                                bytesWritten: totalBytesWritten,
-                                totalBytes: totalBytesExpected > 0 ? totalBytesExpected : nil,
-                                destinationPath: nil
-                            )
-                            self.notifyDownloadsChanged()
-                        }
-                    }
-                },
-                onCancel: {}
-            )
+            let tempURL = try await attemptDownload(url: currentURL, id: id, cancellationController: cancellationController)
 
             try Task.checkCancellation()
             try ensureDownloadsDirectory()
@@ -202,6 +262,53 @@ actor DownloadManager {
             try? await database.updateDownloadTaskStatus(id: id, status: .cancelled, errorMessage: nil)
             notifyDownloadsChanged()
         } catch {
+            // Attempt link refresh on network/SSL errors if we have recovery context
+            if !linkRefreshAttempted,
+               Self.isLinkExpiredError(error),
+               let refresher = linkRefresher,
+               let context = task.recoveryContext {
+                linkRefreshAttempted = true
+
+                do {
+                    try? await database.updateDownloadTaskStatus(id: id, status: .resolving, errorMessage: nil)
+                    notifyDownloadsChanged()
+
+                    let freshURL = try await refresher(context)
+                    currentURL = freshURL
+
+                    // Update the stored stream URL for future retries
+                    try? await database.updateDownloadTaskStreamURL(id: id, streamURL: freshURL.absoluteString)
+
+                    // Retry with fresh URL
+                    try? await database.updateDownloadTaskStatus(id: id, status: .downloading, errorMessage: nil)
+                    notifyDownloadsChanged()
+
+                    let tempURL = try await attemptDownload(url: freshURL, id: id, cancellationController: cancellationController)
+
+                    try Task.checkCancellation()
+                    try ensureDownloadsDirectory()
+
+                    let destination = reservedDestinationURL(for: id, fileName: task.fileName)
+                    try fileManager.moveItem(at: tempURL, to: destination)
+
+                    let finalBytes = (try? fileSize(at: destination)) ?? 0
+                    try await database.updateDownloadTaskProgress(
+                        id: id, progress: 1.0, bytesWritten: finalBytes,
+                        totalBytes: finalBytes > 0 ? finalBytes : nil,
+                        destinationPath: destination.path
+                    )
+                    try await database.updateDownloadTaskStatus(id: id, status: .completed, errorMessage: nil)
+                    notifyDownloadsChanged()
+                    return
+                } catch is CancellationError {
+                    try? await database.updateDownloadTaskStatus(id: id, status: .cancelled, errorMessage: nil)
+                    notifyDownloadsChanged()
+                    return
+                } catch {
+                    // Link refresh also failed — fall through to failure
+                }
+            }
+
             try? await database.updateDownloadTaskStatus(
                 id: id,
                 status: .failed,
@@ -211,17 +318,102 @@ actor DownloadManager {
         }
     }
 
+    private func attemptDownload(url: URL, id: String, cancellationController: DownloadCancellationController) async throws -> URL {
+        let lastUpdateTime = ManagedAtomic<UInt64>(0)
+        let updateInFlight = ManagedAtomic<Bool>(false)
+
+        let (tempURL, _) = try await withTaskCancellationHandler(
+            operation: {
+                try await performer(url, { bytesWritten, totalBytesWritten, totalBytesExpected in
+                    guard !cancellationController.isCancelled else { return }
+
+                    let now = DispatchTime.now().uptimeNanoseconds
+                    let last = lastUpdateTime.load()
+                    let elapsed = now - last
+                    guard elapsed > 1_000_000_000 || totalBytesWritten == totalBytesExpected else { return }
+                    lastUpdateTime.store(now)
+
+                    let progress = totalBytesExpected > 0
+                        ? Double(totalBytesWritten) / Double(totalBytesExpected)
+                        : 0.0
+                    guard !updateInFlight.load() else { return }
+                    updateInFlight.store(true)
+                    let db = self.database
+                    Task {
+                        defer { updateInFlight.store(false) }
+                        guard !cancellationController.isCancelled else { return }
+                        try? await db.updateDownloadTaskProgress(
+                            id: id,
+                            progress: min(progress, 0.99),
+                            bytesWritten: totalBytesWritten,
+                            totalBytes: totalBytesExpected > 0 ? totalBytesExpected : nil,
+                            destinationPath: nil
+                        )
+                        self.notifyDownloadsChanged()
+                    }
+                }, cancellationController)
+            },
+            onCancel: {
+                cancellationController.cancel()
+            }
+        )
+        return tempURL
+    }
+
+    /// Detect network errors that indicate an expired or dead download link.
+    /// Works for any debrid service — checks for SSL timeouts, connection refused, HTTP 403/410.
+    private static func isLinkExpiredError(_ error: Error) -> Bool {
+        let nsError = error as NSError
+
+        // SSL/TLS handshake timeout (the exact error from the logs: domain 4, code -2205)
+        if nsError.domain == "kCFErrorDomainCFNetwork" || nsError.domain == NSURLErrorDomain {
+            // CFNetwork code 303 = secure connection failed
+            if nsError.code == 303 { return true }
+            // NSURLError codes for connection issues
+            switch nsError.code {
+            case NSURLErrorSecureConnectionFailed,     // -1200
+                 NSURLErrorTimedOut,                    // -1001
+                 NSURLErrorCannotConnectToHost,         // -1004
+                 NSURLErrorNetworkConnectionLost,       // -1005
+                 NSURLErrorServerCertificateUntrusted,  // -1202
+                 NSURLErrorCannotFindHost:              // -1003
+                return true
+            default:
+                break
+            }
+        }
+
+        // Check underlying SSL error (kCFStreamErrorDomainSSL = 4, errSSLNetworkTimeout = -2205)
+        if let underlyingError = nsError.userInfo[NSUnderlyingErrorKey] as? NSError {
+            return Self.isLinkExpiredError(underlyingError)
+        }
+
+        // Check for HTTP 403 (forbidden — expired token) or 410 (gone — link removed)
+        if let response = nsError.userInfo["NSErrorFailingURLKey"] as? HTTPURLResponse {
+            return response.statusCode == 403 || response.statusCode == 410
+        }
+
+        return false
+    }
+
     // MARK: - Default Performer (delegate-based URLSession)
 
     private static func makeDefaultPerformer() -> DownloadPerformer {
-        { url, progressHandler in
+        { url, progressHandler, cancellationController in
             let delegate = DownloadProgressDelegate(onProgress: progressHandler)
-            let session = URLSession(configuration: .default, delegate: delegate, delegateQueue: nil)
-            defer { session.finishTasksAndInvalidate() }
+            let config = URLSessionConfiguration.default
+            config.urlCache = nil                       // downloads don't need URL caching
+            config.httpMaximumConnectionsPerHost = 4    // limit per-host concurrency
+            let session = URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
 
             return try await withCheckedThrowingContinuation { continuation in
                 let task = session.downloadTask(with: url)
-                delegate.continuation = continuation
+                delegate.setContinuation(continuation)
+                cancellationController.register {
+                    task.cancel()
+                    session.invalidateAndCancel()
+                    delegate.resumeIfNeeded(throwing: CancellationError())
+                }
                 task.resume()
             }
         }
@@ -309,13 +501,38 @@ actor DownloadManager {
 // MARK: - Download Progress Delegate
 
 /// Bridges `URLSessionDownloadDelegate` callbacks into the async performer closure.
-private final class DownloadProgressDelegate: NSObject, URLSessionDownloadDelegate, Sendable {
+private final class DownloadProgressDelegate: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
     let onProgress: @Sendable (Int64, Int64, Int64) -> Void
-    // Continuation is set once by the performer before task.resume().
-    nonisolated(unsafe) var continuation: CheckedContinuation<(URL, URLResponse), any Error>?
+
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<(URL, URLResponse), any Error>?
 
     init(onProgress: @escaping @Sendable (Int64, Int64, Int64) -> Void) {
         self.onProgress = onProgress
+    }
+
+    func setContinuation(_ continuation: CheckedContinuation<(URL, URLResponse), any Error>) {
+        lock.lock()
+        self.continuation = continuation
+        lock.unlock()
+    }
+
+    func resumeIfNeeded(returning value: (URL, URLResponse)) {
+        let continuation = takeContinuation()
+        continuation?.resume(returning: value)
+    }
+
+    func resumeIfNeeded(throwing error: any Error) {
+        let continuation = takeContinuation()
+        continuation?.resume(throwing: error)
+    }
+
+    private func takeContinuation() -> CheckedContinuation<(URL, URLResponse), any Error>? {
+        lock.lock()
+        defer { lock.unlock() }
+        let continuation = continuation
+        self.continuation = nil
+        return continuation
     }
 
     func urlSession(
@@ -333,29 +550,28 @@ private final class DownloadProgressDelegate: NSObject, URLSessionDownloadDelega
         downloadTask: URLSessionDownloadTask,
         didFinishDownloadingTo location: URL
     ) {
-        // Move the file to a temp location that persists beyond this callback
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString + "-" + location.lastPathComponent)
         do {
             try FileManager.default.moveItem(at: location, to: tmp)
-            continuation?.resume(returning: (tmp, downloadTask.response ?? URLResponse()))
+            resumeIfNeeded(returning: (tmp, downloadTask.response ?? URLResponse()))
         } catch {
-            continuation?.resume(throwing: error)
+            resumeIfNeeded(throwing: error)
         }
-        continuation = nil
+        session.finishTasksAndInvalidate()
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: (any Error)?) {
         if let error {
-            continuation?.resume(throwing: error)
-            continuation = nil
+            resumeIfNeeded(throwing: error)
         }
+        session.finishTasksAndInvalidate()
     }
 }
 
-// MARK: - Atomic helper (lock-free UInt64 for throttling)
+// MARK: - Atomic helper (lock-based access)
 
-private final class ManagedAtomic<Value: FixedWidthInteger>: @unchecked Sendable {
+private final class ManagedAtomic<Value>: @unchecked Sendable {
     private var _value: Value
     private let lock = NSLock()
 

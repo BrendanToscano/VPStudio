@@ -5,6 +5,7 @@ actor DebridLinkService: DebridServiceProtocol {
     private let apiToken: String
     private let baseURL = "https://debrid-link.com/api/v2"
     private let session: URLSession
+    private var selectedFileIDsByTorrent: [String: Set<Int>] = [:]
 
     init(apiToken: String, session: URLSession = .shared) {
         self.apiToken = apiToken
@@ -61,7 +62,13 @@ actor DebridLinkService: DebridServiceProtocol {
         return id
     }
 
-    func selectFiles(torrentId: String, fileIds: [Int]) async throws {}
+    func selectFiles(torrentId: String, fileIds: [Int]) async throws {
+        if fileIds.isEmpty {
+            selectedFileIDsByTorrent.removeValue(forKey: torrentId)
+            return
+        }
+        selectedFileIDsByTorrent[torrentId] = Set(fileIds)
+    }
 
     func getStreamURL(torrentId: String) async throws -> StreamInfo {
         var listComponents = URLComponents()
@@ -69,10 +76,21 @@ actor DebridLinkService: DebridServiceProtocol {
         let listQuery = listComponents.percentEncodedQuery ?? ""
         let response: DLResponse<[DLTorrentInfo]> = try await request(method: "GET", path: "/seedbox/list?\(listQuery)")
         guard let torrent = response.value?.first else { throw DebridError.torrentNotFound(torrentId) }
-        guard torrent.downloadPercent == 100, let link = torrent.files?.first?.downloadUrl else {
+
+        let selectedIDs = selectedFileIDsByTorrent[torrentId] ?? []
+        let selectedFile = torrent.files?.enumerated().first(where: { pair in
+            if let id = pair.element.id {
+                return selectedIDs.contains(id)
+            }
+            return selectedIDs.contains(pair.offset + 1)
+        })?.element
+
+        guard torrent.downloadPercent == 100,
+              let link = selectedFile?.downloadUrl ?? torrent.files?.first?.downloadUrl else {
             throw DebridError.fileNotReady("downloading")
         }
         guard let url = URL(string: link) else { throw DebridError.networkError("Invalid URL") }
+        selectedFileIDsByTorrent.removeValue(forKey: torrentId)
         let fileName = torrent.name ?? "Unknown"
         return StreamInfo(
             streamURL: url,
@@ -122,7 +140,9 @@ actor DebridLinkService: DebridServiceProtocol {
             throw DebridError.httpError(http.statusCode, message)
         }
 
-        return try JSONDecoder().decode(T.self, from: data)
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return try decoder.decode(T.self, from: data)
     }
 
     private func formBody(_ items: [URLQueryItem]) -> String {
@@ -146,7 +166,7 @@ extension DLAccountInfo: Decodable {}
 private struct DLCacheResult: Sendable { let files: [DLFile]? }
 extension DLCacheResult: Decodable {}
 
-private struct DLFile: Sendable { let name: String?; let size: Int64?; let downloadUrl: String? }
+private struct DLFile: Sendable { let id: Int?; let name: String?; let size: Int64?; let downloadUrl: String? }
 extension DLFile: Decodable {}
 
 private struct DLAddResponse: Sendable { let id: String? }

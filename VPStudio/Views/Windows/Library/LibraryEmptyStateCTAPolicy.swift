@@ -30,11 +30,11 @@ enum LibraryEmptyStateCTAPolicy {
     static func description(for type: ListType) -> String {
         switch type {
         case .favorites:
-            return "Mark movies and shows as favorites to keep them here for easy access."
+            return "Mark movies and shows as favorites to keep them here for quick replay. AI picks can help you find new keepers."
         case .watchlist:
-            return "Add titles you want to watch later to your watchlist."
+            return "Add titles you want to watch later. Use Explore + AI picks to fill this list faster."
         case .history:
-            return "Movies and shows you watch will automatically appear here."
+            return "Movies and shows you watch will automatically appear here as you play content."
         case .downloads:
             return "Downloaded content for offline viewing will appear here."
         }

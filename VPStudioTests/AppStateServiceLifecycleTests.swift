@@ -27,6 +27,14 @@ struct AppStateServiceLifecycleTests {
         full: Array(0..<24)
     )
 
+    private static func contents(of relativePath: String) throws -> String {
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let fileURL = repoRoot.appendingPathComponent(relativePath)
+        return try String(contentsOf: fileURL, encoding: .utf8)
+    }
+
     @Test(arguments: cases)
     @MainActor
     func serviceIdentityIsStable(_: Int) {
@@ -77,5 +85,85 @@ struct AppStateServiceLifecycleTests {
 
         await appState.reloadIndexers()
         #expect(flag.didPost())
+    }
+
+    @Test(arguments: ExhaustiveMode.choose(fast: Array(0..<8), full: Array(0..<16)))
+    @MainActor
+    func traktSyncRefreshHelperPostsLibraryAndTasteNotifications(index: Int) async {
+        let _ = index
+        let appState = AppState(testHooks: .init())
+
+        let libraryFlag = NotificationFlag()
+        let tasteFlag = NotificationFlag()
+        let libraryToken = NotificationCenter.default.addObserver(
+            forName: .libraryDidChange,
+            object: nil,
+            queue: nil
+        ) { _ in
+            libraryFlag.markPosted()
+        }
+        let tasteToken = NotificationCenter.default.addObserver(
+            forName: .tasteProfileDidChange,
+            object: nil,
+            queue: nil
+        ) { _ in
+            tasteFlag.markPosted()
+        }
+        defer {
+            NotificationCenter.default.removeObserver(libraryToken)
+            NotificationCenter.default.removeObserver(tasteToken)
+        }
+
+        appState.applyTraktSyncLocalRefresh(
+            for: .init(localRefreshTargets: [.library, .tasteProfile])
+        )
+
+        #expect(libraryFlag.didPost())
+        #expect(tasteFlag.didPost())
+    }
+
+    @Test(arguments: ExhaustiveMode.choose(fast: Array(0..<8), full: Array(0..<16)))
+    @MainActor
+    func traktSyncRefreshHelperTreatsRetentionSweepAsLibraryInvalidation(index: Int) async {
+        let _ = index
+        let appState = AppState(testHooks: .init())
+
+        let libraryFlag = NotificationFlag()
+        let tasteFlag = NotificationFlag()
+        let libraryToken = NotificationCenter.default.addObserver(
+            forName: .libraryDidChange,
+            object: nil,
+            queue: nil
+        ) { _ in
+            libraryFlag.markPosted()
+        }
+        let tasteToken = NotificationCenter.default.addObserver(
+            forName: .tasteProfileDidChange,
+            object: nil,
+            queue: nil
+        ) { _ in
+            tasteFlag.markPosted()
+        }
+        defer {
+            NotificationCenter.default.removeObserver(libraryToken)
+            NotificationCenter.default.removeObserver(tasteToken)
+        }
+
+        appState.applyTraktSyncLocalRefresh(
+            for: .init(),
+            removedHistoryEntryCount: 1
+        )
+
+        #expect(libraryFlag.didPost())
+        #expect(tasteFlag.didPost() == false)
+    }
+
+    @Test
+    func traktSyncEntryPointsShareTheSameRefreshHelper() throws {
+        let appStateSource = try Self.contents(of: "VPStudio/App/AppState.swift")
+        let settingsSource = try Self.contents(of: "VPStudio/Views/Windows/Settings/Destinations/TraktSettingsView.swift")
+
+        #expect(appStateSource.contains("_ = await self.performTraktSyncAndRefreshLocalState()"))
+        #expect(settingsSource.contains("await appState.performTraktSyncAndRefreshLocalState()"))
     }
 }

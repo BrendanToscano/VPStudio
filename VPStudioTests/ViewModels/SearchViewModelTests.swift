@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 import Testing
 @testable import VPStudio
 
@@ -20,6 +21,74 @@ struct SearchViewModelTests {
         func getCategory(_ category: MediaCategory, type: MediaType, page: Int) async throws -> MetadataSearchResult { fatalError("unused") }
         func discover(type: MediaType, filters: DiscoverFilters) async throws -> MetadataSearchResult { fatalError("unused") }
         func getGenres(type: MediaType) async throws -> [Genre] { [] }
+        func getSeasons(tmdbId: Int) async throws -> [Season] { [] }
+        func getEpisodes(tmdbId: Int, season: Int) async throws -> [Episode] { [] }
+        func getExternalIds(tmdbId: Int, type: MediaType) async throws -> ExternalIds { ExternalIds(imdbId: nil, tvdbId: nil) }
+    }
+
+    private actor GenreLoadCountingMetadataStub: MetadataProvider {
+        private(set) var getGenresCallCount = 0
+        private let genres: [Genre]
+
+        init(genres: [Genre] = [Genre(id: 28, name: "Action")]) {
+            self.genres = genres
+        }
+
+        func recordGenresRequest() -> Int {
+            getGenresCallCount
+        }
+
+        func search(query: String, type: MediaType?, page: Int) async throws -> MetadataSearchResult {
+            MetadataSearchResult(items: [], page: page, totalPages: 1, totalResults: 0)
+        }
+
+        func getDetail(id: String, type: MediaType) async throws -> MediaItem { fatalError("unused") }
+        func getTrending(type: MediaType, timeWindow: TrendingWindow, page: Int) async throws -> MetadataSearchResult { fatalError("unused") }
+        func getCategory(_ category: MediaCategory, type: MediaType, page: Int) async throws -> MetadataSearchResult { fatalError("unused") }
+        func discover(type: MediaType, filters: DiscoverFilters) async throws -> MetadataSearchResult { fatalError("unused") }
+        func getGenres(type: MediaType) async throws -> [Genre] {
+            getGenresCallCount += 1
+            return genres
+        }
+        func getSeasons(tmdbId: Int) async throws -> [Season] { [] }
+        func getEpisodes(tmdbId: Int, season: Int) async throws -> [Episode] { [] }
+        func getExternalIds(tmdbId: Int, type: MediaType) async throws -> ExternalIds { ExternalIds(imdbId: nil, tvdbId: nil) }
+    }
+
+    private actor SlowGenreMetadataStub: MetadataProvider {
+        private(set) var getGenresCallCount = 0
+        private let genresByType: [MediaType: [Genre]]
+        private let delay: Duration
+
+        init(
+            delay: Duration = .milliseconds(400),
+            genresByType: [MediaType: [Genre]] = [
+                .movie: [Genre(id: 28, name: "Action")],
+                .series: [Genre(id: 10765, name: "Sci-Fi & Fantasy")]
+            ]
+        ) {
+            self.delay = delay
+            self.genresByType = genresByType
+        }
+
+        func recordGenresRequest() -> Int {
+            getGenresCallCount
+        }
+
+        func search(query: String, type: MediaType?, page: Int) async throws -> MetadataSearchResult {
+            MetadataSearchResult(items: [], page: page, totalPages: 1, totalResults: 0)
+        }
+
+        func getDetail(id: String, type: MediaType) async throws -> MediaItem { fatalError("unused") }
+        func getTrending(type: MediaType, timeWindow: TrendingWindow, page: Int) async throws -> MetadataSearchResult { fatalError("unused") }
+        func getCategory(_ category: MediaCategory, type: MediaType, page: Int) async throws -> MetadataSearchResult { fatalError("unused") }
+        func discover(type: MediaType, filters: DiscoverFilters) async throws -> MetadataSearchResult { fatalError("unused") }
+        func getGenres(type: MediaType) async throws -> [Genre] {
+            getGenresCallCount += 1
+            // Deliberately ignore cancellation to emulate non-cooperative network code.
+            try? await Task.sleep(for: delay)
+            return genresByType[type] ?? []
+        }
         func getSeasons(tmdbId: Int) async throws -> [Season] { [] }
         func getEpisodes(tmdbId: Int, season: Int) async throws -> [Episode] { [] }
         func getExternalIds(tmdbId: Int, type: MediaType) async throws -> ExternalIds { ExternalIds(imdbId: nil, tvdbId: nil) }
@@ -86,6 +155,42 @@ struct SearchViewModelTests {
         func getCategory(_ category: MediaCategory, type: MediaType, page: Int) async throws -> MetadataSearchResult { fatalError("unused") }
         func discover(type: MediaType, filters: DiscoverFilters) async throws -> MetadataSearchResult { fatalError("unused") }
         func getGenres(type: MediaType) async throws -> [Genre] { [] }
+        func getSeasons(tmdbId: Int) async throws -> [Season] { [] }
+        func getEpisodes(tmdbId: Int, season: Int) async throws -> [Episode] { [] }
+        func getExternalIds(tmdbId: Int, type: MediaType) async throws -> ExternalIds { ExternalIds(imdbId: nil, tvdbId: nil) }
+    }
+
+    private actor DiscoverFilterCaptureMetadataStub: MetadataProvider {
+        private(set) var lastDiscoverFilters: DiscoverFilters?
+        private(set) var discoverCallCount = 0
+
+        func search(query: String, type: MediaType?, page: Int) async throws -> MetadataSearchResult {
+            MetadataSearchResult(items: [], page: 1, totalPages: 1, totalResults: 0)
+        }
+
+        func discover(type: MediaType, filters: DiscoverFilters) async throws -> MetadataSearchResult {
+            discoverCallCount += 1
+            lastDiscoverFilters = filters
+            return MetadataSearchResult(
+                items: [Fixtures.mediaPreview(id: "discover-\(type.rawValue)-\(filters.page)")],
+                page: filters.page,
+                totalPages: 1,
+                totalResults: 1
+            )
+        }
+
+        func currentOriginalLanguage() -> String? {
+            lastDiscoverFilters?.originalLanguage
+        }
+
+        func currentDiscoverCallCount() -> Int {
+            discoverCallCount
+        }
+
+        func getDetail(id: String, type: MediaType) async throws -> MediaItem { fatalError("unused") }
+        func getTrending(type: MediaType, timeWindow: TrendingWindow, page: Int) async throws -> MetadataSearchResult { fatalError("unused") }
+        func getCategory(_ category: MediaCategory, type: MediaType, page: Int) async throws -> MetadataSearchResult { fatalError("unused") }
+        func getGenres(type: MediaType) async throws -> [Genre] { [Genre(id: 18, name: "Drama")] }
         func getSeasons(tmdbId: Int) async throws -> [Season] { [] }
         func getEpisodes(tmdbId: Int, season: Int) async throws -> [Episode] { [] }
         func getExternalIds(tmdbId: Int, type: MediaType) async throws -> ExternalIds { ExternalIds(imdbId: nil, tvdbId: nil) }
@@ -161,6 +266,96 @@ struct SearchViewModelTests {
         #expect(viewModel.results.isEmpty)
         #expect(viewModel.query.isEmpty)
         #expect(viewModel.currentPage == 1)
+    }
+
+    @Test
+    @MainActor
+    func loadMoreDeduplicatesOverlappingPageResults() async throws {
+        let stub = SearchMetadataStub()
+        await stub.setResponses([
+            1: MetadataSearchResult(
+                items: [
+                    Fixtures.mediaPreview(id: "page-1-a"),
+                    Fixtures.mediaPreview(id: "page-1-b"),
+                ],
+                page: 1,
+                totalPages: 2,
+                totalResults: 3
+            ),
+            2: MetadataSearchResult(
+                items: [
+                    Fixtures.mediaPreview(id: "page-1-b"),
+                    Fixtures.mediaPreview(id: "page-2-c"),
+                ],
+                page: 2,
+                totalPages: 2,
+                totalResults: 3
+            ),
+        ])
+
+        let viewModel = SearchViewModel(metadataService: stub)
+        viewModel.query = "test"
+        viewModel.search()
+        try await Self.waitUntil { viewModel.results.count == 2 }
+
+        viewModel.loadMore()
+        try await Self.waitUntil { viewModel.currentPage == 2 && viewModel.isLoadingMore == false }
+
+        #expect(viewModel.results.map(\.id) == ["page-1-a", "page-1-b", "page-2-c"])
+    }
+
+    @Test
+    @MainActor
+    func genreLoadingIsLazyUntilExplicitRequest() async throws {
+        let stub = GenreLoadCountingMetadataStub(genres: [
+            Genre(id: 28, name: "Action"),
+            Genre(id: 35, name: "Comedy")
+        ])
+        let viewModel = SearchViewModel(metadataService: stub)
+
+        viewModel.query = "noop"
+        viewModel.search()
+
+        await Task.yield()
+        try await Task.sleep(for: .milliseconds(100))
+
+        #expect(await stub.recordGenresRequest() == 0)
+        #expect(viewModel.genres.isEmpty)
+
+        viewModel.loadGenres()
+
+        var attempts = 0
+        var genreLoads = await stub.recordGenresRequest()
+        while genreLoads == 0 && attempts < 80 {
+            attempts += 1
+            try await Task.sleep(for: .milliseconds(50))
+            genreLoads = await stub.recordGenresRequest()
+        }
+
+        #expect(genreLoads == 1)
+        #expect(viewModel.genres.count == 2)
+
+        viewModel.loadGenres()
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(await stub.recordGenresRequest() == 1)
+    }
+
+    @Test
+    @MainActor
+    func loadGenresCoalescesDuplicateInFlightRequests() async throws {
+        let stub = SlowGenreMetadataStub(delay: .milliseconds(500))
+        let viewModel = SearchViewModel(metadataService: stub)
+        viewModel.selectedType = .movie
+
+        viewModel.loadGenres()
+        viewModel.loadGenres()
+
+        try await Self.waitUntil { !viewModel.genres.isEmpty }
+
+        // Duplicate taps/reopens while the first request is in-flight should be coalesced
+        // into a single genre-network call.
+        #expect(await stub.recordGenresRequest() == 1)
+        #expect(viewModel.genres.first?.name == "Action")
     }
 
     // MARK: - Edge cases (P1-T09)
@@ -243,7 +438,7 @@ struct SearchViewModelTests {
 
     @Test
     @MainActor
-    func configureWithEmptyApiKeyDoesNotConfigureService() async throws {
+    func configureWithEmptyApiKeyClearsConfiguredService() async throws {
         let configuredViewModel = SearchViewModel(metadataServiceFactory: { key in
             KeyedSearchMetadataStub(marker: key.isEmpty ? "empty" : key)
         })
@@ -255,8 +450,15 @@ struct SearchViewModelTests {
         configuredViewModel.results = []
         configuredViewModel.configure(apiKey: "   ")
         configuredViewModel.search()
-        try await Self.waitUntil { !configuredViewModel.results.isEmpty }
-        #expect(configuredViewModel.results.first?.id == "result-valid-key-p1")
+
+        await Task.yield()
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(configuredViewModel.results.isEmpty)
+
+        configuredViewModel.configure(apiKey: "new-key")
+        configuredViewModel.search()
+        try await Self.waitUntil { configuredViewModel.results.first?.id == "result-new-key-p1" }
+        #expect(configuredViewModel.results.first?.id == "result-new-key-p1")
 
         let unconfiguredViewModel = SearchViewModel(metadataServiceFactory: { key in
             KeyedSearchMetadataStub(marker: key.isEmpty ? "empty" : key)
@@ -269,6 +471,70 @@ struct SearchViewModelTests {
         try await Task.sleep(for: .milliseconds(100))
 
         #expect(unconfiguredViewModel.results.isEmpty)
+    }
+
+    @Test
+    @MainActor
+    func searchWithoutMetadataServiceSurfacesTmdbSetupError() async {
+        let viewModel = SearchViewModel()
+        viewModel.query = "Dune"
+
+        viewModel.search()
+
+        #expect(viewModel.results.isEmpty)
+        #expect(viewModel.error == .tmdbSetupRequired(feature: "Search"))
+        #expect(viewModel.submittedQuery == "Dune")
+    }
+
+    @Test
+    @MainActor
+    func browseGenreWithoutMetadataServiceSurfacesTmdbSetupError() {
+        let viewModel = SearchViewModel()
+
+        viewModel.selectGenre(Genre(id: 28, name: "Action"))
+
+        #expect(viewModel.results.isEmpty)
+        #expect(viewModel.selectedGenre?.id == 28)
+        #expect(viewModel.error == .tmdbSetupRequired(feature: "Search"))
+    }
+
+    @Test
+    @MainActor
+    func specialMoodBrowseWithoutMetadataServiceSurfacesTmdbSetupError() {
+        let viewModel = SearchViewModel()
+        let newReleasesCard = ExploreGenreCatalog.cards.first(where: { $0.id == "new" })!
+
+        viewModel.selectMoodCard(newReleasesCard)
+
+        #expect(viewModel.results.isEmpty)
+        #expect(viewModel.activeMoodCard?.id == newReleasesCard.id)
+        #expect(viewModel.error == .tmdbSetupRequired(feature: "Search"))
+    }
+
+    @Test
+    @MainActor
+    func configureWithEmptyApiKeyClearsKeyOwnedSearchState() async throws {
+        let viewModel = SearchViewModel(metadataServiceFactory: { key in
+            KeyedSearchMetadataStub(marker: key.isEmpty ? "empty" : key)
+        })
+
+        viewModel.configure(apiKey: "valid-key")
+        viewModel.query = "query"
+        viewModel.search()
+        try await Self.waitUntil { viewModel.results.first?.id == "result-valid-key-p1" }
+
+        viewModel.selectedGenre = Genre(id: 28, name: "Action")
+        viewModel.currentPage = 2
+        viewModel.totalPages = 5
+
+        viewModel.configure(apiKey: "   ")
+
+        #expect(viewModel.results.isEmpty)
+        #expect(viewModel.selectedGenre == nil)
+        #expect(viewModel.currentPage == 1)
+        #expect(viewModel.totalPages == 1)
+        #expect(viewModel.isSearching == false)
+        #expect(viewModel.isLoadingMore == false)
     }
 
     @Test
@@ -292,5 +558,83 @@ struct SearchViewModelTests {
 
         #expect(weakViewModel == nil)
         await stub.unblock()
+    }
+
+    @Test
+    @MainActor
+    func originalLanguageCodeDoesNotSendForDefaultEnglishOnly() {
+        let viewModel = SearchViewModel()
+        viewModel.languageFilters = ["en-US"]
+
+        #expect(viewModel.originalLanguageCode == nil)
+    }
+
+    @Test
+    @MainActor
+    func originalLanguageCodeDoesNotSendForMultipleSelections() {
+        let viewModel = SearchViewModel()
+        viewModel.languageFilters = ["en-US", "fr-FR"]
+
+        #expect(viewModel.originalLanguageCode == nil)
+    }
+
+    @Test(arguments: ["hi-IN", "ta-IN", "te-IN", "bn-IN"])
+    @MainActor
+    func originalLanguageCodeDoesNotSendForHindiOrRelatedIndianLocales(localeCode: String) {
+        let viewModel = SearchViewModel()
+        viewModel.languageFilters = [localeCode]
+
+        #expect(viewModel.originalLanguageCode == nil)
+    }
+
+    @Test
+    @MainActor
+    func originalLanguageCodeUsesIso639ForOtherSingleNonEnglishLocale() {
+        let viewModel = SearchViewModel()
+        viewModel.languageFilters = ["fr-FR"]
+
+        #expect(viewModel.originalLanguageCode == "fr")
+    }
+
+    @Test
+    @MainActor
+    func browseGenreOmitsOriginalLanguageForHindiLocaleSelection() async throws {
+        let stub = DiscoverFilterCaptureMetadataStub()
+        let viewModel = SearchViewModel(metadataService: stub)
+        viewModel.languageFilters = ["hi-IN"]
+
+        viewModel.selectGenre(Genre(id: 18, name: "Drama"))
+
+        var calls = await stub.currentDiscoverCallCount()
+        var attempts = 0
+        while calls == 0 && attempts < 40 {
+            attempts += 1
+            try await Task.sleep(for: .milliseconds(40))
+            calls = await stub.currentDiscoverCallCount()
+        }
+
+        #expect(await stub.currentDiscoverCallCount() > 0)
+        #expect(await stub.currentOriginalLanguage() == nil)
+    }
+
+    @Test
+    @MainActor
+    func browseGenreSendsOriginalLanguageForSingleFrenchLocaleSelection() async throws {
+        let stub = DiscoverFilterCaptureMetadataStub()
+        let viewModel = SearchViewModel(metadataService: stub)
+        viewModel.languageFilters = ["fr-FR"]
+
+        viewModel.selectGenre(Genre(id: 18, name: "Drama"))
+
+        var captured = await stub.currentOriginalLanguage()
+        var attempts = 0
+        while captured != "fr" && attempts < 40 {
+            attempts += 1
+            try await Task.sleep(for: .milliseconds(40))
+            captured = await stub.currentOriginalLanguage()
+        }
+
+        #expect(await stub.currentDiscoverCallCount() > 0)
+        #expect(await stub.currentOriginalLanguage() == "fr")
     }
 }

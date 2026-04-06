@@ -236,19 +236,16 @@ struct RealDebridServiceTests {
         #expect(state.requestCount == 1)
     }
 
-    @Test func addMagnetReusesExistingTorrent() async throws {
+    @Test func addMagnetPostsMagnetDirectly() async throws {
         let session = makeStubSession { request in
             let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            if request.url!.path.hasSuffix("/torrents") {
-                let body = #"[{"id":"existing-torrent-id","hash":"abc123","filename":"test.mkv","status":"downloaded"}]"#
-                return (response, Data(body.utf8))
-            }
-            return (response, Data("{}".utf8))
+            let body = #"{"id":"new-torrent-id","uri":"magnet:?xt=urn:btih:abc123"}"#
+            return (response, Data(body.utf8))
         }
 
         let service = RealDebridService(apiToken: "token", session: session)
-        let id = try await service.addMagnet(hash: "ABC123")
-        #expect(id == "existing-torrent-id")
+        let id = try await service.addMagnet(hash: "abc123")
+        #expect(id == "new-torrent-id")
     }
 
     @Test func selectFilesPropagtesHTTPErrors() async throws {
@@ -278,26 +275,52 @@ struct RealDebridServiceTests {
         try await service.selectFiles(torrentId: "torrent-1", fileIds: [1, 2])
     }
 
-    @Test func addMagnetUsesHighLimitOnTorrentList() async throws {
-        final class State: @unchecked Sendable { var torrentListURL: URL? }
+    @Test func selectMatchingEpisodeFileChoosesRequestedEpisodeFromSeasonPack() async throws {
+        final class State: @unchecked Sendable { var capturedBody: String? }
         let state = State()
 
         let session = makeStubSession { request in
             let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            if request.url!.path.hasSuffix("/torrents") {
-                state.torrentListURL = request.url
-                return (response, Data("[]".utf8))
+            switch request.url?.path {
+            case let path where path?.contains("/torrents/info/torrent-1") == true:
+                let body = #"{"id":"torrent-1","filename":"The.Young.Pope.S01.Pack","status":"waiting_files_selection","links":[],"files":[{"id":1,"path":"/The.Young.Pope.S01E01.mkv","bytes":1000,"selected":0},{"id":2,"path":"/The.Young.Pope.S01E02.mkv","bytes":2000,"selected":0},{"id":3,"path":"/The.Young.Pope.S01E03.mkv","bytes":3000,"selected":0}]}"#
+                return (response, Data(body.utf8))
+            case let path where path?.contains("/torrents/selectFiles/torrent-1") == true:
+                state.capturedBody = request.httpBody.flatMap { String(data: $0, encoding: .utf8) }
+                return (HTTPURLResponse(url: request.url!, statusCode: 204, httpVersion: nil, headerFields: nil)!, Data())
+            default:
+                return (response, Data("{}".utf8))
             }
-            let body = #"{"id":"new-id","uri":"magnet:..."}"#
-            return (response, Data(body.utf8))
+        }
+
+        let service = RealDebridService(apiToken: "token", session: session)
+        let matched = try await service.selectMatchingEpisodeFile(torrentId: "torrent-1", seasonNumber: 1, episodeNumber: 2)
+
+        #expect(matched)
+        #expect(state.capturedBody == "files=2")
+    }
+
+    @Test func addMagnetIncludesHashInMagnetBody() async throws {
+        final class State: @unchecked Sendable { var capturedBody: String? }
+        let state = State()
+
+        let session = makeStubSession { request in
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            if request.httpMethod == "POST", request.url!.path.hasSuffix("/addMagnet") {
+                if let body = request.httpBody {
+                    state.capturedBody = String(data: body, encoding: .utf8)
+                }
+                let body = #"{"id":"new-id","uri":"magnet:..."}"#
+                return (response, Data(body.utf8))
+            }
+            return (response, Data("{}".utf8))
         }
 
         let service = RealDebridService(apiToken: "token", session: session)
         let _ = try await service.addMagnet(hash: "abc123")
 
-        let url = try #require(state.torrentListURL)
-        // Should request with high limit to avoid RD's default of 5
-        #expect(url.query?.contains("limit=2500") == true)
+        let captured = try #require(state.capturedBody)
+        #expect(captured.contains("abc123"))
     }
 
     @Test func unrestrictReturnsURL() async throws {
@@ -644,12 +667,12 @@ struct EasyNewsServiceTests {
         #expect(state.authHeader == "Basic dXNlcjpwYXNz")
     }
 
-    @Test func getAccountInfoReturnsPremiumUser() async throws {
+    @Test func getAccountInfoReturnsUnknownPremiumState() async throws {
         let session = makeNoNetworkSession()
         let service = EasyNewsService(apiToken: "token", session: session)
         let info = try await service.getAccountInfo()
-        #expect(info.isPremium == true)
-        #expect(info.username == "EasyNews User")
+        #expect(info.isPremium == nil)
+        #expect(info.username == "EasyNews")
     }
 
     @Test func checkCacheReturnsUnknownForAllHashes() async throws {

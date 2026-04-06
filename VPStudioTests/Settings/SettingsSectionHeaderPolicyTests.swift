@@ -12,14 +12,14 @@ struct SettingsSectionHeaderPolicyTests {
     }
 
     @Test
-    func servicesIconIsServerRack() {
-        #expect(SettingsSectionHeaderPolicy.icon(for: .services) == "server.rack")
+    func connectIconIsLink() {
+        #expect(SettingsSectionHeaderPolicy.icon(for: .connect) == "link")
     }
 
     @Test
     func summaryTextFormatting() {
         let text = SettingsSectionHeaderPolicy.summaryText(
-            category: .services,
+            category: .connect,
             configuredCount: 2,
             totalCount: 3
         )
@@ -29,7 +29,7 @@ struct SettingsSectionHeaderPolicyTests {
     @Test
     func summaryTextZeroConfigured() {
         let text = SettingsSectionHeaderPolicy.summaryText(
-            category: .playback,
+            category: .watch,
             configuredCount: 0,
             totalCount: 4
         )
@@ -39,7 +39,7 @@ struct SettingsSectionHeaderPolicyTests {
     @Test
     func summaryTextZeroTotalReturnsNoItems() {
         let text = SettingsSectionHeaderPolicy.summaryText(
-            category: .sync,
+            category: .about,
             configuredCount: 0,
             totalCount: 0
         )

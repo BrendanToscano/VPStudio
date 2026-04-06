@@ -79,6 +79,8 @@ struct AppStateBootstrapMatrixTests {
         let appState = AppState(testHooks: hooks)
         await appState.bootstrap()
 
+        #expect(appState.isBootstrapping == false)
+
         // Migration or debrid init failure is fatal — triggers setup mode
         let fatalFailure = data.failMigrate || data.failDebridInit
         if fatalFailure {

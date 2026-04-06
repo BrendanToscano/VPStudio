@@ -39,7 +39,7 @@ actor SimklSyncService {
         guard accessToken?.isEmpty == false else { throw SimklError.notConnected }
 
         let key = type == .movie ? "movies" : "shows"
-        let item = SimklAddItem(ids: SimklAddIds(imdb: imdbId), to: list)
+        let item = SimklAddItem(ids: SimklAddIds(imdb: imdbId), to: list, watchedAt: nil)
 
         var dict: [String: [SimklAddItem]] = [:]
         dict[key] = [item]
@@ -47,11 +47,20 @@ actor SimklSyncService {
         let _: SimklActionResponse = try await postData(path: "/sync/add-to-list", data: wrappedData)
     }
 
-    func markWatched(imdbId: String, type: MediaType) async throws {
+    func markWatched(
+        imdbId: String,
+        type: MediaType,
+        watchedAt: Date = Date()
+    ) async throws {
         guard accessToken?.isEmpty == false else { throw SimklError.notConnected }
 
         let key = type == .movie ? "movies" : "shows"
-        let item = SimklAddItem(ids: SimklAddIds(imdb: imdbId), to: nil)
+        let formatter = ISO8601DateFormatter()
+        let item = SimklAddItem(
+            ids: SimklAddIds(imdb: imdbId),
+            to: nil,
+            watchedAt: formatter.string(from: watchedAt)
+        )
         var dict: [String: [SimklAddItem]] = [:]
         dict[key] = [item]
         let wrappedData = try JSONEncoder().encode(dict)
@@ -122,6 +131,13 @@ private struct SimklAddIds: Codable, Sendable {
 private struct SimklAddItem: Codable, Sendable {
     let ids: SimklAddIds
     let to: String?
+    let watchedAt: String?
+
+    enum CodingKeys: String, CodingKey {
+        case ids
+        case to
+        case watchedAt = "watched_at"
+    }
 }
 
 struct SimklActionResponse: Sendable {

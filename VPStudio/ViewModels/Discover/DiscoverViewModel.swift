@@ -17,6 +17,7 @@ final class DiscoverViewModel {
     // MARK: - AI Curated Recommendations
 
     var aiRecommendations: [AIMovieRecommendation] = []
+    var aiHeroPreview: MediaPreview?
     var isLoadingAIRecommendations = false
     var aiRecommendationsEnabled = false
     var aiAutoGenerate = true
@@ -47,23 +48,54 @@ final class DiscoverViewModel {
     func load(apiKey: String) async {
         let normalizedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        if let configuredApiKey {
-            if !normalizedKey.isEmpty, configuredApiKey != normalizedKey {
-                metadataService = metadataServiceFactory(normalizedKey)
-                self.configuredApiKey = normalizedKey
-            }
-        } else if metadataService == nil {
-            guard !normalizedKey.isEmpty else {
+        if normalizedKey.isEmpty {
+            if Self.shouldResetRemoteServiceForMissingKey(configuredApiKey: configuredApiKey) {
+                metadataService = nil
+                configuredApiKey = nil
+                clearRemoteDiscoverRows()
+                await refreshAIHeroPreview()
+
+                if QARuntimeOptions.traktRefreshFixturePath != nil {
+                    await loadContinueWatching()
+                    isLoading = false
+                    error = nil
+                    return
+                }
+
                 isLoading = false
-                error = .unknown("API key required to load discover content.")
+                error = .tmdbSetupRequired(feature: "Discover")
                 return
             }
+
+            if metadataService == nil {
+                await refreshAIHeroPreview()
+
+                if QARuntimeOptions.traktRefreshFixturePath != nil {
+                    await loadContinueWatching()
+                    isLoading = false
+                    error = nil
+                    return
+                }
+
+                isLoading = false
+                error = .tmdbSetupRequired(feature: "Discover")
+                return
+            }
+        } else if metadataService == nil {
             metadataService = metadataServiceFactory(normalizedKey)
             configuredApiKey = normalizedKey
+        } else if let configuredApiKey, configuredApiKey != normalizedKey {
+            metadataService = metadataServiceFactory(normalizedKey)
+            self.configuredApiKey = normalizedKey
+        } else if configuredApiKey == nil {
+            // Preserve explicitly injected metadata services (tests/previews),
+            // but still remember the current key for later refreshes.
+            configuredApiKey = normalizedKey
         }
+
         guard let service = metadataService else {
             isLoading = false
-            error = .unknown("Metadata service unavailable.")
+            error = .tmdbSetupRequired(feature: "Discover")
             return
         }
         isLoading = true
@@ -108,37 +140,55 @@ final class DiscoverViewModel {
         }
 
         isLoading = false
+
+        if !aiRecommendations.isEmpty {
+            await refreshAIHeroPreview()
+        }
     }
 
     func refresh() async {
-        guard metadataService != nil else { return }
-        await load(apiKey: "")
+        await load(apiKey: configuredApiKey ?? "")
     }
 
     func loadContinueWatching() async {
         guard let database else { return }
         do {
             let recentHistory = try await database.fetchWatchHistory(limit: 20)
-            let inProgress = recentHistory.filter { !$0.isCompleted && $0.progressPercent > 0.02 && $0.progressPercent < 0.95 }
-            var items: [(history: WatchHistory, preview: MediaPreview)] = []
-            for entry in inProgress.prefix(10) {
-                if let cached = try? await database.fetchMediaItem(id: entry.mediaId) {
-                    items.append((entry, MediaPreview(
-                        id: cached.id,
-                        type: cached.type,
-                        title: cached.title,
-                        year: cached.year,
-                        posterPath: cached.posterPath,
-                        backdropPath: cached.backdropPath,
-                        imdbRating: cached.imdbRating,
-                        tmdbId: cached.tmdbId
-                    )))
-                }
+            let inProgress = Array(recentHistory.filter {
+                !$0.isCompleted && $0.progressPercent > 0.02 && $0.progressPercent < 0.95
+            }.prefix(10))
+
+            let cachedItems = try await database.fetchMediaItems(ids: inProgress.map(\.mediaId))
+            let cachedByID = Dictionary(uniqueKeysWithValues: cachedItems.map { ($0.id, $0) })
+
+            continueWatching = inProgress.compactMap { entry in
+                guard let cached = cachedByID[entry.mediaId] else { return nil }
+                return (entry, MediaPreview(
+                    id: cached.id,
+                    type: cached.type,
+                    title: cached.title,
+                    year: cached.year,
+                    posterPath: cached.posterPath,
+                    backdropPath: cached.backdropPath,
+                    imdbRating: cached.imdbRating,
+                    tmdbId: cached.tmdbId,
+                    episodeId: entry.episodeId
+                ))
             }
-            continueWatching = items
         } catch {
             // Continue watching is non-critical — don't surface errors.
         }
+    }
+
+    func refreshLocalPersonalizationState() async {
+        await loadContinueWatching()
+        guard !aiRecommendations.isEmpty else {
+            aiHeroPreview = nil
+            return
+        }
+
+        let filtered = await filterOutWatchedAndRated(recommendations: aiRecommendations)
+        await updateAIRecommendations(filtered)
     }
 
     private func fetchResult<T>(_ operation: @escaping () async throws -> T) async -> Result<T, Error> {
@@ -147,6 +197,49 @@ final class DiscoverViewModel {
         } catch {
             return .failure(error)
         }
+    }
+
+    private func clearRemoteDiscoverRows() {
+        trendingMovies = []
+        trendingShows = []
+        popularMovies = []
+        topRatedMovies = []
+        nowPlayingMovies = []
+        featuredBackdrops = []
+    }
+
+    nonisolated static func shouldResetRemoteServiceForMissingKey(configuredApiKey: String?) -> Bool {
+        guard let configuredApiKey else { return false }
+        return !configuredApiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    nonisolated static func shouldKeepRecommendation(
+        title: String,
+        recommendationMediaID: String,
+        recommendationType: MediaType,
+        tmdbId: Int?,
+        ratedMediaIds: Set<String>,
+        libraryMediaIds: Set<String>,
+        ratedTitles: Set<String>,
+        watchedTitles: Set<String>,
+        libraryTitles: Set<String>
+    ) -> Bool {
+        let titleLower = title.lowercased()
+
+        if ratedMediaIds.contains(recommendationMediaID) { return false }
+        if libraryMediaIds.contains(recommendationMediaID) { return false }
+
+        if let tmdbId {
+            let compositeTMDBID = "\(recommendationType.rawValue)-tmdb-\(tmdbId)"
+            if ratedMediaIds.contains(compositeTMDBID) { return false }
+            if libraryMediaIds.contains(compositeTMDBID) { return false }
+        }
+
+        if ratedTitles.contains(titleLower) { return false }
+        if watchedTitles.contains(titleLower) { return false }
+        if libraryTitles.contains(titleLower) { return false }
+
+        return true
     }
 
     // MARK: - AI Curated Recommendations
@@ -185,7 +278,7 @@ final class DiscoverViewModel {
             let context = AssistantContext()
             let recommendations = try await aiManager.getRecommendations(context: context)
             let filtered = await filterOutWatchedAndRated(recommendations: recommendations)
-            aiRecommendations = filtered
+            await updateAIRecommendations(filtered)
             aiRecommendationsLoaded = true
 
             // Cache the recommendations for offline / auto-generate-off use
@@ -209,8 +302,12 @@ final class DiscoverViewModel {
     private func loadCachedRecommendations(settingsManager: SettingsManager) async {
         guard let json = try? await settingsManager.getString(key: SettingsKeys.aiCachedRecommendations),
               let data = json.data(using: .utf8),
-              let cached = try? JSONDecoder().decode([AIMovieRecommendation].self, from: data) else { return }
-        aiRecommendations = cached
+              let cached = try? JSONDecoder().decode([AIMovieRecommendation].self, from: data) else {
+            await updateAIRecommendations([])
+            return
+        }
+
+        await updateAIRecommendations(cached)
     }
 
     private func filterOutWatchedAndRated(recommendations: [AIMovieRecommendation]) async -> [AIMovieRecommendation] {
@@ -220,7 +317,8 @@ final class DiscoverViewModel {
             let history = try await database.fetchWatchHistory(limit: 500)
             let watchlistEntries = try await database.fetchLibraryEntries(listType: .watchlist)
             let favoritesEntries = try await database.fetchLibraryEntries(listType: .favorites)
-            let libraryEntries = watchlistEntries + favoritesEntries
+            let historyEntries = try await database.fetchLibraryEntries(listType: .history)
+            let libraryEntries = watchlistEntries + favoritesEntries + historyEntries
 
             let ratedMediaIds = Set(ratedEvents.compactMap(\.mediaId))
             let ratedTitles = Set(ratedEvents.compactMap { $0.metadata["title"]?.lowercased() })
@@ -228,24 +326,21 @@ final class DiscoverViewModel {
             let libraryMediaIds = Set(libraryEntries.map(\.mediaId))
 
             // Resolve library titles from cached media items for title-based matching
-            var libraryTitles = Set<String>()
-            for entry in libraryEntries {
-                if let cached = try? await database.fetchMediaItem(id: entry.mediaId) {
-                    libraryTitles.insert(cached.title.lowercased())
-                }
-            }
+            let cachedLibraryItems = try await database.fetchMediaItems(ids: libraryEntries.map(\.mediaId))
+            let libraryTitles = Set(cachedLibraryItems.map { $0.title.lowercased() })
 
             return recommendations.filter { rec in
-                let titleLower = rec.title.lowercased()
-                if let tmdbId = rec.tmdbId {
-                    let mediaId = "\(rec.type.rawValue)-tmdb-\(tmdbId)"
-                    if ratedMediaIds.contains(mediaId) { return false }
-                    if libraryMediaIds.contains(mediaId) { return false }
-                }
-                if ratedTitles.contains(titleLower) { return false }
-                if watchedTitles.contains(titleLower) { return false }
-                if libraryTitles.contains(titleLower) { return false }
-                return true
+                Self.shouldKeepRecommendation(
+                    title: rec.title,
+                    recommendationMediaID: rec.toMediaPreview().id,
+                    recommendationType: rec.type,
+                    tmdbId: rec.tmdbId,
+                    ratedMediaIds: ratedMediaIds,
+                    libraryMediaIds: libraryMediaIds,
+                    ratedTitles: ratedTitles,
+                    watchedTitles: watchedTitles,
+                    libraryTitles: libraryTitles
+                )
             }
         } catch {
             return recommendations
@@ -254,10 +349,59 @@ final class DiscoverViewModel {
 
     func removeAIRecommendation(matchingMediaId mediaId: String) {
         aiRecommendations.removeAll { $0.toMediaPreview().id == mediaId }
+        aiHeroPreview = aiRecommendations.first?.toMediaPreview()
+
+        Task {
+            await refreshAIHeroPreview()
+        }
     }
 
     func removeAIRecommendation(matchingTitle title: String) {
         let lower = title.lowercased()
         aiRecommendations.removeAll { $0.title.lowercased() == lower }
+        aiHeroPreview = aiRecommendations.first?.toMediaPreview()
+
+        Task {
+            await refreshAIHeroPreview()
+        }
+    }
+
+    func updateAIRecommendations(_ recommendations: [AIMovieRecommendation]) async {
+        aiRecommendations = recommendations
+        await refreshAIHeroPreview()
+    }
+
+    func refreshAIHeroPreview() async {
+        guard let firstRecommendation = aiRecommendations.first else {
+            aiHeroPreview = nil
+            return
+        }
+
+        let fallbackPreview = firstRecommendation.toMediaPreview()
+        aiHeroPreview = fallbackPreview
+
+        guard let tmdbId = firstRecommendation.tmdbId,
+              let metadataService else {
+            return
+        }
+
+        guard let detail = try? await metadataService.getDetail(id: String(tmdbId), type: firstRecommendation.type) else {
+            return
+        }
+
+        guard aiRecommendations.first?.id == firstRecommendation.id else {
+            return
+        }
+
+        aiHeroPreview = MediaPreview(
+            id: fallbackPreview.id,
+            type: firstRecommendation.type,
+            title: detail.title,
+            year: detail.year ?? firstRecommendation.year,
+            posterPath: detail.posterPath,
+            backdropPath: detail.backdropPath,
+            imdbRating: detail.imdbRating,
+            tmdbId: firstRecommendation.tmdbId
+        )
     }
 }

@@ -39,6 +39,7 @@ struct DownloadTask: Codable, Sendable, Identifiable, Equatable, FetchableRecord
     var seasonNumber: Int?
     var episodeNumber: Int?
     var episodeTitle: String?
+    var recoveryContextJSON: String?
     var createdAt: Date
     var updatedAt: Date
 
@@ -67,12 +68,29 @@ struct DownloadTask: Codable, Sendable, Identifiable, Equatable, FetchableRecord
         (seasonNumber ?? 0) * 10000 + (episodeNumber ?? 0)
     }
 
+    var recoveryContext: StreamRecoveryContext? {
+        get {
+            guard let json = recoveryContextJSON,
+                  let data = json.data(using: .utf8) else { return nil }
+            return try? JSONDecoder().decode(StreamRecoveryContext.self, from: data)
+        }
+        set {
+            guard let value = newValue,
+                  let data = try? JSONEncoder().encode(value) else {
+                recoveryContextJSON = nil
+                return
+            }
+            recoveryContextJSON = String(data: data, encoding: .utf8)
+        }
+    }
+
     enum Columns: String, ColumnExpression {
         case id, mediaId, episodeId, streamURL, fileName
         case status, progress, bytesWritten, totalBytes
         case destinationPath, errorMessage
         case mediaTitle, mediaType, posterPath
         case seasonNumber, episodeNumber, episodeTitle
+        case recoveryContextJSON
         case createdAt, updatedAt
     }
 
@@ -94,6 +112,7 @@ struct DownloadTask: Codable, Sendable, Identifiable, Equatable, FetchableRecord
         container[Columns.seasonNumber] = seasonNumber
         container[Columns.episodeNumber] = episodeNumber
         container[Columns.episodeTitle] = episodeTitle
+        container[Columns.recoveryContextJSON] = recoveryContextJSON
         container[Columns.createdAt] = createdAt
         container[Columns.updatedAt] = updatedAt
     }
@@ -116,6 +135,7 @@ struct DownloadTask: Codable, Sendable, Identifiable, Equatable, FetchableRecord
         seasonNumber = row[Columns.seasonNumber]
         episodeNumber = row[Columns.episodeNumber]
         episodeTitle = row[Columns.episodeTitle]
+        recoveryContextJSON = row[Columns.recoveryContextJSON]
         createdAt = row[Columns.createdAt]
         updatedAt = row[Columns.updatedAt]
     }
@@ -138,8 +158,9 @@ struct DownloadTask: Codable, Sendable, Identifiable, Equatable, FetchableRecord
         seasonNumber: Int? = nil,
         episodeNumber: Int? = nil,
         episodeTitle: String? = nil,
+        recoveryContextJSON: String? = nil,
         createdAt: Date = Date(),
-        updatedAt: Date = Date()
+        updatedAt: Date? = nil
     ) {
         self.id = id
         self.mediaId = mediaId
@@ -158,7 +179,8 @@ struct DownloadTask: Codable, Sendable, Identifiable, Equatable, FetchableRecord
         self.seasonNumber = seasonNumber
         self.episodeNumber = episodeNumber
         self.episodeTitle = episodeTitle
+        self.recoveryContextJSON = recoveryContextJSON
         self.createdAt = createdAt
-        self.updatedAt = updatedAt
+        self.updatedAt = updatedAt ?? createdAt
     }
 }

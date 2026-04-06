@@ -2,6 +2,79 @@ import Foundation
 
 typealias DebridServiceFactory = @Sendable (DebridServiceType, String) -> any DebridServiceProtocol
 
+actor QADebridService: DebridServiceProtocol {
+    let serviceType: DebridServiceType
+
+    private let fixture: QADebridFixture
+    private var torrentHashesByID: [String: String] = [:]
+    private var streamRequestCountsByHash: [String: Int] = [:]
+
+    init(fixture: QADebridFixture) {
+        self.serviceType = fixture.serviceType
+        self.fixture = fixture
+    }
+
+    func validateToken() async throws -> Bool { true }
+
+    func getAccountInfo() async throws -> DebridAccountInfo {
+        DebridAccountInfo(username: "qa-fixture", email: nil, premiumExpiry: nil, isPremium: true)
+    }
+
+    func checkCache(hashes: [String]) async throws -> [String: CacheStatus] {
+        hashes.reduce(into: [String: CacheStatus]()) { result, hash in
+            let normalizedHash = hash.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if normalizedHash == fixture.hash {
+                result[normalizedHash] = .cached(fileId: nil, fileName: fixture.fileName, fileSize: nil)
+            } else {
+                result[normalizedHash] = .notCached
+            }
+        }
+    }
+
+    func addMagnet(hash: String) async throws -> String {
+        let normalizedHash = hash.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard normalizedHash == fixture.hash else {
+            throw DebridError.invalidHash(hash)
+        }
+
+        let torrentId = "qa-\(normalizedHash)"
+        torrentHashesByID[torrentId] = normalizedHash
+        return torrentId
+    }
+
+    func selectFiles(torrentId: String, fileIds: [Int]) async throws {}
+
+    func getStreamURL(torrentId: String) async throws -> StreamInfo {
+        guard let hash = torrentHashesByID[torrentId], hash == fixture.hash else {
+            throw DebridError.torrentNotFound(torrentId)
+        }
+
+        let requestCount = streamRequestCountsByHash[hash, default: 0]
+        streamRequestCountsByHash[hash] = requestCount + 1
+        let streamURL = fixture.streamURLs[min(requestCount, fixture.streamURLs.count - 1)]
+        let fileName = fixture.fileName
+
+        return StreamInfo(
+            streamURL: streamURL,
+            quality: VideoQuality.parse(from: fileName),
+            codec: VideoCodec.parse(from: fileName),
+            audio: AudioFormat.parse(from: fileName),
+            source: SourceType.parse(from: fileName),
+            hdr: HDRFormat.parse(from: fileName),
+            fileName: fileName,
+            sizeBytes: nil,
+            debridService: serviceType.rawValue
+        )
+    }
+
+    func unrestrict(link: String) async throws -> URL {
+        guard let url = URL(string: link) else {
+            throw DebridError.networkError("Invalid QA fixture URL")
+        }
+        return url
+    }
+}
+
 actor DebridManager {
     private let database: DatabaseManager
     private let secretStore: any SecretStore
@@ -87,7 +160,12 @@ actor DebridManager {
         return results
     }
 
-    func resolveStream(hash: String, preferredService: DebridServiceType? = nil) async throws -> StreamInfo {
+    func resolveStream(
+        hash: String,
+        preferredService: DebridServiceType? = nil,
+        seasonNumber: Int? = nil,
+        episodeNumber: Int? = nil
+    ) async throws -> StreamInfo {
         try await ensureServicesInitializedIfNeeded()
 
         let service: any DebridServiceProtocol
@@ -107,7 +185,35 @@ actor DebridManager {
         }
 
         let torrentId = try await service.addMagnet(hash: hash)
-        try await service.selectFiles(torrentId: torrentId, fileIds: [])
+        if let seasonNumber, let episodeNumber {
+            var selectedEpisodeFile = false
+
+            if let realDebridService = service as? RealDebridService {
+                selectedEpisodeFile = try await realDebridService.selectMatchingEpisodeFile(
+                    torrentId: torrentId,
+                    seasonNumber: seasonNumber,
+                    episodeNumber: episodeNumber
+                )
+            } else if let torBoxService = service as? TorBoxService {
+                selectedEpisodeFile = try await torBoxService.selectMatchingEpisodeFile(
+                    torrentId: torrentId,
+                    seasonNumber: seasonNumber,
+                    episodeNumber: episodeNumber
+                )
+            } else if let allDebridService = service as? AllDebridService {
+                selectedEpisodeFile = try await allDebridService.selectMatchingEpisodeFile(
+                    torrentId: torrentId,
+                    seasonNumber: seasonNumber,
+                    episodeNumber: episodeNumber
+                )
+            }
+
+            if !selectedEpisodeFile {
+                try await service.selectFiles(torrentId: torrentId, fileIds: [])
+            }
+        } else {
+            try await service.selectFiles(torrentId: torrentId, fileIds: [])
+        }
 
         // Poll for completion with exponential backoff
         var delay: UInt64 = 500_000_000 // 0.5s
@@ -142,6 +248,11 @@ actor DebridManager {
     }
 
     private static func liveServiceFactory(type: DebridServiceType, token: String) -> any DebridServiceProtocol {
+        if let fixture = QARuntimeOptions.debridFixture,
+           fixture.serviceType == type {
+            return QADebridService(fixture: fixture)
+        }
+
         switch type {
         case .realDebrid:
             return RealDebridService(apiToken: token)

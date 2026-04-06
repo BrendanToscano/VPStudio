@@ -5,6 +5,7 @@ actor TorBoxService: DebridServiceProtocol {
     private let apiToken: String
     private let baseURL = "https://api.torbox.app/v1/api"
     private let session: URLSession
+    private var selectedFileIDsByTorrent: [String: Set<Int>] = [:]
 
     init(apiToken: String, session: URLSession = .shared) {
         self.apiToken = apiToken
@@ -57,7 +58,42 @@ actor TorBoxService: DebridServiceProtocol {
         return String(id)
     }
 
-    func selectFiles(torrentId: String, fileIds: [Int]) async throws {}
+    func selectFiles(torrentId: String, fileIds: [Int]) async throws {
+        if fileIds.isEmpty {
+            selectedFileIDsByTorrent.removeValue(forKey: torrentId)
+            return
+        }
+        selectedFileIDsByTorrent[torrentId] = Set(fileIds)
+    }
+
+    func selectMatchingEpisodeFile(
+        torrentId: String,
+        seasonNumber: Int,
+        episodeNumber: Int
+    ) async throws -> Bool {
+        let response: TBResponse<TBTorrentInfo> = try await request(
+            method: "GET",
+            path: "/torrents/mylist",
+            queryItems: [URLQueryItem(name: "id", value: torrentId)]
+        )
+        guard let torrent = response.data,
+              let files = torrent.files else {
+            return false
+        }
+
+        let matches = files.filter { file in
+            guard let name = file.name else { return false }
+            return EpisodeTokenMatcher.matches(title: name, season: seasonNumber, episode: episodeNumber)
+        }
+
+        guard let bestMatch = matches.max(by: { ($0.size ?? 0) < ($1.size ?? 0) }),
+              let fileId = bestMatch.id else {
+            return false
+        }
+
+        try await selectFiles(torrentId: torrentId, fileIds: [fileId])
+        return true
+    }
 
     func getStreamURL(torrentId: String) async throws -> StreamInfo {
         let response: TBResponse<TBTorrentInfo> = try await request(
@@ -68,12 +104,19 @@ actor TorBoxService: DebridServiceProtocol {
         guard let torrent = response.data else { throw DebridError.torrentNotFound(torrentId) }
         guard torrent.downloadFinished == true else { throw DebridError.fileNotReady("downloading") }
 
-        // Pick largest file (most likely the video) instead of hardcoding file_id=0
+        // Prefer explicitly selected files (episode-specific), fallback to largest file.
         let fileId: String
+        let selectedIDs = selectedFileIDsByTorrent[torrentId] ?? []
         if let files = torrent.files,
-           let largest = files.max(by: { ($0.size ?? 0) < ($1.size ?? 0) }),
-           let id = largest.id
-        {
+           let selected = files.first(where: { file in
+               guard let id = file.id else { return false }
+               return selectedIDs.contains(id)
+           }),
+           let id = selected.id {
+            fileId = String(id)
+        } else if let files = torrent.files,
+                  let largest = files.max(by: { ($0.size ?? 0) < ($1.size ?? 0) }),
+                  let id = largest.id {
             fileId = String(id)
         } else {
             fileId = "0"
@@ -91,6 +134,7 @@ actor TorBoxService: DebridServiceProtocol {
             throw DebridError.networkError("No download link")
         }
 
+        selectedFileIDsByTorrent.removeValue(forKey: torrentId)
         let fileName = torrent.name ?? "Unknown"
         return StreamInfo(
             streamURL: url,

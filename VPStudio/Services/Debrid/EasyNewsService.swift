@@ -36,7 +36,9 @@ actor EasyNewsService: DebridServiceProtocol {
     }
 
     func getAccountInfo() async throws -> DebridAccountInfo {
-        DebridAccountInfo(username: "EasyNews User", email: nil, premiumExpiry: nil, isPremium: true)
+        // EasyNews lacks a public account-info API. Return what we know
+        // and leave premium status as nil (unknown) to avoid false positives.
+        DebridAccountInfo(username: "EasyNews", email: nil, premiumExpiry: nil, isPremium: nil)
     }
 
     func checkCache(hashes: [String]) async throws -> [String: CacheStatus] {

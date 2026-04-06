@@ -4,7 +4,9 @@ actor OffcloudService: DebridServiceProtocol {
     let serviceType: DebridServiceType = .offcloud
     private let apiToken: String
     private let baseURL = "https://offcloud.com/api"
+    private let fallbackBaseURL = "https://offcloud.com"
     private let session: URLSession
+    private var selectedFileIDsByTorrent: [String: Set<Int>] = [:]
 
     init(apiToken: String, session: URLSession = .shared) {
         self.apiToken = apiToken
@@ -12,11 +14,15 @@ actor OffcloudService: DebridServiceProtocol {
     }
 
     func validateToken() async throws -> Bool {
-        let _: [OCAnyHistoryItem] = try await request(
-            method: "GET",
-            path: "/cloud/history"
-        )
-        return true
+        do {
+            let _: [OCAnyHistoryItem] = try await request(
+                method: "GET",
+                path: "/cloud/history"
+            )
+            return true
+        } catch DebridError.unauthorized {
+            return false
+        }
     }
 
     func getAccountInfo() async throws -> DebridAccountInfo {
@@ -55,7 +61,13 @@ actor OffcloudService: DebridServiceProtocol {
         return decoded.requestId ?? hash
     }
 
-    func selectFiles(torrentId: String, fileIds: [Int]) async throws {}
+    func selectFiles(torrentId: String, fileIds: [Int]) async throws {
+        if fileIds.isEmpty {
+            selectedFileIDsByTorrent.removeValue(forKey: torrentId)
+            return
+        }
+        selectedFileIDsByTorrent[torrentId] = Set(fileIds)
+    }
 
     func getStreamURL(torrentId: String) async throws -> StreamInfo {
         let statusResponse: OCStatusResponse = try await request(
@@ -70,6 +82,7 @@ actor OffcloudService: DebridServiceProtocol {
         }
 
         if let direct = statusResponse.url, let directURL = URL(string: direct) {
+            selectedFileIDsByTorrent.removeValue(forKey: torrentId)
             let fileName = statusResponse.fileName ?? directURL.lastPathComponent
             let q = VideoQuality.parse(from: fileName)
             let c = VideoCodec.parse(from: fileName)
@@ -93,10 +106,16 @@ actor OffcloudService: DebridServiceProtocol {
             method: "GET",
             path: "/cloud/explore/\(torrentId)"
         )
-        guard let link = preferredVideoLink(from: links), let streamURL = URL(string: link) else {
+        let selectedIDs = selectedFileIDsByTorrent[torrentId] ?? []
+        let selectedLink = links.enumerated().first(where: { pair in
+            selectedIDs.contains(pair.offset + 1)
+        })?.element
+        guard let link = selectedLink ?? preferredVideoLink(from: links),
+              let streamURL = URL(string: link) else {
             throw DebridError.networkError("No download link")
         }
 
+        selectedFileIDsByTorrent.removeValue(forKey: torrentId)
         let fileName = statusResponse.fileName ?? streamURL.lastPathComponent
         let q = VideoQuality.parse(from: fileName)
         let c = VideoCodec.parse(from: fileName)
@@ -127,28 +146,23 @@ actor OffcloudService: DebridServiceProtocol {
         queryItems: [URLQueryItem] = [],
         jsonBody: [String: Any]? = nil
     ) async throws -> T {
-        guard var components = URLComponents(string: baseURL + path) else {
-            throw DebridError.networkError("Invalid request URL")
-        }
-        if !queryItems.isEmpty {
-            components.queryItems = queryItems
-        }
-        guard let url = components.url else {
-            throw DebridError.networkError("Invalid request URL")
-        }
+        let primaryURL = try buildURL(base: baseURL, path: path, queryItems: queryItems)
+        var (data, http) = try await send(
+            to: primaryURL,
+            method: method,
+            jsonBody: jsonBody
+        )
 
-        var request = URLRequest(url: url)
-        request.httpMethod = method
-        request.timeoutInterval = 30
-        request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization")
-        if let jsonBody {
-            request.httpBody = try JSONSerialization.data(withJSONObject: jsonBody)
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        }
-
-        let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse else {
-            throw DebridError.networkError("Invalid response")
+        // Compatibility fallback: some environments/stubs serve Offcloud endpoints without /api prefix.
+        if http.statusCode == 404 {
+            let fallbackURL = try buildURL(base: fallbackBaseURL, path: path, queryItems: queryItems)
+            if fallbackURL != primaryURL {
+                (data, http) = try await send(
+                    to: fallbackURL,
+                    method: method,
+                    jsonBody: jsonBody
+                )
+            }
         }
 
         switch http.statusCode {
@@ -170,6 +184,40 @@ actor OffcloudService: DebridServiceProtocol {
         } catch {
             throw DebridError.networkError("Invalid Offcloud response: \(error.localizedDescription)")
         }
+    }
+
+    private func buildURL(base: String, path: String, queryItems: [URLQueryItem]) throws -> URL {
+        guard var components = URLComponents(string: base + path) else {
+            throw DebridError.networkError("Invalid request URL")
+        }
+        if !queryItems.isEmpty {
+            components.queryItems = queryItems
+        }
+        guard let url = components.url else {
+            throw DebridError.networkError("Invalid request URL")
+        }
+        return url
+    }
+
+    private func send(
+        to url: URL,
+        method: String,
+        jsonBody: [String: Any]?
+    ) async throws -> (Data, HTTPURLResponse) {
+        var request = URLRequest(url: url)
+        request.httpMethod = method
+        request.timeoutInterval = 30
+        request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization")
+        if let jsonBody {
+            request.httpBody = try JSONSerialization.data(withJSONObject: jsonBody)
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        }
+
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw DebridError.networkError("Invalid response")
+        }
+        return (data, http)
     }
 
     private func preferredVideoLink(from links: [String]) -> String? {

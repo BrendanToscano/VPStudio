@@ -319,6 +319,23 @@ struct StreamInfoTests {
         #expect(a.id == b.id)
     }
 
+    @Test func idDiffersForDifferentResolvedResourcesEvenWhenMetadataMatches() {
+        let a = StreamInfo(
+            streamURL: URL(string: "https://example.com/files/stream-a.mkv?token=abc")!,
+            quality: .hd1080p, codec: .h264, audio: .aac,
+            source: .webDL, hdr: .sdr, fileName: "same.mkv",
+            sizeBytes: 1000, debridService: "rd"
+        )
+        let b = StreamInfo(
+            streamURL: URL(string: "https://example.com/files/stream-b.mkv?token=xyz")!,
+            quality: .hd1080p, codec: .h264, audio: .aac,
+            source: .webDL, hdr: .sdr, fileName: "same.mkv",
+            sizeBytes: 1000, debridService: "rd"
+        )
+
+        #expect(a.id != b.id)
+    }
+
     @Test func idDiffersByQualityOrCodec() {
         let a = StreamInfo(
             streamURL: URL(string: "https://example.com/a.mkv")!,

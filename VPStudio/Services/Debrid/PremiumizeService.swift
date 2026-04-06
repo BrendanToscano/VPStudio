@@ -5,6 +5,7 @@ actor PremiumizeService: DebridServiceProtocol {
     private let apiToken: String
     private let baseURL = "https://www.premiumize.me/api"
     private let session: URLSession
+    private var selectedFileIDsByTorrent: [String: Set<Int>] = [:]
 
     init(apiToken: String, session: URLSession = .shared) {
         self.apiToken = apiToken
@@ -51,7 +52,16 @@ actor PremiumizeService: DebridServiceProtocol {
         return response.id ?? hash
     }
 
-    func selectFiles(torrentId: String, fileIds: [Int]) async throws {}
+    func selectFiles(torrentId: String, fileIds: [Int]) async throws {
+        if fileIds.isEmpty {
+            selectedFileIDsByTorrent.removeValue(forKey: torrentId)
+            return
+        }
+        // Premiumize transfer/list does not expose per-file selection in this flow.
+        // Fail fast instead of silently ignoring caller intent.
+        selectedFileIDsByTorrent[torrentId] = Set(fileIds)
+        throw DebridError.networkError("Premiumize file selection is not supported for this transfer")
+    }
 
     func getStreamURL(torrentId: String) async throws -> StreamInfo {
         // For Premiumize, use direct download via transfer info
@@ -65,6 +75,7 @@ actor PremiumizeService: DebridServiceProtocol {
         guard let url = URL(string: link) else {
             throw DebridError.networkError("Invalid URL")
         }
+        selectedFileIDsByTorrent.removeValue(forKey: torrentId)
         let fileName = transfer.name ?? "Unknown"
         return StreamInfo(
             streamURL: url,

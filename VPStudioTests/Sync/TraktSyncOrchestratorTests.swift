@@ -192,6 +192,7 @@ struct TraktSyncOrchestratorPullTests {
         let result = await orchestrator.sync()
 
         #expect(result.watchlistPulled == 1)
+        #expect(result.localRefreshTargets.contains(.library))
         let entries = try await database.fetchLibraryEntries(listType: .watchlist)
         #expect(entries.count == 1)
         #expect(entries[0].mediaId == "tt1160419")
@@ -249,6 +250,7 @@ struct TraktSyncOrchestratorPullTests {
         let result = await orchestrator.sync()
 
         #expect(result.ratingsPulled == 1)
+        #expect(result.localRefreshTargets.contains(.tasteProfile))
         let event = try await database.fetchLatestTasteRating(mediaId: "tt0816692")
         #expect(event != nil)
         #expect(event?.feedbackValue == 9)
@@ -286,6 +288,43 @@ struct TraktSyncOrchestratorPullTests {
         let result = await orchestrator.sync()
 
         #expect(result.ratingsPulled == 0)
+    }
+
+    @Test("history pull marks library refresh when it only backfills the history library entry")
+    func historyPullMarksLibraryRefreshWhenOnlyHistoryLibraryEntryChanges() async throws {
+        let database = try await makeTempDatabase()
+        let settings = makeSettingsManager(database: database)
+        try await settings.setBool(key: SettingsKeys.traktSyncWatchlist, value: false)
+        try await settings.setBool(key: SettingsKeys.traktSyncHistory, value: true)
+        try await settings.setBool(key: SettingsKeys.traktSyncRatings, value: false)
+
+        try await database.saveWatchHistory(
+            WatchHistory(
+                id: UUID().uuidString,
+                mediaId: "tt7654321",
+                title: "Already Watched",
+                progress: 0,
+                duration: 0,
+                watchedAt: Date(),
+                isCompleted: true
+            )
+        )
+
+        let session = makeOrchestratorStubSession(
+            historyMovies: """
+            [{"id":5001,"watched_at":"2025-08-01","action":"watch","movie":{"title":"Already Watched","year":2025,"ids":{"trakt":1,"imdb":"tt7654321"}}}]
+            """
+        )
+        let (orchestrator, service) = makeOrchestrator(database: database, settingsManager: settings, session: session)
+        await service.setTokens(access: "token", refresh: "refresh")
+
+        let result = await orchestrator.sync()
+
+        #expect(result.historyPulled == 0)
+        #expect(result.localRefreshTargets.contains(.library))
+        let historyEntries = try await database.fetchLibraryEntries(listType: .history)
+        #expect(historyEntries.count == 1)
+        #expect(historyEntries[0].mediaId == "tt7654321")
     }
 
     @Test("pull creates history entries in both WatchHistory and UserLibrary tables")
@@ -843,7 +882,7 @@ struct TraktSyncOrchestratorHistoryPullWatchHistoryTests {
 
         let session = makeOrchestratorStubSession(
             historyShows: """
-            [{"id":2001,"watched_at":"2025-03-10T14:00:00.000Z","action":"watch","show":{"title":"Breaking Bad","year":2008,"ids":{"trakt":10,"imdb":"tt0903747"}}}]
+            [{"id":2001,"watched_at":"2026-02-01T14:00:00.000Z","action":"watch","show":{"title":"Breaking Bad","year":2008,"ids":{"trakt":10,"imdb":"tt0903747"}}}]
             """
         )
         let (orchestrator, service) = makeOrchestrator(database: database, settingsManager: settings, session: session)
@@ -1245,7 +1284,8 @@ struct TraktSyncOrchestratorHistoryPaginationTests {
         }
         let pageTracker = PageTracker()
 
-        // Always return 50 items (simulating an infinitely large history)
+        // Use a small cap (3 pages) to keep the test fast while verifying capping behavior.
+        let testMaxPages = 3
         let session = makeStubSession { request in
             let url = request.url!
             let path = url.path
@@ -1281,15 +1321,23 @@ struct TraktSyncOrchestratorHistoryPaginationTests {
             return (response, Data("[]".utf8))
         }
 
-        let (orchestrator, service) = makeOrchestrator(database: database, settingsManager: settings, session: session)
+        let (_, service) = makeOrchestrator(database: database, settingsManager: settings, session: session)
+        // Create orchestrator with reduced page cap for fast testing
+        let orchestrator = TraktSyncOrchestrator(
+            traktService: service,
+            database: database,
+            settingsManager: settings,
+            maxHistoryPages: testMaxPages
+        )
         await service.setTokens(access: "token", refresh: "refresh")
 
         let result = await orchestrator.sync()
 
-        // Should stop at maxHistoryPages (20) even though each page returns 50 items
-        #expect(pageTracker.maxPage <= TraktSyncOrchestrator.maxHistoryPages)
-        // 20 pages * 50 items = 1000 items max for movies
-        #expect(result.historyPulled == TraktSyncOrchestrator.maxHistoryPages * 50)
+        // Should stop at testMaxPages even though each page returns 50 items
+        #expect(pageTracker.maxPage <= testMaxPages)
+        #expect(pageTracker.maxPage > 1) // Multiple pages were fetched
+        // 3 pages * 50 items = 150 items max for movies
+        #expect(result.historyPulled == testMaxPages * 50)
     }
 }
 
@@ -1321,7 +1369,7 @@ struct TraktSyncOrchestratorBidirectionalHistoryTests {
         // Remote: tt2222222 (not in local)
         let session = makeOrchestratorStubSession(
             historyMovies: """
-            [{"id":6001,"watched_at":"2025-03-01T10:00:00.000Z","action":"watch","movie":{"title":"Remote Only Movie","year":2025,"ids":{"trakt":1,"imdb":"tt2222222"}}}]
+            [{"id":6001,"watched_at":"2025-08-01T10:00:00.000Z","action":"watch","movie":{"title":"Remote Only Movie","year":2025,"ids":{"trakt":1,"imdb":"tt2222222"}}}]
             """,
             postResponder: { _ in
                 (200, #"{"added":{"movies":1,"shows":0,"episodes":0}}"#)

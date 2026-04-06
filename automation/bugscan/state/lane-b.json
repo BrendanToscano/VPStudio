@@ -1,0 +1,159 @@
+{
+  "laneId": "lane-b",
+  "scanMode": "cool",
+  "ownerModel": "minimax",
+  "lastScanAt": "2026-04-04T15:04:00Z",
+  "lastScannedCommit": "38e5a2dfb5c90869199fb7da5f9568c944da441e",
+  "findingCount": 18,
+  "lastSummary": "Scanned Lane B ViewModels and lane-B UI/navigation/component files (ContentView; Detail/Discover/Downloads/Library/Search/Navigation windows; MediaCardView) on commit 38e5a2dfb5c90869199fb7da5f9568c944da441e. No new high-confidence non-duplicate on-disk bugs were found; lane-b.jsonl remains at 18 records. Validation events on disk still classify B-020, LANE-B-2026-04-03-B-010, and LANE-B-2026-04-03-B-011 as invalid/stale.",
+  "priorNotes": [
+    "Scanned Lane B ViewModels and lane-B UI/navigation/component files (ContentView; Detail/Discover/Downloads/Library/Search/Navigation windows; MediaCardView) on commit 38e5a2dfb5c90869199fb7da5f9568c944da441e and appended LANE-B-2026-04-04-B-016 (stream-open failures are hidden because torrent-row error UI only renders while player launch is in progress). Validation events on disk still classify B-020, LANE-B-2026-04-03-B-010, and LANE-B-2026-04-03-B-011 as invalid/stale.",
+    "Scanned Lane B ViewModels and lane-B UI/navigation/component files (ContentView; Detail/Discover/Downloads/Library/Search/Navigation windows; Views/Components) on commit 38e5a2dfb5c90869199fb7da5f9568c944da441e. No new high-confidence non-duplicate findings were identified; lane-b.jsonl remains at 17 records. Validation events on disk still classify B-020, LANE-B-2026-04-03-B-010, and LANE-B-2026-04-03-B-011 as invalid/stale.",
+    "Scanned Lane B ViewModels (Detail/Discover/Search/Downloads) plus lane-B UI/navigation/component files (ContentView, Discover/Search/Downloads/Library/Detail windows, VPSidebarView/TabBadgePolicy, MediaCardView, DetailTorrentsSection, SeriesDetailLayout) on commit 1f60f8fb8fae994bf3b3f45ff35859332ea46717. No new high-confidence non-duplicate findings were identified; lane-b.jsonl remains unchanged at 17 records. Validation events on disk still classify B-020, LANE-B-2026-04-03-B-010, and LANE-B-2026-04-03-B-011 as invalid/stale.",
+    "Scanned Lane B ViewModels (Detail/Discover/Search/Downloads) plus lane-B UI/navigation/component files (ContentView, Discover/Search/Downloads/Library/Detail windows, VPSidebarView/TabBadgePolicy, MediaCardView, DetailTorrentsSection, SeriesDetailLayout) on commit 1f60f8fb8fae994bf3b3f45ff35859332ea46717. No new high-confidence non-duplicate findings were identified; lane-b.jsonl unchanged. Validation events on disk still classify B-020, LANE-B-2026-04-03-B-010, and LANE-B-2026-04-03-B-011 as invalid/stale.",
+    "Scanned Lane B ViewModels plus UI/navigation/component files (ContentView, Discover/Search/Downloads/Library/Detail windows, Navigation, MediaCardView, DetailTorrentsSection, SeriesDetailLayout) on commit 1f60f8fb8fae994bf3b3f45ff35859332ea46717. No new high-confidence non-duplicate findings were identified; lane-b.jsonl unchanged. Validation events on disk still classify B-020, LANE-B-2026-04-03-B-010, and LANE-B-2026-04-03-B-011 as invalid/stale.",
+    "Scanned Lane B ViewModels plus UI/navigation/component files (ContentView, Discover/Search/Downloads/Library/Detail windows, Navigation, MediaCardView, DetailTorrentsSection, SeriesDetailLayout) on commit cc86863f249b94df3df2accc4789bd566adea9ba. No new high-confidence non-duplicate findings were identified; lane-b.jsonl unchanged. Validation events on disk still classify B-020, LANE-B-2026-04-03-B-010, and LANE-B-2026-04-03-B-011 as invalid/stale.",
+    "Scanned Lane B ViewModels plus UI/navigation/component files (ContentView, Discover/Search/Downloads/Library/Detail windows, Navigation, MediaCardView, DetailTorrentsSection, SeriesDetailLayout) on commit 6259d81c370a22836c5b57a033675aac82d0bda2. No new high-confidence non-duplicate findings were identified; lane-b.jsonl unchanged. Validation events on disk still classify B-020, LANE-B-2026-04-03-B-010, and LANE-B-2026-04-03-B-011 as invalid/stale.",
+    "Scanned Lane B ViewModels plus UI/navigation/component files (ContentView, Discover/Search/Downloads/Library/Detail windows, Navigation, MediaCardView, DetailTorrentsSection, SeriesDetailLayout) on commit 36d21f405b2cd24a5da4927b2b920f864faae9e1. No new high-confidence non-duplicate findings were identified; lane-b.jsonl unchanged. Validation events on disk still classify B-020, LANE-B-2026-04-03-B-010, and LANE-B-2026-04-03-B-011 as invalid/stale."
+  ],
+  "noNewValidBugStreak": 1,
+  "saturationState": "ACTIVE",
+  "lastModified": "2026-04-04T15:04:00Z",
+  "completedSteps": [
+    "read_state",
+    "read_existing_findings",
+    "read_validation_events",
+    "read_source_files",
+    "analyze_and_write_findings",
+    "update_lane_state"
+  ],
+  "state": "done",
+  "findings": [
+    {
+      "id": "B-020",
+      "type": "invalid",
+      "title": "DetailViewModel.resolveInitialSeason reads stale mediaLibrary.watchHistory",
+      "confidence": "high",
+      "requiresFix": true
+    },
+    {
+      "id": "B-021",
+      "type": "verified",
+      "title": "DownloadsViewModel.playFile uses potentially stale mediaTitle from DownloadTask",
+      "confidence": "medium",
+      "requiresFix": true
+    },
+    {
+      "id": "LANE-B-2026-04-02-B-001",
+      "type": "verified",
+      "title": "LibraryView fallback preview hard-codes unknown items as movies, breaking TV detail routing",
+      "confidence": "high",
+      "requiresFix": true
+    },
+    {
+      "id": "LANE-B-2026-04-02-B-002",
+      "type": "verified",
+      "title": "Search silently shows empty results when TMDB is unconfigured instead of surfacing a setup error",
+      "confidence": "high",
+      "requiresFix": true
+    },
+    {
+      "id": "LANE-B-2026-04-02-B-003",
+      "type": "verified",
+      "title": "Search year-range presets (2020s/2010s/Classic) apply only a single year",
+      "confidence": "high",
+      "requiresFix": true
+    },
+    {
+      "id": "LANE-B-2026-04-02-B-004",
+      "type": "verified",
+      "title": "Search language filter UI allows multi-select but only one language is actually applied",
+      "confidence": "high",
+      "requiresFix": true
+    },
+    {
+      "id": "LANE-B-2026-04-02-B-005",
+      "type": "verified",
+      "title": "Search filter sheet Cancel action does not cancel sort/genre changes",
+      "confidence": "high",
+      "requiresFix": true
+    },
+    {
+      "id": "LANE-B-2026-04-02-B-006",
+      "type": "verified",
+      "title": "Clearing Search filters leaves stale mood-card context active and traps Explore in results mode",
+      "confidence": "high",
+      "requiresFix": true
+    },
+    {
+      "id": "LANE-B-2026-04-02-B-007",
+      "type": "verified",
+      "title": "Detail torrent rows can remain stuck in Downloaded state after the download is removed",
+      "confidence": "high",
+      "requiresFix": true
+    },
+    {
+      "id": "LANE-B-2026-02-B-008",
+      "type": "verified",
+      "title": "Detail layout hides the streams section whenever search returns zero results",
+      "confidence": "high",
+      "requiresFix": true
+    },
+    {
+      "id": "LANE-B-2026-04-02-B-009",
+      "type": "verified",
+      "title": "Detail download-state badges reset to idle after reopening a title",
+      "confidence": "high",
+      "requiresFix": true
+    },
+    {
+      "id": "LANE-B-2026-04-03-B-010",
+      "type": "invalid",
+      "title": "LibraryCSVExportSheet.encodeCSV crashes when history is accessed before being loaded",
+      "confidence": "high",
+      "requiresFix": true
+    },
+    {
+      "id": "LANE-B-2026-04-03-B-011",
+      "type": "invalid",
+      "title": "SeriesDetailLayout references undefined DetailTorrentsSection component",
+      "confidence": "high",
+      "requiresFix": true
+    },
+    {
+      "id": "LANE-B-2026-04-04-B-012",
+      "type": "verified",
+      "title": "Navigation badges can never appear because ContentView never passes non-zero badge counts",
+      "confidence": "high",
+      "requiresFix": true
+    },
+    {
+      "id": "LANE-B-2026-04-04-B-013",
+      "type": "verified",
+      "title": "LibraryView can render stale list/folder data after rapid selection changes because cancelled loads still mutate state",
+      "confidence": "high",
+      "requiresFix": true
+    },
+    {
+      "id": "LANE-B-2026-04-04-B-014",
+      "type": "verified",
+      "title": "Left-sidebar navigation drops the Environments tab on non-visionOS, creating layout-dependent tab access",
+      "confidence": "high",
+      "requiresFix": true
+    },
+    {
+      "id": "LANE-B-2026-04-04-B-015",
+      "type": "verified",
+      "title": "Rapid season switches can show episodes from the wrong season because stale loadSeason calls still overwrite state",
+      "confidence": "high",
+      "requiresFix": true
+    },
+    {
+      "id": "LANE-B-2026-04-04-B-016",
+      "type": "verified",
+      "title": "Stream-open failures are hidden because torrent-row error UI only renders while player launch is in progress",
+      "confidence": "high",
+      "requiresFix": true
+    }
+  ]
+}

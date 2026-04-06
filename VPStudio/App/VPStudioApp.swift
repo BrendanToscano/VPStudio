@@ -32,8 +32,12 @@ struct VPStudioApp: App {
         // Configure audio session for media playback, allowing it to mix or route properly
         #if !os(macOS)
         do {
-            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
-            try AVAudioSession.sharedInstance().setActive(true)
+            let session = AVAudioSession.sharedInstance()
+            try session.setCategory(.playback, mode: .moviePlayback, policy: .longFormVideo)
+            if #available(iOS 15.0, tvOS 15.0, visionOS 1.0, *) {
+                try session.setSupportsMultichannelContent(true)
+            }
+            try session.setActive(true)
         } catch {
             print("Failed to configure AVAudioSession: \(error)")
         }
@@ -72,7 +76,9 @@ struct VPStudioApp: App {
             }
         }
         .defaultSize(width: 1400, height: 788)
+#if os(macOS)
         .windowStyle(.plain)
+#endif
         #if os(visionOS)
         .windowResizability(.automatic)
         #endif

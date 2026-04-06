@@ -20,7 +20,9 @@ struct SettingsStatusSnapshot: Equatable, Sendable {
     var aiProvider: AIProviderKind = .anthropic
     var hasOpenAIKey = false
     var hasAnthropicKey = false
+    var hasGeminiKey = false
     var hasOllamaEndpoint = true
+    var hasOpenRouterKey = false
     var hasTraktCredentials = false
     var hasSimklCredentials = false
 }
@@ -57,6 +59,43 @@ enum SettingsStatusFormatter {
             }
             return SettingsDestinationStatus(message: "API key required", kind: .warning)
 
+        case .ai:
+            let provider = snapshot.aiProvider.displayName
+            let isConfigured: Bool
+            switch snapshot.aiProvider {
+            case .openAI:
+                isConfigured = snapshot.hasOpenAIKey
+            case .anthropic:
+                isConfigured = snapshot.hasAnthropicKey
+            case .ollama:
+                isConfigured = snapshot.hasOllamaEndpoint
+            case .gemini:
+                isConfigured = snapshot.hasGeminiKey
+            case .openRouter:
+                isConfigured = snapshot.hasOpenRouterKey
+            case .local:
+                isConfigured = true
+            }
+            if isConfigured {
+                return SettingsDestinationStatus(message: "\(provider) configured", kind: .positive)
+            }
+            return SettingsDestinationStatus(message: "\(provider) needs credentials", kind: .warning)
+
+        case .trakt:
+            if snapshot.hasTraktCredentials {
+                return SettingsDestinationStatus(message: "Connected", kind: .positive)
+            }
+            return SettingsDestinationStatus(message: "Not connected", kind: .warning)
+
+        case .simkl:
+            if snapshot.hasSimklCredentials {
+                return SettingsDestinationStatus(message: "Connected", kind: .positive)
+            }
+            return SettingsDestinationStatus(message: "Not connected", kind: .warning)
+
+        case .imdbImport:
+            return SettingsDestinationStatus(message: "CSV import via IMDb exports", kind: .neutral)
+
         case .player:
             return SettingsDestinationStatus(message: "Playback preferences", kind: .neutral)
 
@@ -76,33 +115,17 @@ enum SettingsStatusFormatter {
             }
             return SettingsDestinationStatus(message: "No environments added", kind: .warning)
 
-        case .ai:
-            let provider = snapshot.aiProvider.displayName
-            let isConfigured: Bool
-            switch snapshot.aiProvider {
-            case .openAI:
-                isConfigured = snapshot.hasOpenAIKey
-            case .anthropic:
-                isConfigured = snapshot.hasAnthropicKey
-            case .ollama:
-                isConfigured = snapshot.hasOllamaEndpoint
-            }
-            if isConfigured {
-                return SettingsDestinationStatus(message: "\(provider) configured", kind: .positive)
-            }
-            return SettingsDestinationStatus(message: "\(provider) needs credentials", kind: .warning)
+        case .library:
+            return SettingsDestinationStatus(message: "Browse your library", kind: .neutral)
 
-        case .trakt:
-            if snapshot.hasTraktCredentials {
-                return SettingsDestinationStatus(message: "Connected", kind: .positive)
-            }
-            return SettingsDestinationStatus(message: "Not connected", kind: .warning)
+        case .downloads:
+            return SettingsDestinationStatus(message: "Manage downloads", kind: .neutral)
 
-        case .simkl:
-            if snapshot.hasSimklCredentials {
-                return SettingsDestinationStatus(message: "Connected", kind: .positive)
-            }
-            return SettingsDestinationStatus(message: "Not connected", kind: .warning)
+        case .resetData:
+            return SettingsDestinationStatus(message: "Erase all app data", kind: .neutral)
+
+        case .testMode:
+            return SettingsDestinationStatus(message: "9 screens to preview", kind: .neutral)
         }
     }
 }

@@ -1,0 +1,20 @@
+{
+  "summary": "Scanned Lane C immersive/player/environment paths plus current lane state/findings. Revalidated the existing immersive-control wiring around screen-size handling and found one new high-confidence bug: the immersive \"Change environment\" control posts a notification, but PlayerView only refreshes the asset list instead of presenting any picker or switch flow, so the control is effectively inert.",
+  "saturationState": "ACTIVE",
+  "newFindings": [
+    {
+      "id": "LANE-C-2026-04-02-C-007",
+      "title": "Immersive \"Change environment\" control never opens a picker or switches environments",
+      "confidence": "high",
+      "paths": [
+        "VPStudio/Views/Immersive/ImmersivePlayerControlsView.swift",
+        "VPStudio/Views/Windows/Player/PlayerView.swift"
+      ],
+      "why_it_is_a_bug": "The immersive controls expose a dedicated environment-switch button, but the only handler wired in PlayerView for that notification just reloads the environment asset list. It never toggles `isShowingEnvironmentPicker`, never presents any picker sheet, and never performs a switch. From the user's perspective, the button does nothing.",
+      "trigger_or_repro": "Start playback in an immersive environment, show the floating immersive controls, and tap the mountain-shaped \"Change environment\" button. `ImmersivePlayerControlsView` posts `.immersiveControlRequestEnvironmentSwitch`, and `PlayerView`'s `ImmersiveControlHandlers` closure runs only `Task { await loadEnvironmentAssets() }`. No picker appears and the environment does not change.",
+      "impact": "Users inside immersive playback cannot actually switch environments from the advertised in-space control, forcing them to leave the immersive flow and use other UI instead. The control is misleading and effectively broken.",
+      "evidence": "`ImmersivePlayerControlsView.secondaryControlsRow` labels the button as \"Change environment\" and posts `.immersiveControlRequestEnvironmentSwitch`. In `PlayerView`, the attached `ImmersiveControlHandlers` maps `onRequestEnvironmentSwitch` to `{ Task { await loadEnvironmentAssets() } }` only. Unlike the window menu/button paths elsewhere in `PlayerView`, this handler never sets `isShowingEnvironmentPicker = true` or calls `openEnvironment(...)`.
+"
+    }
+  ]
+}

@@ -9,30 +9,14 @@ struct DebridSettingsView: View {
     @State private var showingAddSheet = false
     @State private var newServiceType: DebridServiceType = .realDebrid
     @State private var newApiKey = ""
-    @State private var saveErrorMessage: String?
+    @State private var surfaceError: AppError?
     @State private var testingConfigID: String?
     @State private var updatingConfigID: String?
     @State private var connectivityStatusByConfigID: [String: ConnectivityStatus] = [:]
 
-    private struct ConnectivityStatus {
-        let message: String
-        let isSuccess: Bool
-
-        var symbolName: String {
-            isSuccess ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"
-        }
-
-        var tint: Color {
-            isSuccess ? .green : .red
-        }
-
-        static func success(_ message: String) -> Self {
-            Self(message: message, isSuccess: true)
-        }
-
-        static func failure(_ message: String) -> Self {
-            Self(message: message, isSuccess: false)
-        }
+    private enum ConnectivityStatus {
+        case success(String)
+        case failure(AppError)
     }
 
     private var trimmedNewApiKey: String {
@@ -45,9 +29,18 @@ struct DebridSettingsView: View {
 
     var body: some View {
         List {
+            if let surfaceError {
+                Section {
+                    SettingsErrorBanner(error: surfaceError)
+                }
+            }
+
             Section {
                 if configs.isEmpty {
-                    Text("No debrid services configured")
+                    Text("No streaming providers connected yet")
+                        .foregroundStyle(.secondary)
+                    Text("Connect a provider (like Real-Debrid) so VPStudio can resolve playable streams.")
+                        .font(.caption)
                         .foregroundStyle(.secondary)
                 } else {
                     ForEach(configs, id: \.id) { config in
@@ -60,32 +53,19 @@ struct DebridSettingsView: View {
 
             Section {
                 Button("Add Debrid Service", systemImage: "plus") {
-                    saveErrorMessage = nil
+                    surfaceError = nil
                     showingAddSheet = true
                 }
             }
         }
-        .navigationTitle("Debrid Services")
+        .navigationTitle("Streaming Providers")
         .task {
             await loadConfigs()
         }
         .refreshable {
             await loadConfigs()
         }
-        .alert(
-            "Debrid Settings Error",
-            isPresented: Binding(
-                get: { saveErrorMessage != nil },
-                set: { isPresented in
-                    if !isPresented { saveErrorMessage = nil }
-                }
-            )
-        ) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text(saveErrorMessage ?? "Unknown error")
-        }
-        .sheet(isPresented: $showingAddSheet, onDismiss: { saveErrorMessage = nil }) {
+        .sheet(isPresented: $showingAddSheet, onDismiss: { surfaceError = nil }) {
             NavigationStack {
                 Form {
                     Picker("Service", selection: $newServiceType) {
@@ -164,9 +144,14 @@ struct DebridSettingsView: View {
             }
 
             if let status = connectivityStatusByConfigID[config.id] {
-                Label(status.message, systemImage: status.symbolName)
-                    .font(.caption)
-                    .foregroundStyle(status.tint)
+                switch status {
+                case .success(let message):
+                    Label(message, systemImage: "checkmark.circle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.green)
+                case .failure(let error):
+                    AppErrorInlineView(error: error)
+                }
             }
         }
         .padding(.vertical, 4)
@@ -178,8 +163,9 @@ struct DebridSettingsView: View {
             configs = fetched
             let validIDs = Set(fetched.map(\.id))
             connectivityStatusByConfigID = connectivityStatusByConfigID.filter { validIDs.contains($0.key) }
+            surfaceError = nil
         } catch {
-            saveErrorMessage = error.localizedDescription
+            surfaceError = AppError(error)
         }
     }
 
@@ -213,9 +199,9 @@ struct DebridSettingsView: View {
             await loadConfigs()
             newApiKey = ""
             showingAddSheet = false
-            saveErrorMessage = nil
+            surfaceError = nil
         } catch {
-            saveErrorMessage = error.localizedDescription
+            surfaceError = AppError(error)
         }
     }
 
@@ -233,7 +219,7 @@ struct DebridSettingsView: View {
             connectivityStatusByConfigID[configID] = nil
             await loadConfigs()
         } catch {
-            saveErrorMessage = error.localizedDescription
+            surfaceError = AppError(error)
         }
     }
 
@@ -253,7 +239,7 @@ struct DebridSettingsView: View {
             connectivityStatusByConfigID[config.id] = nil
             await loadConfigs()
         } catch {
-            saveErrorMessage = error.localizedDescription
+            surfaceError = AppError(error)
         }
     }
 
@@ -263,7 +249,7 @@ struct DebridSettingsView: View {
 
         do {
             guard let token = try await resolveToken(for: config) else {
-                connectivityStatusByConfigID[config.id] = .failure("No API token found for this configuration.")
+                connectivityStatusByConfigID[config.id] = .failure(.unknown("No API token found for this configuration."))
                 return
             }
 
@@ -272,10 +258,10 @@ struct DebridSettingsView: View {
             if isValid {
                 connectivityStatusByConfigID[config.id] = .success("\(config.serviceType.displayName) token is valid.")
             } else {
-                connectivityStatusByConfigID[config.id] = .failure("\(config.serviceType.displayName) token was rejected.")
+                connectivityStatusByConfigID[config.id] = .failure(.unknown("\(config.serviceType.displayName) token was rejected."))
             }
         } catch {
-            connectivityStatusByConfigID[config.id] = .failure(error.localizedDescription)
+            connectivityStatusByConfigID[config.id] = .failure(AppError(error))
         }
     }
 
@@ -324,4 +310,3 @@ struct DebridSettingsView: View {
         }
     }
 }
-

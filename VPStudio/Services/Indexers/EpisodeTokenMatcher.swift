@@ -23,6 +23,13 @@ enum EpisodeTokenMatcher {
             return Context(season: match.0, episode: match.1)
         }
 
+        if let match = firstMatch(
+            pattern: #"season\D*(\d{1,2}).{0,20}episode\D*(\d{1,3})"#,
+            in: normalized
+        ) {
+            return Context(season: match.0, episode: match.1)
+        }
+
         return nil
     }
 

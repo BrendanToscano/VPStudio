@@ -4,14 +4,16 @@ enum SettingsSectionHeaderPolicy {
     /// Maps existing `SettingsCategory` to an SF Symbol icon name.
     static func icon(for category: SettingsCategory) -> String {
         switch category {
-        case .services:
-            return "server.rack"
-        case .playback:
+        case .connect:
+            return "link"
+        case .watch:
             return "play.circle"
-        case .intelligence:
-            return "brain"
-        case .sync:
-            return "arrow.triangle.2.circlepath"
+        case .discover:
+            return "sparkles"
+        case .library:
+            return "books.vertical"
+        case .about:
+            return "info.circle"
         }
     }
 

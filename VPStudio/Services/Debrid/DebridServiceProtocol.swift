@@ -10,7 +10,7 @@ struct DebridAccountInfo: Sendable {
     var username: String
     var email: String?
     var premiumExpiry: Date?
-    var isPremium: Bool
+    var isPremium: Bool?
 }
 
 protocol DebridServiceProtocol: Sendable {

@@ -14,6 +14,34 @@ protocol DownloadManaging: Sendable {
 
 extension DownloadManager: DownloadManaging {}
 
+enum DownloadProgressPolicy {
+    static func clampedUnitProgress(_ value: Double) -> Double {
+        guard value.isFinite else { return 0 }
+        return min(max(value, 0), 1)
+    }
+
+    static func normalizedProgress(
+        progress: Double,
+        bytesWritten: Int64,
+        totalBytes: Int64?,
+        status: DownloadStatus
+    ) -> Double {
+        if let totalBytes, totalBytes > 0 {
+            return clampedUnitProgress(Double(bytesWritten) / Double(totalBytes))
+        }
+
+        if status == .completed {
+            return 1
+        }
+
+        return clampedUnitProgress(progress)
+    }
+
+    static func latestUpdatedAt(in tasks: [DownloadTask]) -> Date {
+        tasks.map(\.updatedAt).max() ?? .distantPast
+    }
+}
+
 struct DownloadMediaGroup: Identifiable {
     var id: String { mediaId }
     let mediaId: String
@@ -35,7 +63,15 @@ struct DownloadMediaGroup: Identifiable {
 
     var overallProgress: Double {
         guard !tasks.isEmpty else { return 0 }
-        return tasks.reduce(0.0) { $0 + $1.progress } / Double(tasks.count)
+        let normalizedSum = tasks.reduce(0.0) { partial, task in
+            partial + DownloadProgressPolicy.normalizedProgress(
+                progress: task.progress,
+                bytesWritten: task.bytesWritten,
+                totalBytes: task.totalBytes,
+                status: task.status
+            )
+        }
+        return DownloadProgressPolicy.clampedUnitProgress(normalizedSum / Double(tasks.count))
     }
 
     var hasActiveDownloads: Bool {
@@ -49,7 +85,11 @@ final class DownloadsViewModel {
     var groups: [DownloadMediaGroup] = []
     var tasks: [DownloadTask] = []
     var isLoading = false
-    var errorMessage: String?
+    var rootError: AppError?
+
+    var errorMessage: String? {
+        rootError?.errorDescription
+    }
 
     private let appState: AppState
     private let downloadManager: any DownloadManaging
@@ -66,46 +106,55 @@ final class DownloadsViewModel {
         do {
             let latestTasks = try await downloadManager.listDownloads()
             guard !Task.isCancelled else { return }
-            tasks = latestTasks
-            groups = buildGroups(from: latestTasks)
-            errorMessage = nil
+            applyTasks(latestTasks)
         } catch is CancellationError {
             return
         } catch {
             guard !Task.isCancelled else { return }
-            errorMessage = error.localizedDescription
+            rootError = AppError(error)
         }
     }
 
     func cancel(_ task: DownloadTask) async {
         await downloadManager.cancelDownload(id: task.id)
-        await load()
+        applyTasks(tasks.map { existing in
+            guard existing.id == task.id else { return existing }
+            var updated = existing
+            updated.status = .cancelled
+            return updated
+        })
     }
 
     func retry(_ task: DownloadTask) async {
         do {
             try await downloadManager.retryDownload(id: task.id)
-            await load()
+            applyTasks(tasks.map { existing in
+                guard existing.id == task.id else { return existing }
+                var updated = existing
+                updated.status = .queued
+                updated.errorMessage = nil
+                return updated
+            })
         } catch {
-            errorMessage = error.localizedDescription
+            rootError = AppError(error)
         }
     }
 
     func remove(_ task: DownloadTask) async {
         do {
             try await downloadManager.removeDownload(id: task.id)
-            await load()
+            applyTasks(tasks.filter { $0.id != task.id })
         } catch {
-            errorMessage = error.localizedDescription
+            rootError = AppError(error)
         }
     }
 
     func removeAll(mediaId: String) async {
         do {
             try await downloadManager.removeDownloads(mediaId: mediaId)
-            await load()
+            applyTasks(tasks.filter { $0.mediaId != mediaId })
         } catch {
-            errorMessage = error.localizedDescription
+            rootError = AppError(error)
         }
     }
 
@@ -134,6 +183,13 @@ final class DownloadsViewModel {
         )
         appState.activePlayerSession = request
         #endif
+    }
+
+    private func applyTasks(_ latestTasks: [DownloadTask]) {
+        let sanitizedTasks = latestTasks.map(sanitizedTask)
+        tasks = sanitizedTasks
+        groups = buildGroups(from: sanitizedTasks)
+        rootError = nil
     }
 
     private func buildGroups(from tasks: [DownloadTask]) -> [DownloadMediaGroup] {
@@ -165,6 +221,19 @@ final class DownloadsViewModel {
                 }
                 return sorted
             }
-            .sorted { $0.tasks.first?.updatedAt ?? .distantPast > $1.tasks.first?.updatedAt ?? .distantPast }
+            .sorted {
+                DownloadProgressPolicy.latestUpdatedAt(in: $0.tasks) > DownloadProgressPolicy.latestUpdatedAt(in: $1.tasks)
+            }
+    }
+
+    private func sanitizedTask(_ task: DownloadTask) -> DownloadTask {
+        var updated = task
+        updated.progress = DownloadProgressPolicy.normalizedProgress(
+            progress: task.progress,
+            bytesWritten: task.bytesWritten,
+            totalBytes: task.totalBytes,
+            status: task.status
+        )
+        return updated
     }
 }

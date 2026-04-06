@@ -58,4 +58,18 @@ struct JSONValueParsingTests {
         #expect(JSONValueParsing.extractInfoHash(from: nil) == nil)
         #expect(JSONValueParsing.extractInfoHash(from: "") == nil)
     }
+
+    @Test
+    func extractInfoHashFromURLPathFallback() {
+        let torrentURL = "https://torrentio.strem.fun/resolve/realdebrid/0123456789ABCDEF0123456789ABCDEF0123456789/magic.mkv"
+        let hash = JSONValueParsing.extractInfoHash(from: torrentURL)
+        #expect(hash == "0123456789abcdef0123456789abcdef0123456789")
+    }
+
+    @Test
+    func extractInfoHashFromQueryFallback() {
+        let torrentURL = "https://cdn.example.com/stream?source=rd&hash=ABCDEF1234567890ABCDEF1234567890ABCDEF12&quality=1080p"
+        let hash = JSONValueParsing.extractInfoHash(from: torrentURL)
+        #expect(hash == "abcdef1234567890abcdef1234567890abcdef12")
+    }
 }

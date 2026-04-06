@@ -158,11 +158,12 @@ actor EnvironmentCatalogManager {
             guard Self.hdriExtensions.contains(ext) else { continue }
             let fileURL = URL(fileURLWithPath: asset.assetPath)
             guard fileManager.fileExists(atPath: fileURL.path) else { continue }
-            if let yaw = await HDRIOrientationAnalyzer.detectScreenYaw(at: fileURL) {
-                var updated = asset
-                updated.hdriYawOffset = yaw
-                try await database.saveEnvironmentAsset(updated)
-            }
+            let resolvedYawOffset = Self.resolveHdriYawOffset(
+                from: await HDRIOrientationAnalyzer.detectScreenYaw(at: fileURL)
+            )
+            var updated = asset
+            updated.hdriYawOffset = resolvedYawOffset
+            try await database.saveEnvironmentAsset(updated)
         }
 
         notifyEnvironmentsChanged()
@@ -306,7 +307,9 @@ actor EnvironmentCatalogManager {
         // Auto-detect yaw for HDRI files when no explicit offset was provided.
         let resolvedYawOffset: Float?
         if hdriYawOffset == nil, Self.hdriExtensions.contains(ext) {
-            resolvedYawOffset = await HDRIOrientationAnalyzer.detectScreenYaw(at: targetURL)
+            resolvedYawOffset = Self.resolveHdriYawOffset(
+                from: await HDRIOrientationAnalyzer.detectScreenYaw(at: targetURL)
+            )
         } else {
             resolvedYawOffset = hdriYawOffset
         }
@@ -422,6 +425,10 @@ actor EnvironmentCatalogManager {
         #else
         return true
         #endif
+    }
+
+    static func resolveHdriYawOffset(from detectedYaw: Float?) -> Float {
+        detectedYaw ?? 0
     }
 
     private static func validateExtension(_ ext: String) throws {

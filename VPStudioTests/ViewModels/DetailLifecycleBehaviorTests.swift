@@ -4,6 +4,24 @@ import Testing
 
 @Suite("Detail Lifecycle Behavior", .serialized)
 struct DetailLifecycleBehaviorTests {
+    @MainActor
+    private func makeIsolatedAppState() async throws -> (AppState, URL) {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        let dbPath = tempDir.appendingPathComponent("detail-lifecycle.sqlite").path
+        let database = try DatabaseManager(path: dbPath)
+        try await database.migrate()
+        let secretStore = TestSecretStore()
+        let settingsManager = SettingsManager(database: database, secretStore: secretStore)
+        let appState = AppState(
+            database: database,
+            secretStore: secretStore,
+            settingsManager: settingsManager
+        )
+        return (appState, tempDir)
+    }
+
     @Test
     @MainActor
     func searchPublishesInitialBatchAndLoadMoreRevealsTenAtATime() async {
@@ -127,6 +145,209 @@ struct DetailLifecycleBehaviorTests {
 
     @Test
     @MainActor
+    func loadDetailRestoresEpisodeFromPreviewContextInsteadOfResettingToSeasonOneEpisodeOne() async {
+        let appState = AppState()
+        let metadata = TestDetailMetadataProvider(
+            detailResult: MediaItem(id: "ttyoungpope", type: .series, title: "The Young Pope", tmdbId: 123),
+            seasonsResult: [
+                Season(id: 1, seasonNumber: 1, name: "Season 1", overview: nil, posterPath: nil, episodeCount: 10, airDate: nil),
+                Season(id: 2, seasonNumber: 2, name: "Season 2", overview: nil, posterPath: nil, episodeCount: 10, airDate: nil)
+            ],
+            episodesBySeason: [
+                2: [
+                    Episode(id: "123-s2e4", mediaId: "tmdb-123", seasonNumber: 2, episodeNumber: 4, title: "Episode 4", overview: nil, airDate: nil, stillPath: nil, runtime: nil),
+                    Episode(id: "123-s2e5", mediaId: "tmdb-123", seasonNumber: 2, episodeNumber: 5, title: "Episode 5", overview: nil, airDate: nil, stillPath: nil, runtime: nil)
+                ]
+            ]
+        )
+
+        let viewModel = DetailViewModel(
+            appState: appState,
+            metadataProviderFactory: { _ in metadata },
+            indexerManager: StubIndexerManager(),
+            debridManager: StubDebridManager(),
+            downloadManager: StubDownloadManager()
+        )
+
+        let preview = MediaPreview(
+            id: "ttyoungpope",
+            type: .series,
+            title: "The Young Pope",
+            tmdbId: 123,
+            episodeId: "123-s2e5"
+        )
+
+        await viewModel.loadDetail(preview: preview, apiKey: "")
+
+        #expect(viewModel.selectedSeason == 2)
+        #expect(viewModel.selectedEpisode?.episodeNumber == 5)
+    }
+
+    @Test
+    @MainActor
+    func reloadLibraryStateRefreshesStoredWatchHistoryAndEpisodeStates() async throws {
+        let (appState, tempDir) = try await makeIsolatedAppState()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        try await appState.database.saveWatchHistory(
+            WatchHistory(
+                id: "young-pope-history",
+                mediaId: "ttyoungpope",
+                episodeId: "ttyoungpope-s1e2",
+                title: "Episode 2",
+                progress: 3600,
+                duration: 3600,
+                watchedAt: Date(),
+                isCompleted: true
+            )
+        )
+
+        let viewModel = DetailViewModel(
+            appState: appState,
+            indexerManager: StubIndexerManager(),
+            debridManager: StubDebridManager(),
+            downloadManager: StubDownloadManager()
+        )
+        viewModel.setPreviewContext(
+            MediaPreview(
+                id: "ttyoungpope",
+                type: .series,
+                title: "The Young Pope"
+            )
+        )
+
+        await viewModel.reloadLibraryState()
+
+        #expect(viewModel.watchHistory?.episodeId == "ttyoungpope-s1e2")
+        #expect(viewModel.episodeWatchStates["ttyoungpope-s1e2"]?.isCompleted == true)
+    }
+
+    @Test
+    @MainActor
+    func resolveStreamUsesSelectedEpisodeContextForSeries() async {
+        let appState = AppState()
+        let debrid = StubDebridManager()
+        let viewModel = DetailViewModel(
+            appState: appState,
+            indexerManager: StubIndexerManager(),
+            debridManager: debrid,
+            downloadManager: StubDownloadManager()
+        )
+        viewModel.mediaItem = MediaItem(id: "ttyoungpope", type: .series, title: "The Young Pope")
+        viewModel.selectedEpisode = Episode(
+            id: "123-s1e5",
+            mediaId: "ttyoungpope",
+            seasonNumber: 1,
+            episodeNumber: 5,
+            title: "Episode 5",
+            overview: nil,
+            airDate: nil,
+            stillPath: nil,
+            runtime: nil
+        )
+
+        let torrent = Fixtures.torrent(hash: "young-pope-pack", title: "The.Young.Pope.S01.Pack")
+        _ = await viewModel.resolveStream(torrent: torrent)
+
+        #expect(await debrid.lastResolvedHash == "young-pope-pack")
+        #expect(await debrid.lastResolvedSeasonNumber == 1)
+        #expect(await debrid.lastResolvedEpisodeNumber == 5)
+    }
+
+    @Test
+    @MainActor
+    func resolveStreamAttachesRecoveryContextForDebridLinkRefresh() async {
+        let appState = AppState()
+        let debrid = StubDebridManager()
+        await debrid.setResolvedStream(
+            Fixtures.stream(debridService: DebridServiceType.allDebrid.rawValue)
+        )
+        let viewModel = DetailViewModel(
+            appState: appState,
+            indexerManager: StubIndexerManager(),
+            debridManager: debrid,
+            downloadManager: StubDownloadManager()
+        )
+        viewModel.mediaItem = MediaItem(id: "ttyoungpope", type: .series, title: "The Young Pope")
+        viewModel.selectedEpisode = Episode(
+            id: "123-s1e5",
+            mediaId: "ttyoungpope",
+            seasonNumber: 1,
+            episodeNumber: 5,
+            title: "Episode 5",
+            overview: nil,
+            airDate: nil,
+            stillPath: nil,
+            runtime: nil
+        )
+
+        let torrent = Fixtures.torrent(hash: "YOUNG-POPE-PACK", title: "The.Young.Pope.S01.Pack")
+        let stream = await viewModel.resolveStream(torrent: torrent)
+
+        #expect(stream?.recoveryContext?.infoHash == "young-pope-pack")
+        #expect(stream?.recoveryContext?.preferredService == .allDebrid)
+        #expect(stream?.recoveryContext?.seasonNumber == 1)
+        #expect(stream?.recoveryContext?.episodeNumber == 5)
+        #expect(viewModel.debridResolver.streams.first?.recoveryContext == stream?.recoveryContext)
+    }
+
+    @Test
+    @MainActor
+    func loadDetailFallsBackToMostRecentEpisodeHistoryForSeries() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        let db = try DatabaseManager(path: tempDir.appendingPathComponent("detail-history.sqlite").path)
+        try await db.migrate()
+
+        let history = WatchHistory(
+            id: "ttyoungpope-123-s2e4-progress",
+            mediaId: "ttyoungpope",
+            episodeId: "123-s2e4",
+            title: "Episode 4",
+            progress: 1200,
+            duration: 3600,
+            quality: nil,
+            debridService: nil,
+            streamURL: nil,
+            watchedAt: Date(),
+            isCompleted: false
+        )
+        try await db.saveWatchHistory(history)
+
+        let appState = AppState(database: db)
+        let metadata = TestDetailMetadataProvider(
+            detailResult: MediaItem(id: "ttyoungpope", type: .series, title: "The Young Pope", tmdbId: 123),
+            seasonsResult: [
+                Season(id: 1, seasonNumber: 1, name: "Season 1", overview: nil, posterPath: nil, episodeCount: 10, airDate: nil),
+                Season(id: 2, seasonNumber: 2, name: "Season 2", overview: nil, posterPath: nil, episodeCount: 10, airDate: nil)
+            ],
+            episodesBySeason: [
+                2: [
+                    Episode(id: "123-s2e4", mediaId: "tmdb-123", seasonNumber: 2, episodeNumber: 4, title: "Episode 4", overview: nil, airDate: nil, stillPath: nil, runtime: nil),
+                    Episode(id: "123-s2e5", mediaId: "tmdb-123", seasonNumber: 2, episodeNumber: 5, title: "Episode 5", overview: nil, airDate: nil, stillPath: nil, runtime: nil)
+                ]
+            ]
+        )
+
+        let viewModel = DetailViewModel(
+            appState: appState,
+            metadataProviderFactory: { _ in metadata },
+            indexerManager: StubIndexerManager(),
+            debridManager: StubDebridManager(),
+            downloadManager: StubDownloadManager()
+        )
+
+        let preview = MediaPreview(id: "ttyoungpope", type: .series, title: "The Young Pope", tmdbId: 123)
+
+        await viewModel.loadDetail(preview: preview, apiKey: "")
+
+        #expect(viewModel.selectedSeason == 2)
+        #expect(viewModel.selectedEpisode?.episodeNumber == 4)
+    }
+
+    @Test
+    @MainActor
     func selectingAnotherEpisodeCancelsInFlightSearchAndSuppressesStaleResults() async {
         let appState = AppState()
         let staleResult = Fixtures.torrent(hash: "stale-episode-hash", title: "Old.Episode.Result")
@@ -188,6 +409,22 @@ struct DetailLifecycleBehaviorTests {
             )
         }
     }
+}
+
+private actor TestDetailMetadataProvider: DetailMetadataProviding {
+    let detailResult: MediaItem
+    let seasonsResult: [Season]
+    let episodesBySeason: [Int: [Episode]]
+
+    init(detailResult: MediaItem, seasonsResult: [Season], episodesBySeason: [Int: [Episode]]) {
+        self.detailResult = detailResult
+        self.seasonsResult = seasonsResult
+        self.episodesBySeason = episodesBySeason
+    }
+
+    func getDetail(id: String, type: MediaType) async throws -> MediaItem { detailResult }
+    func getSeasons(tmdbId: Int) async throws -> [Season] { seasonsResult }
+    func getEpisodes(tmdbId: Int, season: Int) async throws -> [Episode] { episodesBySeason[season] ?? [] }
 }
 
 private actor FixedDetailIndexerManager: DetailIndexerManaging {

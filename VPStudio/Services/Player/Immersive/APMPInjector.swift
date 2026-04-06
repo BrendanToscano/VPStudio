@@ -82,6 +82,24 @@ final class APMPInjector {
         displayLayer = nil
         isActive = false
     }
+
+    nonisolated static func stereoMetadataExtensions(for mode: APMPInjector.Mode) -> [String: Any] {
+        var extensions: [String: Any] = [
+            "ProjectionKind": "Rectilinear",
+            "HasLeftStereoEyeView": true,
+            "HasRightStereoEyeView": true,
+            "HeroStereoEye": "Left"
+        ]
+
+        switch mode {
+        case .sideBySide:
+            extensions["ViewPackingKind"] = "SideBySide"
+        case .overUnder:
+            extensions["ViewPackingKind"] = "OverUnder"
+        }
+
+        return extensions
+    }
 }
 
 // MARK: - CADisplayLink trampoline (avoids retain cycle)
@@ -102,6 +120,7 @@ private final class DisplayLinkTarget: NSObject, @unchecked Sendable {
     private var stereoFormatDesc: CMVideoFormatDescription?
     private var cachedWidth: Int = 0
     private var cachedHeight: Int = 0
+    private var cachedMode: APMPInjector.Mode? = nil
 
     init(
         output: AVPlayerItemVideoOutput,
@@ -173,29 +192,18 @@ private final class DisplayLinkTarget: NSObject, @unchecked Sendable {
         let width = CVPixelBufferGetWidth(pixelBuffer)
         let height = CVPixelBufferGetHeight(pixelBuffer)
 
-        if let cached = stereoFormatDesc, width == cachedWidth, height == cachedHeight {
+        if let cached = stereoFormatDesc,
+           width == cachedWidth,
+           height == cachedHeight,
+           cachedMode == mode {
             return cached
         }
 
         cachedWidth = width
         cachedHeight = height
+        cachedMode = mode
 
-        // Build extensions dictionary with stereo metadata.
-        // These keys are read by the visionOS spatial compositor via
-        // AVSampleBufferVideoRenderer to determine eye-view layout.
-        var extensions: [String: Any] = [
-            "ProjectionKind": "Rectilinear",
-            "HasLeftStereoEyeView": true,
-            "HasRightStereoEyeView": true,
-            "HeroStereoEye": "Left",
-        ]
-        switch mode {
-        case .sideBySide:
-            extensions["ViewPackingKind"] = "SideBySide"
-        case .overUnder:
-            extensions["ViewPackingKind"] = "OverUnder"
-        }
-
+        let extensions = APMPInjector.stereoMetadataExtensions(for: mode)
         let pixelFormat = CVPixelBufferGetPixelFormatType(pixelBuffer)
         var desc: CMVideoFormatDescription?
         let status = CMVideoFormatDescriptionCreate(
@@ -214,6 +222,7 @@ private final class DisplayLinkTarget: NSObject, @unchecked Sendable {
             stereoFormatDesc = nil
             cachedWidth = 0
             cachedHeight = 0
+            cachedMode = nil
             logger.warning(
                 "Failed to create stereo format description: OSStatus \(status), \(width)x\(height)"
             )

@@ -1,4 +1,5 @@
 import Foundation
+import Observation
 import SwiftUI
 import Testing
 @testable import VPStudio
@@ -84,6 +85,41 @@ struct SearchViewModelPerformanceTests {
             }
             await Task.yield()
             try await Task.sleep(for: .milliseconds(50))
+        }
+    }
+
+    @MainActor
+    private final class ObservationCounter {
+        var invalidationCount = 0
+    }
+
+    @MainActor
+    private static func trackHasQueryText(
+        _ viewModel: SearchViewModel,
+        counter: ObservationCounter
+    ) {
+        _ = withObservationTracking {
+            viewModel.hasQueryText
+        } onChange: {
+            Task { @MainActor in
+                counter.invalidationCount += 1
+                Self.trackHasQueryText(viewModel, counter: counter)
+            }
+        }
+    }
+
+    @MainActor
+    private static func trackHasAttemptedTextSearch(
+        _ viewModel: SearchViewModel,
+        counter: ObservationCounter
+    ) {
+        _ = withObservationTracking {
+            viewModel.hasAttemptedTextSearch
+        } onChange: {
+            Task { @MainActor in
+                counter.invalidationCount += 1
+                Self.trackHasAttemptedTextSearch(viewModel, counter: counter)
+            }
         }
     }
 
@@ -246,6 +282,172 @@ struct SearchViewModelPerformanceTests {
     func defaultDebounceIntervalIs300ms() {
         let viewModel = SearchViewModel()
         #expect(viewModel.debounceInterval == .milliseconds(300))
+    }
+
+    // MARK: - Observation Scope Tests
+
+    @Test
+    @MainActor
+    func explorePhaseObservationIgnoresResultsChurnWhilePhaseStaysResults() async {
+        @MainActor
+        final class ObservationProbe {
+            var invalidated = false
+        }
+
+        let viewModel = SearchViewModel()
+        let probe = ObservationProbe()
+        viewModel.results = [Fixtures.mediaPreview(id: "result-1")]
+        #expect(viewModel.explorePhase == .results)
+
+        _ = withObservationTracking {
+            viewModel.explorePhase
+        } onChange: {
+            Task { @MainActor in
+                probe.invalidated = true
+            }
+        }
+
+        viewModel.results.append(Fixtures.mediaPreview(id: "result-2"))
+        await Task.yield()
+
+        #expect(viewModel.explorePhase == .results)
+        #expect(probe.invalidated == false)
+    }
+
+    @Test
+    @MainActor
+    func explorePhaseObservationIgnoresRawQueryTypingBeforeSearchStarts() async {
+        @MainActor
+        final class ObservationProbe {
+            var invalidated = false
+        }
+
+        let viewModel = SearchViewModel()
+        let probe = ObservationProbe()
+        #expect(viewModel.explorePhase == .idle)
+
+        _ = withObservationTracking {
+            viewModel.explorePhase
+        } onChange: {
+            Task { @MainActor in
+                probe.invalidated = true
+            }
+        }
+
+        viewModel.query = "inception"
+        await Task.yield()
+
+        #expect(viewModel.explorePhase == .idle)
+        #expect(probe.invalidated == false)
+    }
+
+    @Test
+    @MainActor
+    func hasQueryTextOnlyInvalidatesAtEmptyBoundary() async {
+        let viewModel = SearchViewModel()
+        let counter = ObservationCounter()
+
+        Self.trackHasQueryText(viewModel, counter: counter)
+
+        viewModel.query = "i"
+        await Task.yield()
+        #expect(viewModel.hasQueryText == true)
+        #expect(counter.invalidationCount == 1)
+
+        viewModel.query = "in"
+        await Task.yield()
+        #expect(viewModel.hasQueryText == true)
+        #expect(counter.invalidationCount == 1)
+
+        viewModel.query = ""
+        await Task.yield()
+        #expect(viewModel.hasQueryText == false)
+        #expect(counter.invalidationCount == 2)
+    }
+
+    @Test
+    @MainActor
+    func hasAttemptedTextSearchOnlyInvalidatesOnSubmitBoundary() async {
+        let viewModel = SearchViewModel()
+        let counter = ObservationCounter()
+
+        Self.trackHasAttemptedTextSearch(viewModel, counter: counter)
+
+        viewModel.query = "i"
+        await Task.yield()
+        #expect(viewModel.hasAttemptedTextSearch == false)
+        #expect(counter.invalidationCount == 0)
+
+        viewModel.search()
+        await Task.yield()
+        #expect(viewModel.hasAttemptedTextSearch == true)
+        #expect(counter.invalidationCount == 1)
+
+        viewModel.query = "in"
+        await Task.yield()
+        #expect(viewModel.hasAttemptedTextSearch == false)
+        #expect(counter.invalidationCount == 2)
+
+        viewModel.query = "int"
+        await Task.yield()
+        #expect(viewModel.hasAttemptedTextSearch == false)
+        #expect(counter.invalidationCount == 2)
+    }
+
+    @Test
+    @MainActor
+    func debouncedSearchWithoutConfigurationKeepsIdleTypingState() async {
+        let viewModel = SearchViewModel()
+        viewModel.query = "inception"
+
+        viewModel.debouncedSearch()
+        try? await Task.sleep(for: .milliseconds(350))
+
+        #expect(viewModel.hasAttemptedTextSearch == false)
+        #expect(viewModel.explorePhase == .idle)
+        #expect(viewModel.submittedQuery.isEmpty)
+    }
+
+    @Test
+    @MainActor
+    func queryDraftOnlyCommitsIntoQueryWhenSearchExecutes() async throws {
+        let stub = CountingMetadataStub()
+        await stub.setSearchResults([
+            1: MetadataSearchResult(items: [Fixtures.mediaPreview(id: "draft-query-result")], page: 1, totalPages: 1, totalResults: 1)
+        ])
+
+        let viewModel = SearchViewModel(metadataService: stub, debounceInterval: .milliseconds(80))
+        viewModel.queryDraft = "inception"
+
+        #expect(viewModel.query.isEmpty)
+
+        viewModel.debouncedSearch()
+        #expect(viewModel.query.isEmpty)
+
+        try await Self.waitUntil(timeout: .milliseconds(500)) { !viewModel.results.isEmpty }
+
+        #expect(viewModel.query == "inception")
+        let lastQuery = await stub.getLastSearchQuery()
+        #expect(lastQuery == "inception")
+    }
+
+    @Test
+    @MainActor
+    func clearingQueryDraftClearsCommittedQueryAndResultsAtEmptyBoundary() {
+        let viewModel = SearchViewModel(metadataService: CountingMetadataStub())
+        viewModel.query = "interstellar"
+        viewModel.search()
+        viewModel.results = [Fixtures.mediaPreview(id: "existing-result")]
+        viewModel.error = .network(.transport("Search failed."))
+
+        viewModel.queryDraft = ""
+
+        #expect(viewModel.query.isEmpty)
+        #expect(viewModel.results.isEmpty)
+        #expect(viewModel.error == nil)
+        #expect(viewModel.hasQueryText == false)
+        #expect(viewModel.submittedQuery.isEmpty)
+        #expect(viewModel.explorePhase == .idle)
     }
 
     // MARK: - Search Generation Tests

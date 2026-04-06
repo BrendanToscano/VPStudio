@@ -3,6 +3,9 @@ enum AIProviderKind: String, Codable, CaseIterable, Sendable, Identifiable, Hash
     case openAI = "openai"
     case anthropic = "anthropic"
     case ollama = "ollama"
+    case gemini = "gemini"
+    case openRouter = "openrouter"
+    case local = "local"
 
     var id: String { rawValue }
 
@@ -11,6 +14,9 @@ enum AIProviderKind: String, Codable, CaseIterable, Sendable, Identifiable, Hash
         case .openAI: return "OpenAI"
         case .anthropic: return "Anthropic"
         case .ollama: return "Ollama"
+        case .gemini: return "Google Gemini"
+        case .openRouter: return "OpenRouter"
+        case .local: return "On-Device (Local)"
         }
     }
 }

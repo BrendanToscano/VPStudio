@@ -138,11 +138,20 @@ enum TorrentRanking {
         case .unknown: break
         }
 
-        // --- User preferences (0-80) ---
+        // --- User preferences (small boosts; must not override resolution tier) ---
         if preferCached && torrent.isCached {
-            score += 80
+            switch torrent.quality {
+            case .uhd4k:
+                score += 80
+            case .hd1080p:
+                score += 70
+            case .hd720p:
+                score += 60
+            default:
+                score += 50
+            }
         } else if torrent.isCached {
-            score += 40
+            score += 20
         }
         if preferAtmos && torrent.audio.spatialAudioHint { score += 20 }
         switch hdrPreference {

@@ -450,7 +450,7 @@ struct EnvironmentCatalogTests {
         #expect(stored?.hdriYawOffset == 45.0)
     }
 
-    @Test func importWithNilYawOffsetPersistsAsNil() async throws {
+    @Test func importWithNilYawOffsetNormalizesToZero() async throws {
         let (database, rootDir) = try await makeDatabase(named: "environment-catalog-yaw-nil.sqlite")
         defer { try? FileManager.default.removeItem(at: rootDir) }
 
@@ -473,7 +473,7 @@ struct EnvironmentCatalogTests {
         let stored = assets.first(where: { $0.id == imported.id })
 
         #expect(stored != nil)
-        #expect(stored?.hdriYawOffset == nil)
+        #expect(stored?.hdriYawOffset == 0)
     }
 
     @Test func curatedPresetPassesYawOffsetThrough() async throws {
@@ -509,7 +509,7 @@ struct EnvironmentCatalogTests {
         #expect(stored?.hdriYawOffset == -30.0)
     }
 
-    @Test func localImportDefaultsYawOffsetToNil() async throws {
+    @Test func localImportDefaultsYawOffsetToZero() async throws {
         let (database, rootDir) = try await makeDatabase(named: "environment-catalog-local-yaw.sqlite")
         defer { try? FileManager.default.removeItem(at: rootDir) }
 
@@ -523,7 +523,7 @@ struct EnvironmentCatalogTests {
         try Data("fake-hdr".utf8).write(to: source)
 
         let imported = try await manager.importEnvironment(from: source)
-        #expect(imported.hdriYawOffset == nil, "Local imports should default to nil yaw offset")
+        #expect(imported.hdriYawOffset == 0, "Local imports should default to zero yaw offset")
     }
 
     @Test func hdriYawOffsetDatabaseMigrationAddsColumn() async throws {

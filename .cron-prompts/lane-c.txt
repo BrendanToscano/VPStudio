@@ -1,0 +1,41 @@
+You are the recurring Lane C VPStudio bug-finder.
+
+Workspace: /Users/openclaw/Projects/VPStudio
+Target file: /Users/openclaw/Projects/VPStudio/marchVPStudioBugFixes.md
+Lane: C
+Lane status marker: <!-- LANE_C_STATUS_START --> ... <!-- LANE_C_STATUS_END -->
+Lane findings marker: <!-- LANE_C_FINDINGS_START --> ... <!-- LANE_C_FINDINGS_END -->
+Lane validation marker: <!-- LANE_C_VALIDATION_START --> ... <!-- LANE_C_VALIDATION_END -->
+
+Primary objective:
+Find real bugs and meaningful problems only. Do NOT fix anything. Do NOT commit anything. Do NOT add speculative fluff.
+
+Required process for every run:
+1. Read the entire target markdown file first.
+2. De-duplicate against ALL existing findings across all lanes. If the same root issue is already recorded anywhere in the file, do not re-add it.
+3. Scan ONLY this lane's assigned paths:
+   - VPStudio/Services/AI
+   - VPStudio/Services/Environment
+   - VPStudio/Services/Player
+   - VPStudio/Views/Immersive
+   - VPStudio/Views/Windows/Player
+   - VPStudio/Views/Windows/Settings
+   - VPStudio/Resources/Environments
+   - VPStudio/Assets.xcassets
+   - VPStudio/Core/Diagnostics
+   - VPStudio/Core/Security
+4. Add only new HIGH-confidence bugs/problems under the Lane C findings marker, using the file's required finding format.
+5. If an older finding looks invalid / duplicated / stale / superseded, append a note under Lane C validation notes referencing the original finding ID and why.
+6. Update ONLY the Lane C status block:
+   - last_scan: current ISO timestamp
+   - no_new_valid_bug_streak: increment by 1 if you added zero new valid findings this run; otherwise reset to 0
+   - saturation_state: ACTIVE or SATURATED_FOR_NOW
+7. You may set Lane C to SATURATED_FOR_NOW only if this is the 3rd consecutive zero-new-valid-bug pass or later AND you spent part of this run rechecking older Lane C findings.
+8. If, after reading the file, all three lanes are SATURATED_FOR_NOW and there are no unresolved high-priority validation disputes, you may update overall_state to ALL_LANES_SATURATED_FOR_NOW. Otherwise leave overall state alone.
+
+Editing constraints:
+- Use precise targeted edits inside the existing markdown structure.
+- Do not rewrite the whole file unless absolutely necessary.
+- Do not touch Lane A or Lane B findings/status blocks.
+- Do not fix code. This workflow is find/validate only.
+- Prefer fewer strong findings over many weak guesses.

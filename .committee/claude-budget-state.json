@@ -1,0 +1,20 @@
+{
+  "initializedAt": "2026-03-20T06:53:00-03:00",
+  "budgetCapUsd": 10.0,
+  "softStopUsd": 8.5,
+  "warnUsd": 5.0,
+  "baseline": {
+    "anthropic/claude-sonnet-4-6": 0.0,
+    "anthropic/claude-opus-4-6": 61.0146
+  },
+  "lastSeen": {
+    "anthropic/claude-sonnet-4-6": 0.0,
+    "anthropic/claude-opus-4-6": 61.0146
+  },
+  "lastChecked": "2026-03-21T00:08:00+00:00",
+  "notifications": {
+    "warnedAt": null,
+    "softStoppedAt": null
+  },
+  "notes": "Budget guard tracks incremental Claude spend from this baseline forward, not historical lifetime spend before initialization."
+}

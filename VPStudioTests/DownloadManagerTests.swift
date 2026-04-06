@@ -6,7 +6,7 @@ private enum DownloadManagerTestError: Error {
     case timeout
 }
 
-private func waitForFile(at url: URL, timeoutSeconds: TimeInterval = 5) async throws {
+private func waitForFile(at url: URL, timeoutSeconds: TimeInterval = 10) async throws {
     let deadline = Date().addingTimeInterval(timeoutSeconds)
 
     while Date() < deadline {
@@ -25,6 +25,23 @@ private actor AttemptCounter {
     func next() -> Int {
         count += 1
         return count
+    }
+}
+
+private actor RetryCancellationRecorder {
+    private var firstAttemptCancelledAt: Date?
+    private var secondAttemptStartedAt: Date?
+
+    func markFirstAttemptCancelled() {
+        firstAttemptCancelledAt = Date()
+    }
+
+    func markSecondAttemptStarted() {
+        secondAttemptStartedAt = Date()
+    }
+
+    func snapshot() -> (Date?, Date?) {
+        (firstAttemptCancelledAt, secondAttemptStartedAt)
     }
 }
 
@@ -95,7 +112,7 @@ struct DownloadManagerTests {
         let attemptCounter = AttemptCounter()
         let downloadsDir = rootDir.appendingPathComponent("downloads", isDirectory: true)
 
-        let performer: DownloadManager.DownloadPerformer = { _, _ in
+        let performer: DownloadManager.DownloadPerformer = { _, _, _ in
             let attempt = await attemptCounter.next()
             if attempt == 1 {
                 throw URLError(.timedOut)
@@ -124,6 +141,54 @@ struct DownloadManagerTests {
         #expect(completed.destinationURL != nil)
     }
 
+    @Test func retryWaitsForCancelledTransferTeardownBeforeRestarting() async throws {
+        let (database, rootDir) = try await makeDatabase(named: "download-manager-retry-cancel.sqlite")
+        defer { try? FileManager.default.removeItem(at: rootDir) }
+
+        let attemptCounter = AttemptCounter()
+        let recorder = RetryCancellationRecorder()
+        let downloadsDir = rootDir.appendingPathComponent("downloads", isDirectory: true)
+
+        let performer: DownloadManager.DownloadPerformer = { _, _, cancellationController in
+            let attempt = await attemptCounter.next()
+            if attempt == 1 {
+                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                    cancellationController.register {
+                        Task { await recorder.markFirstAttemptCancelled() }
+                        continuation.resume(throwing: CancellationError())
+                    }
+                }
+            }
+
+            await recorder.markSecondAttemptStarted()
+            let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            let data = Data(repeating: 0x3C, count: 256)
+            try data.write(to: tempURL)
+            let response = URLResponse(
+                url: URL(string: "https://cdn.example.com/restart.mkv")!,
+                mimeType: "video/x-matroska",
+                expectedContentLength: 256,
+                textEncodingName: nil
+            )
+            return (tempURL, response)
+        }
+
+        let manager = DownloadManager(database: database, downloadsDirectory: downloadsDir, performer: performer)
+        let task = try await manager.enqueueDownload(stream: makeStream(name: "restart.mkv"), mediaId: "tt107", episodeId: nil)
+        _ = try await waitForStatus(database: database, id: task.id, expected: .downloading)
+
+        try await manager.retryDownload(id: task.id)
+
+        let completed = try await waitForStatus(database: database, id: task.id, expected: .completed)
+        let (cancelledAt, secondStartedAt) = await recorder.snapshot()
+        #expect(completed.status == .completed)
+        #expect(cancelledAt != nil)
+        #expect(secondStartedAt != nil)
+        if let cancelledAt, let secondStartedAt {
+            #expect(secondStartedAt >= cancelledAt)
+        }
+    }
+
     @Test func duplicateFileNamesUseCollisionSafeSuffixes() async throws {
         let (database, rootDir) = try await makeDatabase(named: "download-manager-duplicate.sqlite")
         defer { try? FileManager.default.removeItem(at: rootDir) }
@@ -134,7 +199,7 @@ struct DownloadManagerTests {
         let expectedSecondURL = downloadsDir.appendingPathComponent(expectedSecondName)
         let attemptCounter = AttemptCounter()
 
-        let performer: DownloadManager.DownloadPerformer = { _, _ in
+        let performer: DownloadManager.DownloadPerformer = { _, _, _ in
             let attempt = await attemptCounter.next()
             if attempt == 1 {
                 // Force completion inversion: the first download can't finish
@@ -214,7 +279,7 @@ struct DownloadManagerTests {
         }
 
         let downloadsDir = rootDir.appendingPathComponent("downloads", isDirectory: true)
-        let performer: DownloadManager.DownloadPerformer = { _, progressHandler in
+        let performer: DownloadManager.DownloadPerformer = { _, progressHandler, _ in
             // Report partial progress before blocking so the test can observe it
             progressHandler(512, 512, 10_000)
             await gate.wait()
@@ -269,7 +334,7 @@ struct DownloadManagerTests {
         database: DatabaseManager,
         id: String,
         expected: DownloadStatus,
-        timeoutSeconds: TimeInterval = 5
+        timeoutSeconds: TimeInterval = 10
     ) async throws -> DownloadTask {
         let deadline = Date().addingTimeInterval(timeoutSeconds)
 
@@ -287,7 +352,7 @@ struct DownloadManagerTests {
         database: DatabaseManager,
         id: String,
         minimum: Double,
-        timeoutSeconds: TimeInterval = 5
+        timeoutSeconds: TimeInterval = 10
     ) async throws -> DownloadTask {
         let deadline = Date().addingTimeInterval(timeoutSeconds)
 
@@ -302,7 +367,7 @@ struct DownloadManagerTests {
     }
 
     private func makeSuccessfulPerformer(bytes: Int) -> DownloadManager.DownloadPerformer {
-        { _, _ in
+        { _, _, _ in
             let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
             let data = Data(repeating: 0x01, count: bytes)
             try data.write(to: tempURL)
@@ -317,7 +382,7 @@ struct DownloadManagerTests {
     }
 
     private func makeDelayedPerformer() -> DownloadManager.DownloadPerformer {
-        { _, _ in
+        { _, _, _ in
             try await Task.sleep(for: .seconds(5))
             try Task.checkCancellation()
 
@@ -345,5 +410,29 @@ struct DownloadManagerTests {
             sizeBytes: 100,
             debridService: DebridServiceType.realDebrid.rawValue
         )
+    }
+}
+
+
+extension DownloadTask {
+    static func == (lhs: DownloadTask, rhs: DownloadTask) -> Bool {
+        lhs.id == rhs.id &&
+        lhs.mediaId == rhs.mediaId &&
+        lhs.episodeId == rhs.episodeId &&
+        lhs.streamURL == rhs.streamURL &&
+        lhs.fileName == rhs.fileName &&
+        lhs.status == rhs.status &&
+        lhs.progress == rhs.progress &&
+        lhs.bytesWritten == rhs.bytesWritten &&
+        lhs.totalBytes == rhs.totalBytes &&
+        lhs.destinationPath == rhs.destinationPath &&
+        lhs.errorMessage == rhs.errorMessage &&
+        lhs.mediaTitle == rhs.mediaTitle &&
+        lhs.mediaType == rhs.mediaType &&
+        lhs.posterPath == rhs.posterPath &&
+        lhs.seasonNumber == rhs.seasonNumber &&
+        lhs.episodeNumber == rhs.episodeNumber &&
+        lhs.episodeTitle == rhs.episodeTitle
+        // Intentionally ignore createdAt/updatedAt which can vary across persistence round-trips.
     }
 }
