@@ -28,7 +28,7 @@ struct SubtitleSettingsView: View {
         .navigationTitle("Subtitles")
         .task { await loadSettings() }
         .onChange(of: openSubsApiKey) { _, newValue in scheduleAPISave(newValue) }
-        .onDisappear { openSubsSaveTask?.cancel(); openSubsSaveTask = nil }
+        .onDisappear { flushOpenSubtitlesKey() }
         .onChange(of: preferredSubtitleLanguage) { _, newValue in
             Task { await persistStringSetting(key: SettingsKeys.subtitleLanguage, value: newValue) }
         }
@@ -50,7 +50,11 @@ struct SubtitleSettingsView: View {
         Section("OpenSubtitles") {
             HStack {
                 SecureField("API Key", text: $openSubsApiKey)
+                    .accessibilityLabel("OpenSubtitles API key")
+                    .accessibilityHint("Enter your OpenSubtitles API key.")
                 PasteFieldButton { openSubsApiKey = $0 }
+                    .accessibilityLabel("Paste OpenSubtitles API key from clipboard")
+                    .accessibilityHint("Pastes the OpenSubtitles API key into the field.")
             }
             Text("Get a key at opensubtitles.com")
                 .font(.caption)
@@ -63,8 +67,12 @@ struct SubtitleSettingsView: View {
         Section("Language Preferences") {
             TextField("Preferred Subtitle Language", text: $preferredSubtitleLanguage)
                 .disableAutomaticTextEntryAdjustments()
+                .accessibilityLabel("Preferred subtitle languages")
+                .accessibilityHint("Enter ISO language codes like en or es. Separate multiple subtitle languages with commas.")
             TextField("Preferred Audio Language", text: $preferredAudioLanguage)
                 .disableAutomaticTextEntryAdjustments()
+                .accessibilityLabel("Preferred audio language")
+                .accessibilityHint("Enter a single ISO language code like en or es.")
             Text("Language codes such as \"en\", \"es\", \"fr\", \"ja\", \"ko\"")
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -75,6 +83,7 @@ struct SubtitleSettingsView: View {
     private var subtitleBehaviorSection: some View {
         Section("Subtitle Behavior") {
             Toggle("Auto-Search Subtitles", isOn: $autoSearch)
+                .accessibilityHint("Automatically searches for subtitles when playback starts.")
         }
     }
 
@@ -88,6 +97,9 @@ struct SubtitleSettingsView: View {
                     .foregroundStyle(.secondary)
             }
             Slider(value: $fontSize, in: 16...48, step: 2)
+                .accessibilityLabel("Subtitle font size")
+                .accessibilityValue("\(Int(fontSize)) points")
+                .accessibilityHint("Adjusts the subtitle font size between 16 and 48 points.")
         }
     }
 
@@ -145,9 +157,22 @@ struct SubtitleSettingsView: View {
         }
     }
 
+    private func flushOpenSubtitlesKey() {
+        openSubsSaveTask?.cancel()
+        openSubsSaveTask = nil
+        Task {
+            await persistStringSetting(key: SettingsKeys.openSubtitlesApiKey, value: openSubsApiKey)
+        }
+    }
+
     private func persistStringSetting(key: String, value: String) async {
         do {
             try await appState.settingsManager.setString(key: key, value: value)
+            if key == SettingsKeys.openSubtitlesApiKey {
+                await MainActor.run {
+                    NotificationCenter.default.post(name: .openSubtitlesDidChange, object: nil)
+                }
+            }
             surfaceError = nil
         } catch {
             surfaceError = AppError(error)

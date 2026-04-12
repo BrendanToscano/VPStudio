@@ -3,10 +3,18 @@ import Foundation
 struct EZTVIndexer: TorrentIndexer {
     let name = "EZTV"
     private let baseURL = "https://eztvx.to/api"
+    private static let requestLimiter = IndexerRequestLimiter()
+    private static let defaultSession: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 20
+        configuration.timeoutIntervalForResource = 60
+        return URLSession(configuration: configuration)
+    }()
+
     private let session: URLSession
 
-    init(session: URLSession = .shared) {
-        self.session = session
+    init(session: URLSession? = nil) {
+        self.session = session ?? Self.defaultSession
     }
 
     func search(imdbId: String, type: MediaType, season: Int?, episode: Int?) async throws -> [TorrentResult] {
@@ -24,10 +32,10 @@ struct EZTVIndexer: TorrentIndexer {
                 URLQueryItem(name: "page", value: String(page)),
             ])
 
-            let (data, response) = try await session.data(from: url)
+            let (data, response) = try await Self.requestLimiter.data(from: url, session: session)
             guard let httpResponse = response as? HTTPURLResponse,
                   (200...299).contains(httpResponse.statusCode) else {
-                break
+                throw URLError(.badServerResponse)
             }
 
             let decoder = JSONDecoder()
@@ -88,7 +96,7 @@ struct EZTVIndexer: TorrentIndexer {
                 URLQueryItem(name: "page", value: String(page)),
             ])
 
-            let (data, response) = try await session.data(from: url)
+            let (data, response) = try await Self.requestLimiter.data(from: url, session: session)
             guard let httpResponse = response as? HTTPURLResponse,
                   (200...299).contains(httpResponse.statusCode) else {
                 throw URLError(.badServerResponse)

@@ -51,7 +51,8 @@ actor TorBoxService: DebridServiceProtocol {
     }
 
     func addMagnet(hash: String) async throws -> String {
-        let magnet = "magnet:?xt=urn:btih:\(hash)"
+        let normalizedHash = try DebridHashValidator.validatedInfoHash(hash)
+        let magnet = "magnet:?xt=urn:btih:\(normalizedHash)"
         let body = "magnet=\(magnet.addingPercentEncoding(withAllowedCharacters: Self.formEncodingAllowed) ?? magnet)"
         let response: TBResponse<TBCreateResponse> = try await request(method: "POST", path: "/torrents/createtorrent", body: body)
         guard let id = response.data?.torrentId else { throw DebridError.invalidHash(hash) }
@@ -80,19 +81,99 @@ actor TorBoxService: DebridServiceProtocol {
               let files = torrent.files else {
             return false
         }
+        return try await selectMatchingEpisodeFile(
+            torrentId: torrentId,
+            seasonNumber: seasonNumber,
+            episodeNumber: episodeNumber,
+            resolvedFileNameHint: nil,
+            resolvedFileSizeHint: nil,
+            files: files
+        )
+    }
+
+    func selectMatchingEpisodeFile(
+        torrentId: String,
+        seasonNumber: Int,
+        episodeNumber: Int,
+        resolvedFileNameHint: String?,
+        resolvedFileSizeHint: Int64?
+    ) async throws -> Bool {
+        let response: TBResponse<TBTorrentInfo> = try await request(
+            method: "GET",
+            path: "/torrents/mylist",
+            queryItems: [URLQueryItem(name: "id", value: torrentId)]
+        )
+        guard let torrent = response.data,
+              let files = torrent.files else {
+            return false
+        }
+        return try await selectMatchingEpisodeFile(
+            torrentId: torrentId,
+            seasonNumber: seasonNumber,
+            episodeNumber: episodeNumber,
+            resolvedFileNameHint: resolvedFileNameHint,
+            resolvedFileSizeHint: resolvedFileSizeHint,
+            files: files
+        )
+    }
+
+    private func selectMatchingEpisodeFile(
+        torrentId: String,
+        seasonNumber: Int,
+        episodeNumber: Int,
+        resolvedFileNameHint: String?,
+        resolvedFileSizeHint: Int64?,
+        files: [TBFile]
+    ) async throws -> Bool {
+        if let exactMatch = bestExactMatch(
+            in: files,
+            resolvedFileNameHint: resolvedFileNameHint,
+            resolvedFileSizeHint: resolvedFileSizeHint
+        ),
+           let fileId = exactMatch.id {
+            try await selectFiles(torrentId: torrentId, fileIds: [fileId])
+            return true
+        }
 
         let matches = files.filter { file in
             guard let name = file.name else { return false }
             return EpisodeTokenMatcher.matches(title: name, season: seasonNumber, episode: episodeNumber)
         }
 
-        guard let bestMatch = matches.max(by: { ($0.size ?? 0) < ($1.size ?? 0) }),
-              let fileId = bestMatch.id else {
-            return false
+        if let bestMatch = matches.max(by: { ($0.size ?? 0) < ($1.size ?? 0) }),
+           let fileId = bestMatch.id {
+            try await selectFiles(torrentId: torrentId, fileIds: [fileId])
+            return true
         }
 
-        try await selectFiles(torrentId: torrentId, fileIds: [fileId])
-        return true
+        if files.count == 1, let fileId = files.first?.id {
+            try await selectFiles(torrentId: torrentId, fileIds: [fileId])
+            return true
+        }
+
+        return false
+    }
+
+    private func bestExactMatch(
+        in files: [TBFile],
+        resolvedFileNameHint: String?,
+        resolvedFileSizeHint: Int64?
+    ) -> TBFile? {
+        guard let normalizedHint = Self.normalizedFileName(resolvedFileNameHint) else {
+            return nil
+        }
+
+        let matches = files.filter { file in
+            Self.normalizedFileName(file.name) == normalizedHint
+        }
+        guard !matches.isEmpty else { return nil }
+
+        if let resolvedFileSizeHint,
+           let exactSize = matches.first(where: { $0.size == resolvedFileSizeHint }) {
+            return exactSize
+        }
+
+        return matches.max(by: { ($0.size ?? 0) < ($1.size ?? 0) })
     }
 
     func getStreamURL(torrentId: String) async throws -> StreamInfo {
@@ -183,11 +264,7 @@ actor TorBoxService: DebridServiceProtocol {
             request.httpBody = Data(body.utf8)
             request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
         }
-        let (data, response) = try await session.data(for: request)
-
-        guard let http = response as? HTTPURLResponse else {
-            throw DebridError.networkError("Invalid response")
-        }
+        let (data, http) = try await DebridHTTPExecutor.data(for: request, session: session)
 
         switch http.statusCode {
         case 200...299:
@@ -202,6 +279,13 @@ actor TorBoxService: DebridServiceProtocol {
         }
 
         return try JSONDecoder().decode(T.self, from: data)
+    }
+
+    private static func normalizedFileName(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        return URL(fileURLWithPath: trimmed).lastPathComponent.lowercased()
     }
 }
 

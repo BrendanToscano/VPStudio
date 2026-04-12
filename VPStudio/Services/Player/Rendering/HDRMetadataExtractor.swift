@@ -40,6 +40,7 @@ enum HDRMetadataExtractor {
 
     /// Extract HDR metadata from the first video track of an asset.
     /// Returns `nil` only when no video track can be loaded.
+    @MainActor
     static func extract(from asset: AVAsset) async -> HDRDisplayMetadata? {
         let tracks: [AVAssetTrack]
         do {

@@ -7,11 +7,15 @@ struct AISettingsView: View {
     @State private var anthropicKey = ""
     @State private var openAIKey = ""
     @State private var geminiKey = ""
+    @State private var openRouterKey = ""
     @State private var ollamaURL = "http://localhost:11434"
     @State private var selectedProvider: AIProviderKind = .anthropic
+    @State private var preferredProvider: AIProviderKind = .anthropic
+    @State private var suppressedProviderSelection: AIProviderKind?
     @State private var anthropicModelID: String = AIModelCatalog.defaultModel(for: .anthropic)?.id ?? ""
     @State private var openAIModelID: String = AIModelCatalog.defaultModel(for: .openAI)?.id ?? ""
     @State private var geminiModelID: String = AIModelCatalog.defaultModel(for: .gemini)?.id ?? ""
+    @State private var openRouterModelID: String = AIModelCatalog.defaultModel(for: .openRouter)?.id ?? ""
     @State private var ollamaModelID: String = AIModelCatalog.defaultModel(for: .ollama)?.id ?? ""
     @State private var feedbackScaleMode: FeedbackScaleMode = .likeDislike
     @State private var likedTitles: [String] = []
@@ -20,11 +24,14 @@ struct AISettingsView: View {
     @State private var anthropicSaveTask: Task<Void, Never>?
     @State private var openAISaveTask: Task<Void, Never>?
     @State private var geminiSaveTask: Task<Void, Never>?
+    @State private var openRouterSaveTask: Task<Void, Never>?
     @State private var feedbackReloadTask: Task<Void, Never>? 
     @State private var sessionUsage: AIUsageSummary = .empty
     @State private var lifetimeUsage: AIUsageSummary = .empty
     @State private var discoverAIEnabled = false
     @State private var aiAutoGenerate = true
+    @State private var isShowingResetStatisticsConfirmation = false
+    @State private var surfaceError: AppError?
 
     // Local on-device models
     @State private var localModelEnabled = false
@@ -35,99 +42,158 @@ struct AISettingsView: View {
     @State private var anthropicModels: [AIModelDefinition] = AIModelCatalog.models(for: .anthropic)
     @State private var openAIModels: [AIModelDefinition] = AIModelCatalog.models(for: .openAI)
     @State private var geminiModels: [AIModelDefinition] = AIModelCatalog.models(for: .gemini)
+    @State private var openRouterModels: [AIModelDefinition] = AIModelCatalog.models(for: .openRouter)
     @State private var ollamaModels: [AIModelDefinition] = AIModelCatalog.models(for: .ollama)
     @State private var isFetchingModels = false
 
     /// Approximate app launch time — used to partition session vs lifetime usage.
     private static let appLaunchDate = Date()
 
+    private var configuredCloudProviders: [AIProviderKind] {
+        var providers: [AIProviderKind] = []
+        if !anthropicKey.trimmedForAISettings.isEmpty { providers.append(.anthropic) }
+        if !openAIKey.trimmedForAISettings.isEmpty { providers.append(.openAI) }
+        if !geminiKey.trimmedForAISettings.isEmpty { providers.append(.gemini) }
+        if !openRouterKey.trimmedForAISettings.isEmpty { providers.append(.openRouter) }
+        return providers
+    }
+
+    private var hasConfiguredCloudProvider: Bool {
+        !configuredCloudProviders.isEmpty
+    }
+
+    private var hasUsableLocalProvider: Bool {
+        guard localModelEnabled else { return false }
+        let downloadedModels = localModels.filter { $0.status == .downloaded }
+        return AppState.resolvedLocalModelID(
+            preferredModelID: localModelID,
+            downloadedModels: downloadedModels
+        ) != nil
+    }
+
+    private var availableDefaultProviders: [AIProviderKind] {
+        AIAssistantManager.availableDefaultProviders(
+            configuredCloudProviders: configuredCloudProviders,
+            hasOllamaEndpoint: hasUsableOllamaEndpoint,
+            hasUsableLocalProvider: hasUsableLocalProvider
+        )
+    }
+
+    private var resolvedSelectedProvider: AIProviderKind? {
+        AIAssistantManager.resolvedDefaultProvider(
+            preferredProvider: preferredProvider,
+            availableProviders: availableDefaultProviders
+        )
+    }
+
+    private var showsProviderFallbackMessage: Bool {
+        guard let resolvedSelectedProvider else { return false }
+        return preferredProvider != resolvedSelectedProvider
+    }
+
+    private var ollamaEndpointWarningMessage: String? {
+        AIOllamaEndpointPolicy.warningMessage(for: ollamaURL)
+    }
+
+    private var hasUsableOllamaEndpoint: Bool {
+        let trimmed = ollamaURL.trimmedForAISettings
+        return !trimmed.isEmpty && ollamaEndpointWarningMessage == nil
+    }
+
     var body: some View {
         formWithKeyHandlers
             .navigationTitle("AI Assistant")
+            .confirmationDialog(
+                "Reset AI Usage Statistics?",
+                isPresented: $isShowingResetStatisticsConfirmation,
+                titleVisibility: .visible
+            ) {
+                Button("Reset Statistics", role: .destructive) {
+                    Task { await resetUsageStats() }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("This clears request counts and cost history for all AI providers. This cannot be undone.")
+            }
         .task {
             anthropicKey = (try? await appState.settingsManager.getString(key: SettingsKeys.anthropicApiKey)) ?? ""
             openAIKey = (try? await appState.settingsManager.getString(key: SettingsKeys.openAIApiKey)) ?? ""
             geminiKey = (try? await appState.settingsManager.getString(key: SettingsKeys.geminiApiKey)) ?? ""
+            openRouterKey = (try? await appState.settingsManager.getString(key: SettingsKeys.openRouterApiKey)) ?? ""
             ollamaURL = (try? await appState.settingsManager.getString(key: SettingsKeys.ollamaEndpoint)) ?? "http://localhost:11434"
 
             let storedAnthropicModel = try? await appState.settingsManager.getString(key: SettingsKeys.anthropicModelPreset)
             anthropicModelID = storedAnthropicModel ?? AIModelCatalog.defaultModel(for: .anthropic)?.id ?? "claude-sonnet-4-6"
 
             let storedOpenAIModel = try? await appState.settingsManager.getString(key: SettingsKeys.openAIModelPreset)
-            openAIModelID = storedOpenAIModel ?? AIModelCatalog.defaultModel(for: .openAI)?.id ?? "gpt-5.2"
+            openAIModelID = storedOpenAIModel ?? AIModelCatalog.defaultModel(for: .openAI)?.id ?? "gpt-5.4"
 
             let storedGeminiModel = try? await appState.settingsManager.getString(key: SettingsKeys.geminiModelPreset)
             geminiModelID = storedGeminiModel ?? AIModelCatalog.defaultModel(for: .gemini)?.id ?? "gemini-2.5-flash"
+
+            let storedOpenRouterModel = try? await appState.settingsManager.getString(key: SettingsKeys.openRouterModelPreset)
+            openRouterModelID = storedOpenRouterModel ?? AIModelCatalog.defaultModel(for: .openRouter)?.id ?? ""
 
             let storedOllamaModel = try? await appState.settingsManager.getString(key: SettingsKeys.ollamaModelPreset)
             ollamaModelID = storedOllamaModel ?? AIModelCatalog.defaultModel(for: .ollama)?.id ?? "llama3.1"
 
             if let providerRaw = try? await appState.settingsManager.getString(key: SettingsKeys.defaultAIProvider),
                let provider = AIProviderKind(rawValue: providerRaw) {
-                selectedProvider = provider
+                preferredProvider = provider
             }
+            selectedProvider = preferredProvider
             discoverAIEnabled = (try? await appState.settingsManager.getBool(key: SettingsKeys.discoverAIRecommendationsEnabled)) ?? false
             aiAutoGenerate = (try? await appState.settingsManager.getBool(key: SettingsKeys.aiAutoGenerate, default: true)) ?? true
             localModelEnabled = (try? await appState.settingsManager.getBool(key: SettingsKeys.localModelEnabled)) ?? false
             let storedLocalModel = try? await appState.settingsManager.getString(key: SettingsKeys.localModelPreset)
             localModelID = storedLocalModel ?? AIModelCatalog.defaultModel(for: .local)?.id ?? ""
-            await reloadLocalModels()
+            await reloadLocalModels(syncProvider: true)
+            reconcileSelectedProvider()
             await loadFeedbackState()
             await loadUsageStats()
             await refreshModels()
         }
         .onChange(of: anthropicKey) { _, newValue in
-            anthropicSaveTask?.cancel()
-            anthropicSaveTask = Task {
-                try? await Task.sleep(for: .milliseconds(500))
-                guard !Task.isCancelled else { return }
-                try? await appState.settingsManager.setString(key: SettingsKeys.anthropicApiKey, value: newValue)
-                await appState.configureAIProviders()
-                await refreshAnthropicModels()
-            }
+            reconcileSelectedProvider()
+            scheduleCloudKeySave(task: &anthropicSaveTask, key: SettingsKeys.anthropicApiKey, value: newValue, provider: .anthropic)
         }
         .onChange(of: openAIKey) { _, newValue in
-            openAISaveTask?.cancel()
-            openAISaveTask = Task {
-                try? await Task.sleep(for: .milliseconds(500))
-                guard !Task.isCancelled else { return }
-                try? await appState.settingsManager.setString(key: SettingsKeys.openAIApiKey, value: newValue)
-                await appState.configureAIProviders()
-                await refreshOpenAIModels()
-            }
+            reconcileSelectedProvider()
+            scheduleCloudKeySave(task: &openAISaveTask, key: SettingsKeys.openAIApiKey, value: newValue, provider: .openAI)
         }
         .onChange(of: geminiKey) { _, newValue in
-            geminiSaveTask?.cancel()
-            geminiSaveTask = Task {
-                try? await Task.sleep(for: .milliseconds(500))
-                guard !Task.isCancelled else { return }
-                try? await appState.settingsManager.setString(key: SettingsKeys.geminiApiKey, value: newValue)
-                await appState.configureAIProviders()
-                await refreshGeminiModels()
-            }
+            reconcileSelectedProvider()
+            scheduleCloudKeySave(task: &geminiSaveTask, key: SettingsKeys.geminiApiKey, value: newValue, provider: .gemini)
+        }
+        .onChange(of: openRouterKey) { _, newValue in
+            reconcileSelectedProvider()
+            scheduleCloudKeySave(task: &openRouterSaveTask, key: SettingsKeys.openRouterApiKey, value: newValue, provider: .openRouter)
         }
         .onChange(of: localModelEnabled) { _, newValue in
+            reconcileSelectedProvider()
             Task {
-                try? await appState.settingsManager.setBool(key: SettingsKeys.localModelEnabled, value: newValue)
-                await appState.configureAIProviders()
+                await persistBoolSetting(key: SettingsKeys.localModelEnabled, value: newValue) {
+                    await reloadLocalModels(syncProvider: false)
+                    await refreshAIProviders()
+                }
             }
         }
         .onChange(of: localModelID) { _, newValue in
+            reconcileSelectedProvider()
             Task {
-                try? await appState.settingsManager.setString(key: SettingsKeys.localModelPreset, value: newValue)
-                await appState.configureAIProviders()
+                await persistStringSetting(key: SettingsKeys.localModelPreset, value: newValue) {
+                    await refreshAIProviders()
+                }
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .localModelsDidChange)) { _ in
-            Task { await reloadLocalModels() }
+            Task {
+                await reloadLocalModels(syncProvider: true)
+                await MainActor.run { reconcileSelectedProvider() }
+            }
         }
         .onDisappear {
-            anthropicSaveTask?.cancel()
-            anthropicSaveTask = nil
-            openAISaveTask?.cancel()
-            openAISaveTask = nil
-            geminiSaveTask?.cancel()
-            geminiSaveTask = nil
+            flushPendingCloudKeySaves()
             feedbackReloadTask?.cancel()
             feedbackReloadTask = nil
         }
@@ -136,63 +202,221 @@ struct AISettingsView: View {
     private var formWithKeyHandlers: some View {
         formContent
         .onChange(of: ollamaURL) { _, newValue in
+            reconcileSelectedProvider()
             Task {
-                try? await appState.settingsManager.setString(key: SettingsKeys.ollamaEndpoint, value: newValue)
-                await refreshOllamaModels()
+                await persistOllamaEndpoint(newValue)
             }
         }
         .onChange(of: anthropicModelID) { _, newValue in
             Task {
-                try? await appState.settingsManager.setString(key: SettingsKeys.anthropicModelPreset, value: newValue)
-                await appState.configureAIProviders()
+                await persistStringSetting(key: SettingsKeys.anthropicModelPreset, value: newValue) {
+                    await refreshAIProviders()
+                }
             }
         }
         .onChange(of: openAIModelID) { _, newValue in
             Task {
-                try? await appState.settingsManager.setString(key: SettingsKeys.openAIModelPreset, value: newValue)
-                await appState.configureAIProviders()
+                await persistStringSetting(key: SettingsKeys.openAIModelPreset, value: newValue) {
+                    await refreshAIProviders()
+                }
             }
         }
         .onChange(of: geminiModelID) { _, newValue in
             Task {
-                try? await appState.settingsManager.setString(key: SettingsKeys.geminiModelPreset, value: newValue)
-                await appState.configureAIProviders()
+                await persistStringSetting(key: SettingsKeys.geminiModelPreset, value: newValue) {
+                    await refreshAIProviders()
+                }
+            }
+        }
+        .onChange(of: openRouterModelID) { _, newValue in
+            Task {
+                await persistStringSetting(key: SettingsKeys.openRouterModelPreset, value: newValue) {
+                    await refreshAIProviders()
+                }
             }
         }
         .onChange(of: ollamaModelID) { _, newValue in
             Task {
-                try? await appState.settingsManager.setString(key: SettingsKeys.ollamaModelPreset, value: newValue)
-                await appState.configureAIProviders()
+                await persistStringSetting(key: SettingsKeys.ollamaModelPreset, value: newValue) {
+                    await refreshAIProviders()
+                }
             }
         }
         .onChange(of: selectedProvider) { _, newValue in
+            if suppressedProviderSelection == newValue {
+                suppressedProviderSelection = nil
+                return
+            }
+            preferredProvider = newValue
             Task {
-                try? await appState.settingsManager.setString(key: SettingsKeys.defaultAIProvider, value: newValue.rawValue)
-                await appState.configureAIProviders()
+                await persistStringSetting(key: SettingsKeys.defaultAIProvider, value: newValue.rawValue) {
+                    await refreshAIProviders()
+                }
             }
         }
         .onChange(of: discoverAIEnabled) { _, newValue in
             Task {
-                try? await appState.settingsManager.setBool(key: SettingsKeys.discoverAIRecommendationsEnabled, value: newValue)
+                await persistBoolSetting(key: SettingsKeys.discoverAIRecommendationsEnabled, value: newValue)
             }
         }
         .onChange(of: aiAutoGenerate) { _, newValue in
             Task {
-                try? await appState.settingsManager.setBool(key: SettingsKeys.aiAutoGenerate, value: newValue)
+                await persistBoolSetting(key: SettingsKeys.aiAutoGenerate, value: newValue)
             }
         }
         .onChange(of: feedbackScaleMode) { _, newValue in
             Task {
-                try? await appState.settingsManager.setString(
+                await persistStringSetting(
                     key: SettingsKeys.feedbackScaleMode,
                     value: newValue.canonicalMode.rawValue
-                )
-                NotificationCenter.default.post(name: .tasteProfileDidChange, object: nil)
+                ) {
+                    NotificationCenter.default.post(name: .tasteProfileDidChange, object: nil)
+                }
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .tasteProfileDidChange)) { _ in
             feedbackReloadTask?.cancel()
             feedbackReloadTask = Task { await loadFeedbackState() }
+        }
+    }
+
+    @MainActor
+    private func flushPendingCloudKeySaves() {
+        anthropicSaveTask?.cancel()
+        anthropicSaveTask = nil
+        openAISaveTask?.cancel()
+        openAISaveTask = nil
+        geminiSaveTask?.cancel()
+        geminiSaveTask = nil
+        openRouterSaveTask?.cancel()
+        openRouterSaveTask = nil
+
+        Task { await persistCloudKey(key: SettingsKeys.anthropicApiKey, value: anthropicKey, provider: .anthropic) }
+        Task { await persistCloudKey(key: SettingsKeys.openAIApiKey, value: openAIKey, provider: .openAI) }
+        Task { await persistCloudKey(key: SettingsKeys.geminiApiKey, value: geminiKey, provider: .gemini) }
+        Task { await persistCloudKey(key: SettingsKeys.openRouterApiKey, value: openRouterKey, provider: .openRouter) }
+    }
+
+    @MainActor
+    private func scheduleCloudKeySave(
+        task: inout Task<Void, Never>?,
+        key: String,
+        value: String,
+        provider: AIProviderKind
+    ) {
+        task?.cancel()
+        task = Task {
+            do {
+                try await Task.sleep(for: .milliseconds(500))
+                guard !Task.isCancelled else { return }
+                await persistCloudKey(key: key, value: value, provider: provider)
+            } catch is CancellationError {
+                return
+            } catch {
+                await MainActor.run {
+                    surfaceError = AppError(error)
+                }
+            }
+        }
+    }
+
+    @MainActor
+    private func persistCloudKey(key: String, value: String, provider: AIProviderKind) async {
+        do {
+            try await appState.settingsManager.setString(key: key, value: value)
+            await refreshAIProviders()
+            await refreshModels(for: provider)
+            surfaceError = nil
+        } catch {
+            surfaceError = AppError(error)
+        }
+    }
+
+    @MainActor
+    private func persistOllamaEndpoint(_ newValue: String) async {
+        let trimmedValue = newValue.trimmedForAISettings
+        if trimmedValue.isEmpty {
+            await persistStringSetting(
+                key: SettingsKeys.ollamaEndpoint,
+                value: trimmedValue
+            ) {
+                await refreshAIProviders()
+                await refreshOllamaModels()
+            }
+            return
+        }
+
+        guard let warningMessage = AIOllamaEndpointPolicy.warningMessage(for: trimmedValue) else {
+            await persistStringSetting(
+                key: SettingsKeys.ollamaEndpoint,
+                value: trimmedValue
+            ) {
+                await refreshAIProviders()
+                await refreshOllamaModels()
+            }
+            return
+        }
+
+        if warningMessage.contains("Plain HTTP is only allowed") {
+            surfaceError = .unknown(warningMessage)
+        }
+    }
+
+    @MainActor
+    private func persistStringSetting(
+        key: String,
+        value: String,
+        postSave: (() async -> Void)? = nil
+    ) async {
+        do {
+            try await appState.settingsManager.setString(key: key, value: value)
+            surfaceError = nil
+            if let postSave {
+                await postSave()
+            }
+        } catch {
+            surfaceError = AppError(error)
+        }
+    }
+
+    @MainActor
+    private func persistBoolSetting(
+        key: String,
+        value: Bool,
+        postSave: (() async -> Void)? = nil
+    ) async {
+        do {
+            try await appState.settingsManager.setBool(key: key, value: value)
+            surfaceError = nil
+            if let postSave {
+                await postSave()
+            }
+        } catch {
+            surfaceError = AppError(error)
+        }
+    }
+
+    @MainActor
+    private func refreshAIProviders() async {
+        await appState.configureAIProviders()
+        reconcileSelectedProvider()
+    }
+
+    @MainActor
+    private func refreshModels(for provider: AIProviderKind) async {
+        switch provider {
+        case .anthropic:
+            await refreshAnthropicModels()
+        case .openAI:
+            await refreshOpenAIModels()
+        case .gemini:
+            await refreshGeminiModels()
+        case .openRouter:
+            await refreshOpenRouterModels()
+        case .ollama:
+            await refreshOllamaModels()
+        case .local:
+            break
         }
     }
 
@@ -234,10 +458,7 @@ struct AISettingsView: View {
             }
 
             Button("Reset Statistics", role: .destructive) {
-                Task {
-                    try? await appState.database.deleteAllAIUsageRecords()
-                    await loadUsageStats()
-                }
+                isShowingResetStatisticsConfirmation = true
             }
         }
     }
@@ -247,6 +468,11 @@ struct AISettingsView: View {
             providerSections
             localAndUsageSections
             feedbackSections
+            if let surfaceError {
+                Section {
+                    SettingsErrorBanner(error: surfaceError)
+                }
+            }
         }
     }
 
@@ -257,6 +483,7 @@ struct AISettingsView: View {
         anthropicSection
         openAISection
         geminiSection
+        openRouterSection
         ollamaSection
     }
 
@@ -277,12 +504,24 @@ struct AISettingsView: View {
 
     private var defaultProviderSection: some View {
         Section("Default Provider") {
-            Picker("Provider", selection: $selectedProvider) {
-                Text("Anthropic Claude").tag(AIProviderKind.anthropic)
-                Text("OpenAI").tag(AIProviderKind.openAI)
-                Text("Gemini").tag(AIProviderKind.gemini)
-                Text("Ollama (Local)").tag(AIProviderKind.ollama)
-                Text("On-Device (MLX)").tag(AIProviderKind.local)
+            if availableDefaultProviders.isEmpty {
+                Text("Configure a provider below to choose the default used for AI actions.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                Picker("Provider", selection: $selectedProvider) {
+                    ForEach(availableDefaultProviders, id: \.self) { provider in
+                        Text(providerSelectionLabel(for: provider)).tag(provider)
+                    }
+                }
+
+                if showsProviderFallbackMessage, let resolvedSelectedProvider {
+                    Text(
+                        "\(providerSelectionLabel(for: preferredProvider)) is unavailable right now. Requests will use \(providerSelectionLabel(for: resolvedSelectedProvider))."
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
             }
         }
     }
@@ -293,6 +532,8 @@ struct AISettingsView: View {
             HStack {
                 SecureField("API Key", text: $anthropicKey)
                 PasteFieldButton { anthropicKey = $0 }
+                    .accessibilityLabel("Paste Anthropic API key from clipboard")
+                    .accessibilityHint("Pastes the Anthropic API key into the field.")
             }
             Picker("Model", selection: $anthropicModelID) {
                 ForEach(anthropicModels) { model in
@@ -308,6 +549,8 @@ struct AISettingsView: View {
             HStack {
                 SecureField("API Key", text: $openAIKey)
                 PasteFieldButton { openAIKey = $0 }
+                    .accessibilityLabel("Paste OpenAI API key from clipboard")
+                    .accessibilityHint("Pastes the OpenAI API key into the field.")
             }
             Picker("Model", selection: $openAIModelID) {
                 ForEach(openAIModels) { model in
@@ -323,6 +566,8 @@ struct AISettingsView: View {
             HStack {
                 SecureField("API Key", text: $geminiKey)
                 PasteFieldButton { geminiKey = $0 }
+                    .accessibilityLabel("Paste Gemini API key from clipboard")
+                    .accessibilityHint("Pastes the Gemini API key into the field.")
             }
             Picker("Model", selection: $geminiModelID) {
                 ForEach(geminiModels) { model in
@@ -333,14 +578,44 @@ struct AISettingsView: View {
     }
 
     @ViewBuilder
+    private var openRouterSection: some View {
+        Section("OpenRouter") {
+            HStack {
+                SecureField("API Key", text: $openRouterKey)
+                PasteFieldButton { openRouterKey = $0 }
+                    .accessibilityLabel("Paste OpenRouter API key from clipboard")
+                    .accessibilityHint("Pastes the OpenRouter API key into the field.")
+            }
+            Picker("Model", selection: $openRouterModelID) {
+                ForEach(openRouterModels) { model in
+                    Text(model.displayName).tag(model.id)
+                }
+            }
+            Text("Model options refresh from OpenRouter after the API key is saved. If the live fetch fails, VPStudio falls back to the bundled curated list.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder
     private var ollamaSection: some View {
         Section("Ollama") {
             TextField("Server URL", text: $ollamaURL)
+            if let ollamaEndpointWarningMessage {
+                Text(ollamaEndpointWarningMessage)
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            } else {
+                Text("Plain HTTP is only allowed for localhost and loopback Ollama servers. Remote Ollama endpoints must use HTTPS.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             Picker("Model", selection: $ollamaModelID) {
                 ForEach(ollamaModels) { model in
                     Text(model.displayName).tag(model.id)
                 }
             }
+            .disabled(!hasUsableOllamaEndpoint)
         }
     }
 
@@ -358,11 +633,14 @@ struct AISettingsView: View {
                 let downloaded = localModels.filter { $0.status == .downloaded }
                 if !downloaded.isEmpty {
                     Picker("Active Model", selection: $localModelID) {
-                        Text("None").tag("")
                         ForEach(downloaded, id: \.id) { model in
                             Text(model.displayName).tag(model.id)
                         }
                     }
+                } else {
+                    Text("Download at least one model before choosing On-Device as your active provider.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
 
                 ForEach(localModels, id: \.id) { model in
@@ -460,8 +738,52 @@ struct AISettingsView: View {
         }
     }
 
-    private func reloadLocalModels() async {
-        localModels = (try? await appState.localCatalogStore.availableModels()) ?? []
+    @MainActor
+    private func reloadLocalModels(syncProvider: Bool) async {
+        let models = (try? await appState.localCatalogStore.availableModels()) ?? []
+        localModels = models
+
+        let downloadedModels = models.filter { $0.status == .downloaded }
+        let resolvedLocalModelID = AppState.resolvedLocalModelID(
+            preferredModelID: localModelID,
+            downloadedModels: downloadedModels
+        )
+
+        if let resolvedLocalModelID, resolvedLocalModelID != localModelID {
+            localModelID = resolvedLocalModelID
+            await persistStringSetting(
+                key: SettingsKeys.localModelPreset,
+                value: resolvedLocalModelID
+            )
+        }
+
+        if syncProvider {
+            await appState.configureAIProviders()
+        }
+    }
+
+    private func reconcileSelectedProvider() {
+        let nextSelection = resolvedSelectedProvider ?? preferredProvider
+        guard nextSelection != selectedProvider else { return }
+        suppressedProviderSelection = nextSelection
+        selectedProvider = nextSelection
+    }
+
+    private func providerSelectionLabel(for provider: AIProviderKind) -> String {
+        switch provider {
+        case .anthropic:
+            return "Anthropic Claude"
+        case .openAI:
+            return "OpenAI"
+        case .gemini:
+            return "Gemini"
+        case .openRouter:
+            return "OpenRouter"
+        case .ollama:
+            return "Ollama (Local)"
+        case .local:
+            return "On-Device (MLX)"
+        }
     }
 
     @ViewBuilder
@@ -564,8 +886,9 @@ struct AISettingsView: View {
         async let anthropic: Void = refreshAnthropicModels()
         async let openAI: Void = refreshOpenAIModels()
         async let gemini: Void = refreshGeminiModels()
+        async let openRouter: Void = refreshOpenRouterModels()
         async let ollama: Void = refreshOllamaModels()
-        _ = await (anthropic, openAI, gemini, ollama)
+        _ = await (anthropic, openAI, gemini, openRouter, ollama)
     }
 
     @MainActor
@@ -596,11 +919,17 @@ struct AISettingsView: View {
     }
 
     @MainActor
+    private func refreshOpenRouterModels() async {
+        let fetched = await AIModelFetcher.fetchOpenRouterModels(apiKey: openRouterKey)
+        if !fetched.isEmpty {
+            openRouterModels = fetched
+            ensureSelectionValid(modelID: &openRouterModelID, in: openRouterModels)
+        }
+    }
+
+    @MainActor
     private func refreshOllamaModels() async {
-        // Only probe Ollama if the user doesn't have a cloud provider configured,
-        // to avoid connection-refused errors to localhost when Ollama isn't running.
-        let hasCloudProvider = !anthropicKey.isEmpty || !openAIKey.isEmpty || !geminiKey.isEmpty
-        guard !hasCloudProvider else { return }
+        guard hasUsableOllamaEndpoint else { return }
 
         let fetched = await AIModelFetcher.fetchOllamaModels(baseURL: ollamaURL)
         if !fetched.isEmpty {
@@ -622,6 +951,17 @@ struct AISettingsView: View {
     private func loadUsageStats() async {
         sessionUsage = (try? await appState.database.fetchAIUsageSummary(since: Self.appLaunchDate)) ?? .empty
         lifetimeUsage = (try? await appState.database.fetchAIUsageSummary()) ?? .empty
+    }
+
+    @MainActor
+    private func resetUsageStats() async {
+        do {
+            try await appState.database.deleteAllAIUsageRecords()
+            surfaceError = nil
+            await loadUsageStats()
+        } catch {
+            surfaceError = AppError(error)
+        }
     }
 
     @MainActor
@@ -690,5 +1030,11 @@ struct AISettingsView: View {
             return mediaTitle
         }
         return event.mediaId ?? "Unknown title"
+    }
+}
+
+private extension String {
+    var trimmedForAISettings: String {
+        trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }

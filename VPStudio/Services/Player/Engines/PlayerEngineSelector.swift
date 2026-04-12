@@ -50,13 +50,8 @@ struct PlayerEngineSelector {
         switch strategy {
         case .compatibility:
             #if os(visionOS)
-            // On visionOS, KSPlayer is needed first only for containers/codecs
-            // that AVPlayer cannot handle: MKV demuxing, DTS/TrueHD audio, and
-            // legacy video codecs. Everything else (H.264, H.265, AV1 on M2)
-            // gets native AVPlayer for hardware decode and lower memory use.
-            if streamRequiresKSPlayerOnVisionOS(stream) {
-                return [.ksPlayer, .avPlayer]
-            }
+            // Keep AVPlayer first on visionOS for stability and power efficiency.
+            // KSPlayer remains the fallback when AVPlayer cannot open the stream.
             return [.avPlayer, .ksPlayer]
             #else
             // Always KSPlayer first for maximum codec/container compatibility.
@@ -69,9 +64,6 @@ struct PlayerEngineSelector {
                 return [.avPlayer, .ksPlayer]
             }
             #if os(visionOS)
-            if streamRequiresKSPlayerOnVisionOS(stream) {
-                return [.ksPlayer, .avPlayer]
-            }
             return [.avPlayer, .ksPlayer]
             #else
             if streamNeedsCompatibilityDecodeAdaptive(stream) {

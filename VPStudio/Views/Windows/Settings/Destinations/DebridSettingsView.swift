@@ -4,6 +4,10 @@ import UniformTypeIdentifiers
 // MARK: - Debrid Settings
 
 struct DebridSettingsView: View {
+    static let sharedStreamingServiceTypes: [DebridServiceType] = DebridServiceType.allCases.filter { type in
+        type != .easyNews
+    }
+
     @Environment(AppState.self) private var appState
     @State private var configs: [DebridConfig] = []
     @State private var showingAddSheet = false
@@ -13,10 +17,16 @@ struct DebridSettingsView: View {
     @State private var testingConfigID: String?
     @State private var updatingConfigID: String?
     @State private var connectivityStatusByConfigID: [String: ConnectivityStatus] = [:]
+    @State private var pendingDeletion: PendingDeletion?
 
     private enum ConnectivityStatus {
         case success(String)
         case failure(AppError)
+    }
+
+    private struct PendingDeletion: Identifiable {
+        let id: String
+        let serviceName: String
     }
 
     private var trimmedNewApiKey: String {
@@ -25,6 +35,14 @@ struct DebridSettingsView: View {
 
     private var canSaveNewService: Bool {
         !trimmedNewApiKey.isEmpty
+    }
+
+    private var supportedConfigs: [DebridConfig] {
+        configs.filter(\.supportsSharedMagnetResolveFlow)
+    }
+
+    private var unsupportedConfigs: [DebridConfig] {
+        configs.filter { !$0.supportsSharedMagnetResolveFlow }
     }
 
     var body: some View {
@@ -36,14 +54,14 @@ struct DebridSettingsView: View {
             }
 
             Section {
-                if configs.isEmpty {
+                if supportedConfigs.isEmpty {
                     Text("No streaming providers connected yet")
                         .foregroundStyle(.secondary)
                     Text("Connect a provider (like Real-Debrid) so VPStudio can resolve playable streams.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else {
-                    ForEach(configs, id: \.id) { config in
+                    ForEach(supportedConfigs, id: \.id) { config in
                         debridRow(config)
                     }
                 }
@@ -51,9 +69,26 @@ struct DebridSettingsView: View {
                 Text("Configured Services")
             }
 
+            if !unsupportedConfigs.isEmpty {
+                Section {
+                    Text(EasyNewsService.sharedStreamingExclusionReason)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    ForEach(unsupportedConfigs, id: \.id) { config in
+                        unsupportedDebridRow(config)
+                    }
+                } header: {
+                    Text("Unsupported in Shared Streaming")
+                }
+            }
+
             Section {
                 Button("Add Debrid Service", systemImage: "plus") {
                     surfaceError = nil
+                    if let firstSupported = Self.sharedStreamingServiceTypes.first {
+                        newServiceType = firstSupported
+                    }
                     showingAddSheet = true
                 }
             }
@@ -69,7 +104,7 @@ struct DebridSettingsView: View {
             NavigationStack {
                 Form {
                     Picker("Service", selection: $newServiceType) {
-                        ForEach(DebridServiceType.allCases) { service in
+                        ForEach(Self.sharedStreamingServiceTypes) { service in
                             Text(service.displayName).tag(service)
                         }
                     }
@@ -77,6 +112,8 @@ struct DebridSettingsView: View {
                     HStack {
                         SecureField("API Key", text: $newApiKey)
                         PasteFieldButton { newApiKey = $0 }
+                            .accessibilityLabel("Paste debrid API key from clipboard")
+                            .accessibilityHint("Pastes the debrid API key into the add service form.")
                     }
 
                     Section {
@@ -93,6 +130,23 @@ struct DebridSettingsView: View {
                     }
                 }
             }
+        }
+        .confirmationDialog(
+            "Delete Debrid Service?",
+            isPresented: Binding(
+                get: { pendingDeletion != nil },
+                set: { if !$0 { pendingDeletion = nil } }
+            ),
+            titleVisibility: .visible,
+            presenting: pendingDeletion
+        ) { deletion in
+            Button("Delete", role: .destructive) {
+                guard let config = configs.first(where: { $0.id == deletion.id }) else { return }
+                Task { await delete(config) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { deletion in
+            Text("Delete \(deletion.serviceName)? This removes the provider and stored API key.")
         }
     }
 
@@ -116,6 +170,8 @@ struct DebridSettingsView: View {
                         Task { await setActive(newValue, for: config.id) }
                     }
                 ))
+                .accessibilityLabel("\(config.serviceType.displayName) active")
+                .accessibilityHint("Turns this provider on or off.")
                 .labelsHidden()
                 .toggleStyle(.switch)
                 .disabled(updatingConfigID == config.id)
@@ -129,7 +185,7 @@ struct DebridSettingsView: View {
                 .disabled(testingConfigID == config.id || updatingConfigID == config.id)
 
                 Button(role: .destructive) {
-                    Task { await delete(config) }
+                    pendingDeletion = PendingDeletion(id: config.id, serviceName: config.serviceType.displayName)
                 } label: {
                     Label("Delete", systemImage: "trash")
                 }
@@ -141,6 +197,48 @@ struct DebridSettingsView: View {
                 Text("#\(config.priority + 1)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            }
+
+            if let status = connectivityStatusByConfigID[config.id] {
+                switch status {
+                case .success(let message):
+                    Label(message, systemImage: "checkmark.circle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.green)
+                case .failure(let error):
+                    AppErrorInlineView(error: error)
+                }
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    @ViewBuilder
+    private func unsupportedDebridRow(_ config: DebridConfig) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(config.serviceType.displayName)
+                .font(.headline)
+
+            Text("Saved for validation only. This provider is not used by shared streaming in the current runtime.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            HStack(spacing: 8) {
+                Button(testingConfigID == config.id ? "Testing..." : "Validate Token") {
+                    Task { await validateConnection(for: config) }
+                }
+                .buttonStyle(.bordered)
+                .disabled(testingConfigID == config.id || updatingConfigID == config.id)
+
+                Button(role: .destructive) {
+                    pendingDeletion = PendingDeletion(id: config.id, serviceName: config.serviceType.displayName)
+                } label: {
+                    Label("Delete", systemImage: "trash")
+                }
+                .buttonStyle(.bordered)
+                .disabled(updatingConfigID == config.id)
+
+                Spacer()
             }
 
             if let status = connectivityStatusByConfigID[config.id] {
@@ -191,7 +289,7 @@ struct DebridSettingsView: View {
             do {
                 try await appState.database.saveDebridConfig(config)
             } catch {
-                try? await appState.secretStore.deleteSecret(for: secretKey)
+                try await appState.secretStore.deleteSecret(for: secretKey)
                 throw error
             }
 
@@ -230,7 +328,7 @@ struct DebridSettingsView: View {
         do {
             try await appState.database.deleteDebridConfig(id: config.id)
             if let secretKey = SecretReference.decode(config.apiTokenRef) {
-                try? await appState.secretStore.deleteSecret(for: secretKey)
+                try await appState.secretStore.deleteSecret(for: secretKey)
             }
 
             let remaining = try await appState.database.fetchAllDebridConfigs()

@@ -137,6 +137,9 @@ struct SettingsView: View {
                     }
 
                     Slider(value: menuBackgroundIntensity, in: VPMenuBackgroundIntensityPolicy.range)
+                        .accessibilityLabel("Menu background intensity")
+                        .accessibilityValue(SettingsAppearancePolicy.menuBackgroundIntensityLabel(for: menuBackgroundIntensity.wrappedValue))
+                        .accessibilityHint("Adjusts the strength of the cinematic menu background.")
                 }
                 .padding(.vertical, 4)
             }
@@ -212,6 +215,21 @@ struct SettingsView: View {
         }
         .onChange(of: query) { _, newValue in
             persistedSearchQuery = newValue
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .tmdbApiKeyDidChange)) { _ in
+            Task { await refreshStatuses() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .indexersDidChange)) { _ in
+            Task { await refreshStatuses() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .environmentsDidChange)) { _ in
+            Task { await refreshStatuses() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .localModelsDidChange)) { _ in
+            Task { await refreshStatuses() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .openSubtitlesDidChange)) { _ in
+            Task { await refreshStatuses() }
         }
         .onReceive(NotificationCenter.default.publisher(for: .appDidResetAllData)) { _ in
             query = ""
@@ -339,13 +357,14 @@ struct SettingsView: View {
             fallback: "http://localhost:11434"
         )
         snapshot.hasOpenRouterKey = await hasNonEmptyString(for: SettingsKeys.openRouterApiKey)
-
         let userTraktClient = try? await appState.settingsManager.getString(key: SettingsKeys.traktClientId)
         let userTraktSecret = try? await appState.settingsManager.getString(key: SettingsKeys.traktClientSecret)
         snapshot.hasTraktCredentials = TraktDefaults.resolvedCredentials(
             userClientId: userTraktClient,
             userClientSecret: userTraktSecret
         ) != nil
+        let hasTraktAccessToken = await hasNonEmptyString(for: SettingsKeys.traktAccessToken)
+        snapshot.hasTraktConnection = snapshot.hasTraktCredentials && hasTraktAccessToken
 
         let hasSimklClient = await hasNonEmptyString(for: SettingsKeys.simklClientId)
         let hasSimklToken = await hasNonEmptyString(for: SettingsKeys.simklAccessToken)

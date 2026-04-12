@@ -7,10 +7,55 @@ protocol DetailMetadataProviding: Sendable {
     func getEpisodes(tmdbId: Int, season: Int) async throws -> [Episode]
 }
 
+enum DetailWatchStatusState: Equatable {
+    case watched
+    case inProgress
+    case notWatched
+    case selectionRequired
+
+    var label: String {
+        switch self {
+        case .watched:
+            return "Watched"
+        case .inProgress:
+            return "In Progress"
+        case .notWatched:
+            return "Not watched"
+        case .selectionRequired:
+            return "Select an episode"
+        }
+    }
+
+    var toggleButtonTitle: String? {
+        switch self {
+        case .watched:
+            return "Mark Unwatched"
+        case .inProgress, .notWatched:
+            return "Mark Watched"
+        case .selectionRequired:
+            return nil
+        }
+    }
+
+    var isWatched: Bool {
+        if case .watched = self {
+            return true
+        }
+        return false
+    }
+}
+
 protocol DetailIndexerManaging: Sendable {
     func initialize() async throws
+    func ensureInitialized() async throws
     func search(imdbId: String, type: MediaType, season: Int?, episode: Int?) async throws -> [TorrentResult]
     func searchByQuery(query: String, type: MediaType) async throws -> [TorrentResult]
+}
+
+extension DetailIndexerManaging {
+    func ensureInitialized() async throws {
+        try await initialize()
+    }
 }
 
 protocol DetailDebridManaging: Sendable {
@@ -162,8 +207,13 @@ final class DetailViewModel {
     private let debridManager: any DetailDebridManaging
     private let downloadManager: any DetailDownloadManaging
     private var previewContext: MediaPreview?
+    private var currentMetadataAPIKey = ""
     private var searchTask: Task<Void, Never>?
     private var cacheEnrichmentTask: Task<Void, Never>?
+    private var detailLoadGeneration = 0
+    private var seasonLoadGeneration = 0
+    private var lastFailedPhase: LoadingPhase?
+    private var lastFailedTorrent: TorrentResult?
 
     var requiresFreshEpisodeSearch: Bool {
         guard mediaItem?.type == .series else { return false }
@@ -180,6 +230,32 @@ final class DetailViewModel {
     var canLoadMoreTorrents: Bool { torrentSearch.canLoadMoreResults }
     var remainingTorrentCount: Int { torrentSearch.remainingResultCount }
     var nextTorrentBatchCount: Int { min(Self.torrentResultBatchSize, remainingTorrentCount) }
+    var currentWatchStatusState: DetailWatchStatusState {
+        guard let mediaType = mediaItem?.type ?? previewContext?.type else {
+            return .notWatched
+        }
+
+        if mediaType == .series {
+            guard let selectedEpisode else {
+                return .selectionRequired
+            }
+            return episodeWatchStates[selectedEpisode.id]?.isCompleted == true ? .watched : .notWatched
+        }
+
+        guard let watchHistory = mediaLibrary.watchHistory else {
+            return .notWatched
+        }
+
+        if watchHistory.isCompleted {
+            return .watched
+        }
+
+        if watchHistory.progressPercent > 0.02 {
+            return .inProgress
+        }
+
+        return .notWatched
+    }
 
     init(
         appState: AppState,
@@ -213,12 +289,16 @@ final class DetailViewModel {
     }
 
     func loadDetail(preview: MediaPreview, apiKey: String) async {
+        currentMetadataAPIKey = apiKey
         let shouldPreserveExistingContent = DetailRefreshRetentionPolicy.shouldPreserveExistingContent(
             currentMediaItem: mediaItem,
             incomingPreview: preview
         )
 
+        cancelInFlightWork()
         previewContext = preview
+        let detailGeneration = nextDetailLoadGeneration()
+        _ = nextSeasonLoadGeneration()
         beginLoading(.detail)
 
         if !shouldPreserveExistingContent {
@@ -230,6 +310,7 @@ final class DetailViewModel {
         do {
             let detailID = preview.tmdbId.map(String.init) ?? preview.id
             let item = try await service.getDetail(id: detailID, type: preview.type)
+            guard isCurrentDetailLoad(detailGeneration) else { return }
             self.mediaItem = item
 
             // Cache in database
@@ -240,11 +321,15 @@ final class DetailViewModel {
 
             // Load seasons for TV shows
             if preview.type == .series, let tmdbId = item.tmdbId {
-                seasons = try await service.getSeasons(tmdbId: tmdbId)
+                let loadedSeasons = try await service.getSeasons(tmdbId: tmdbId)
+                guard isCurrentDetailLoad(detailGeneration) else { return }
+                seasons = loadedSeasons
                 if let initialSeason = resolveInitialSeason(preview: preview) {
                     selectedSeason = initialSeason
-                    episodes = try await service.getEpisodes(tmdbId: tmdbId, season: initialSeason)
-                    selectedEpisode = resolveInitialEpisode(in: episodes, preview: preview) ?? episodes.first
+                    let loadedEpisodes = try await service.getEpisodes(tmdbId: tmdbId, season: initialSeason)
+                    guard isCurrentDetailLoad(detailGeneration) else { return }
+                    episodes = loadedEpisodes
+                    selectedEpisode = resolveInitialEpisode(in: episodes, preview: preview)
                     // episodeWatchStates loaded via reloadLibraryState() -> refreshWatchHistoryState() below
                 }
             }
@@ -252,8 +337,10 @@ final class DetailViewModel {
             async let libraryState: Void = reloadLibraryState()
             async let feedbackState: Void = refreshFeedbackState()
             _ = await (libraryState, feedbackState)
+            guard isCurrentDetailLoad(detailGeneration) else { return }
             markLoaded()
         } catch {
+            guard isCurrentDetailLoad(detailGeneration) else { return }
             setError(error, fallback: .network(.transport(error.localizedDescription)))
             async let libraryState: Void = reloadLibraryState()
             async let feedbackState: Void = refreshFeedbackState()
@@ -267,6 +354,7 @@ final class DetailViewModel {
         episodes = []
         selectedEpisode = nil
         selectedSeason = preview.seasonNumber ?? 1
+        lastFailedTorrent = nil
 
         torrentSearch.setSearchResults([], initialBatchSize: 0)
         torrentSearch.didSearch = false
@@ -345,7 +433,9 @@ final class DetailViewModel {
         guard let tmdbId = mediaItem?.tmdbId else { return }
         guard selectedSeason != seasonNumber || episodes.isEmpty else { return }
 
+        currentMetadataAPIKey = apiKey
         cancelInFlightWork()
+        let seasonGeneration = nextSeasonLoadGeneration()
         selectedSeason = seasonNumber
         episodes = []
         selectedEpisode = nil
@@ -354,12 +444,44 @@ final class DetailViewModel {
 
         let service = metadataProviderFactory(apiKey)
         do {
-            episodes = try await service.getEpisodes(tmdbId: tmdbId, season: seasonNumber)
-            selectedEpisode = episodes.first
+            let loadedEpisodes = try await service.getEpisodes(tmdbId: tmdbId, season: seasonNumber)
+            guard isCurrentSeasonLoad(seasonGeneration, seasonNumber: seasonNumber) else { return }
+            episodes = loadedEpisodes
+            selectedEpisode = nil
             await loadEpisodeWatchStates()
+            guard isCurrentSeasonLoad(seasonGeneration, seasonNumber: seasonNumber) else { return }
             markLoaded()
         } catch {
+            guard isCurrentSeasonLoad(seasonGeneration, seasonNumber: seasonNumber) else { return }
             setError(error, fallback: .network(.transport(error.localizedDescription)))
+        }
+    }
+
+    func retryLastFailedOperation(apiKey: String) async {
+        switch lastFailedPhase {
+        case .detail:
+            guard let previewContext else { return }
+            await loadDetail(preview: previewContext, apiKey: apiKey)
+        case .seasonEpisodes:
+            await loadSeason(selectedSeason, apiKey: apiKey)
+        case .torrentSearch:
+            await searchTorrents()
+        case .librarySync:
+            await reloadLibraryState()
+        case .streamResolution:
+            guard let failedTorrent = lastFailedTorrent else {
+                clearError()
+                return
+            }
+            _ = await resolveStream(torrent: failedTorrent)
+        case .downloadQueue:
+            guard let failedTorrent = lastFailedTorrent else {
+                clearError()
+                return
+            }
+            await queueDownload(torrent: failedTorrent)
+        case .none:
+            clearError()
         }
     }
 
@@ -386,7 +508,7 @@ final class DetailViewModel {
         searchTask = Task { [weak self] in
             do {
                 try Task.checkCancellation()
-                try await indexerManager.initialize()
+                try await indexerManager.ensureInitialized()
 
                 var results: [TorrentResult] = []
                 var primaryError: Error?
@@ -490,8 +612,10 @@ final class DetailViewModel {
                 episodeNumber: episodeNumber
             )
             debridResolver.appendStreamIfNeeded(stream)
+            lastFailedTorrent = nil
             return stream
         } catch {
+            lastFailedTorrent = torrent
             setError(error, fallback: .debrid(.networkError(error.localizedDescription)))
             return nil
         }
@@ -537,7 +661,9 @@ final class DetailViewModel {
             )
             downloadTaskIdsByHash[hash] = enqueuedTask.id
             mediaLibrary.statusMessage = "Added to downloads."
+            lastFailedTorrent = nil
         } catch {
+            lastFailedTorrent = torrent
             downloadStates[hash] = .failed
             setError(error, fallback: .debrid(.networkError(error.localizedDescription)))
         }
@@ -763,39 +889,154 @@ final class DetailViewModel {
 
     func toggleEpisodeWatched(_ episode: Episode) async {
         guard let mediaItem else { return }
-        if episodeWatchStates[episode.id]?.isCompleted == true {
-            try? await appState.database.markEpisodeUnwatched(mediaId: mediaItem.id, episodeId: episode.id)
-            episodeWatchStates.removeValue(forKey: episode.id)
-        } else {
-            try? await appState.database.markEpisodeWatched(
-                mediaId: mediaItem.id,
-                episodeId: episode.id,
-                title: episode.displayTitle
-            )
-            await loadEpisodeWatchStates()
-        }
-    }
+        let wasWatched = episodeWatchStates[episode.id]?.isCompleted == true
 
-    func markSeasonWatched() async {
-        guard let mediaItem else { return }
-        for episode in episodes {
-            if episodeWatchStates[episode.id]?.isCompleted != true {
-                try? await appState.database.markEpisodeWatched(
+        beginLoading(.librarySync)
+        defer { finishLoadingIfNeeded(for: .librarySync) }
+
+        do {
+            if wasWatched {
+                try await appState.database.markEpisodeUnwatched(mediaId: mediaItem.id, episodeId: episode.id)
+            } else {
+                try await appState.database.markEpisodeWatched(
                     mediaId: mediaItem.id,
                     episodeId: episode.id,
                     title: episode.displayTitle
                 )
             }
+            await refreshWatchHistoryState()
+            mediaLibrary.statusMessage = wasWatched ? "Marked as not watched." : "Marked as watched."
+            NotificationCenter.default.post(name: .watchHistoryDidChange, object: nil)
+        } catch {
+            handleLibraryError(error, fallbackPrefix: "Watch state update failed")
         }
-        await loadEpisodeWatchStates()
+    }
+
+    func markSeasonWatched() async {
+        guard let mediaItem else { return }
+
+        beginLoading(.librarySync)
+        defer { finishLoadingIfNeeded(for: .librarySync) }
+
+        do {
+            for episode in episodes where episodeWatchStates[episode.id]?.isCompleted != true {
+                try await appState.database.markEpisodeWatched(
+                    mediaId: mediaItem.id,
+                    episodeId: episode.id,
+                    title: episode.displayTitle
+                )
+            }
+            await refreshWatchHistoryState()
+            mediaLibrary.statusMessage = "Marked season as watched."
+            NotificationCenter.default.post(name: .watchHistoryDidChange, object: nil)
+        } catch {
+            handleLibraryError(error, fallbackPrefix: "Watch state update failed")
+        }
     }
 
     func markSeasonUnwatched() async {
         guard let mediaItem else { return }
-        for episode in episodes {
-            try? await appState.database.markEpisodeUnwatched(mediaId: mediaItem.id, episodeId: episode.id)
+
+        beginLoading(.librarySync)
+        defer { finishLoadingIfNeeded(for: .librarySync) }
+
+        do {
+            for episode in episodes {
+                try await appState.database.markEpisodeUnwatched(mediaId: mediaItem.id, episodeId: episode.id)
+            }
+            await refreshWatchHistoryState()
+            mediaLibrary.statusMessage = "Marked season as not watched."
+            NotificationCenter.default.post(name: .watchHistoryDidChange, object: nil)
+        } catch {
+            handleLibraryError(error, fallbackPrefix: "Watch state update failed")
         }
-        episodeWatchStates = episodeWatchStates.filter { !episodes.map(\.id).contains($0.key) }
+    }
+
+    func markSeriesWatched() async {
+        guard let mediaItem, mediaItem.type == .series else { return }
+
+        beginLoading(.librarySync)
+        defer { finishLoadingIfNeeded(for: .librarySync) }
+
+        do {
+            let allEpisodes = try await fetchAllEpisodesForSeries()
+            guard !allEpisodes.isEmpty else {
+                mediaLibrary.statusMessage = "No episodes available to mark yet."
+                return
+            }
+
+            for episode in allEpisodes where episodeWatchStates[episode.id]?.isCompleted != true {
+                try await appState.database.markEpisodeWatched(
+                    mediaId: mediaItem.id,
+                    episodeId: episode.id,
+                    title: episode.displayTitle
+                )
+            }
+            await refreshWatchHistoryState()
+            mediaLibrary.statusMessage = "Marked series as watched."
+            NotificationCenter.default.post(name: .watchHistoryDidChange, object: nil)
+        } catch {
+            handleLibraryError(error, fallbackPrefix: "Watch state update failed")
+        }
+    }
+
+    func markSeriesUnwatched() async {
+        guard let mediaItem, mediaItem.type == .series else { return }
+
+        beginLoading(.librarySync)
+        defer { finishLoadingIfNeeded(for: .librarySync) }
+
+        do {
+            try await appState.database.markSeriesUnwatched(mediaId: mediaItem.id)
+            await refreshWatchHistoryState()
+            mediaLibrary.statusMessage = "Marked series as not watched."
+            NotificationCenter.default.post(name: .watchHistoryDidChange, object: nil)
+        } catch {
+            handleLibraryError(error, fallbackPrefix: "Watch state update failed")
+        }
+    }
+
+    func toggleCurrentWatchState() async {
+        guard let mediaItem else { return }
+        let priorState = currentWatchStatusState
+        guard priorState != .selectionRequired else {
+            mediaLibrary.statusMessage = "Select an episode first."
+            return
+        }
+
+        beginLoading(.librarySync)
+        defer { finishLoadingIfNeeded(for: .librarySync) }
+
+        do {
+            if mediaItem.type == .series {
+                guard let selectedEpisode else { return }
+                if priorState.isWatched {
+                    try await appState.database.markEpisodeUnwatched(
+                        mediaId: mediaItem.id,
+                        episodeId: selectedEpisode.id
+                    )
+                } else {
+                    try await appState.database.markEpisodeWatched(
+                        mediaId: mediaItem.id,
+                        episodeId: selectedEpisode.id,
+                        title: selectedEpisode.displayTitle
+                    )
+                }
+            } else if priorState.isWatched {
+                try await appState.database.markMovieUnwatched(mediaId: mediaItem.id)
+            } else {
+                try await appState.database.markMovieWatched(
+                    mediaId: mediaItem.id,
+                    title: mediaItem.title
+                )
+            }
+
+            await refreshWatchHistoryState()
+            mediaLibrary.statusMessage = priorState.isWatched ? "Marked as not watched." : "Marked as watched."
+            NotificationCenter.default.post(name: .watchHistoryDidChange, object: nil)
+        } catch {
+            handleLibraryError(error, fallbackPrefix: "Watch state update failed")
+        }
     }
 
     func makePlayerSessionRequest(
@@ -835,6 +1076,39 @@ final class DetailViewModel {
             episodeNumber: episodeNumber
         )
         return stream.withRecoveryContext(recoveryContext)
+    }
+
+    private func fetchAllEpisodesForSeries() async throws -> [Episode] {
+        guard let mediaItem, mediaItem.type == .series else { return [] }
+
+        let loadedBySeason = Dictionary(grouping: episodes, by: \.seasonNumber)
+        guard let tmdbId = mediaItem.tmdbId, !seasons.isEmpty else {
+            return deduplicatedEpisodes(Array(loadedBySeason.values.joined()))
+        }
+
+        let service = metadataProviderFactory(currentMetadataAPIKey)
+        var allEpisodes: [Episode] = []
+
+        for season in seasons.sorted(by: { $0.seasonNumber < $1.seasonNumber }) {
+            if let loadedSeasonEpisodes = loadedBySeason[season.seasonNumber],
+               !loadedSeasonEpisodes.isEmpty,
+               loadedSeasonEpisodes.count >= season.episodeCount {
+                allEpisodes.append(contentsOf: loadedSeasonEpisodes)
+                continue
+            }
+
+            let seasonEpisodes = try await service.getEpisodes(tmdbId: tmdbId, season: season.seasonNumber)
+            allEpisodes.append(contentsOf: seasonEpisodes)
+        }
+
+        return deduplicatedEpisodes(allEpisodes)
+    }
+
+    private func deduplicatedEpisodes(_ episodes: [Episode]) -> [Episode] {
+        var seenEpisodeIDs: Set<String> = []
+        return episodes.filter { episode in
+            seenEpisodeIDs.insert(episode.id).inserted
+        }
     }
 
     private func toggleLibraryMembership(for listType: UserLibraryEntry.ListType) async {
@@ -970,10 +1244,12 @@ final class DetailViewModel {
     private func invalidateSearchResultsForEpisodeChange() {
         torrentSearch.invalidateForEpisodeChange()
         debridResolver.clearStreams()
+        lastFailedTorrent = nil
         clearError()
     }
 
     private func setError(_ error: Error, fallback: AppError) {
+        lastFailedPhase = loadingPhase
         viewState = .error(AppError(error, fallback: fallback))
     }
 
@@ -1007,15 +1283,18 @@ final class DetailViewModel {
     }
 
     private func beginLoading(_ phase: LoadingPhase) {
+        lastFailedPhase = nil
         viewState = .loading(phase)
     }
 
     private func markLoaded() {
+        lastFailedPhase = nil
         viewState = .loaded
     }
 
     private func finishLoadingIfNeeded(for phase: LoadingPhase) {
         guard case .loading(let activePhase) = viewState, activePhase == phase else { return }
+        lastFailedPhase = nil
         viewState = .loaded
     }
 
@@ -1023,5 +1302,23 @@ final class DetailViewModel {
         if case .error = viewState {
             viewState = .idle
         }
+    }
+
+    private func nextDetailLoadGeneration() -> Int {
+        detailLoadGeneration &+= 1
+        return detailLoadGeneration
+    }
+
+    private func nextSeasonLoadGeneration() -> Int {
+        seasonLoadGeneration &+= 1
+        return seasonLoadGeneration
+    }
+
+    private func isCurrentDetailLoad(_ generation: Int) -> Bool {
+        detailLoadGeneration == generation
+    }
+
+    private func isCurrentSeasonLoad(_ generation: Int, seasonNumber: Int) -> Bool {
+        seasonLoadGeneration == generation && selectedSeason == seasonNumber
     }
 }

@@ -90,28 +90,92 @@ private func makeStubSession(handler: @escaping (URLRequest) throws -> (HTTPURLR
 
 @Suite("TMDBService - ID Extraction")
 struct TMDBIDExtractionTests {
+    private final class AttemptRecorder: @unchecked Sendable {
+        private let lock = NSLock()
+        private var attempts = 0
+        private var recordedSleeps: [UInt64] = []
 
-    @Test func searchBuildsCorrectURL() async throws {
-        final class RequestState: @unchecked Sendable { var capturedURL: URL? }
+        func nextAttempt() -> Int {
+            lock.lock()
+            defer { lock.unlock() }
+            attempts += 1
+            return attempts
+        }
+
+        func recordSleep(_ nanoseconds: UInt64) {
+            lock.lock()
+            recordedSleeps.append(nanoseconds)
+            lock.unlock()
+        }
+
+        func snapshot() -> (attempts: Int, sleeps: [UInt64]) {
+            lock.lock()
+            defer { lock.unlock() }
+            return (attempts, recordedSleeps)
+        }
+    }
+
+    @Test func searchFallsBackToLegacyApiKeyQueryForClassicV3Credential() async throws {
+        final class RequestState: @unchecked Sendable {
+            var capturedURL: URL?
+            var authorizationHeader: String?
+            var cacheControlHeader: String?
+            var pragmaHeader: String?
+        }
         let state = RequestState()
 
         let session = makeStubSession { request in
             state.capturedURL = request.url
+            state.authorizationHeader = request.value(forHTTPHeaderField: "Authorization")
+            state.cacheControlHeader = request.value(forHTTPHeaderField: "Cache-Control")
+            state.pragmaHeader = request.value(forHTTPHeaderField: "Pragma")
             let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
             let body = #"{"page":1,"results":[],"total_pages":0,"total_results":0}"#
             return (response, Data(body.utf8))
         }
 
-        let service = TMDBService(apiKey: "test-key", session: session)
+        let service = TMDBService(apiKey: "1234567890abcdef1234567890abcdef", session: session)
         let _ = try await service.search(query: "Dune", type: .movie, page: 1)
 
         let url = try #require(state.capturedURL)
         #expect(url.path.contains("/search/movie"))
         let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
         let apiKey = components?.queryItems?.first(where: { $0.name == "api_key" })?.value
-        #expect(apiKey == "test-key")
+        #expect(apiKey == "1234567890abcdef1234567890abcdef")
         let query = components?.queryItems?.first(where: { $0.name == "query" })?.value
         #expect(query == "Dune")
+        #expect(state.authorizationHeader == nil)
+        #expect(state.cacheControlHeader == "no-store")
+        #expect(state.pragmaHeader == "no-cache")
+    }
+
+    @Test func searchUsesBearerAuthorizationForReadAccessToken() async throws {
+        final class RequestState: @unchecked Sendable {
+            var capturedURL: URL?
+            var authorizationHeader: String?
+            var acceptHeader: String?
+        }
+        let state = RequestState()
+
+        let session = makeStubSession { request in
+            state.capturedURL = request.url
+            state.authorizationHeader = request.value(forHTTPHeaderField: "Authorization")
+            state.acceptHeader = request.value(forHTTPHeaderField: "Accept")
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            let body = #"{"page":1,"results":[],"total_pages":0,"total_results":0}"#
+            return (response, Data(body.utf8))
+        }
+
+        let readAccessToken = "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhY2Nlc3NfdG9rZW4iOiJ0bWRiIiwicm9sZSI6InJlYWQifQ.signature123"
+        let service = TMDBService(apiKey: readAccessToken, session: session)
+        let _ = try await service.search(query: "Dune", type: .movie, page: 1)
+
+        let url = try #require(state.capturedURL)
+        let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        let apiKey = components?.queryItems?.first(where: { $0.name == "api_key" })?.value
+        #expect(apiKey == nil)
+        #expect(state.authorizationHeader == "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhY2Nlc3NfdG9rZW4iOiJ0bWRiIiwicm9sZSI6InJlYWQifQ.signature123")
+        #expect(state.acceptHeader == "application/json")
     }
 
     @Test func searchMultiTypeUsesMultiPath() async throws {
@@ -128,6 +192,82 @@ struct TMDBIDExtractionTests {
         let service = TMDBService(apiKey: "key", session: session)
         let _ = try await service.search(query: "Test", type: nil, page: 1)
         #expect(state.capturedPath?.contains("/search/multi") == true)
+    }
+
+    @Test func searchMultiTypeOmitsYearFilter() async throws {
+        final class RequestState: @unchecked Sendable { var queryItems: [URLQueryItem] = [] }
+        let state = RequestState()
+
+        let session = makeStubSession { request in
+            let url = try #require(request.url)
+            state.queryItems = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            let body = #"{"page":1,"results":[],"total_pages":0,"total_results":0}"#
+            return (response, Data(body.utf8))
+        }
+
+        let service = TMDBService(apiKey: "key", session: session)
+        let _ = try await service.search(query: "Test", type: nil, page: 1, year: 2024, language: nil)
+
+        #expect(state.queryItems.first(where: { $0.name == "year" }) == nil)
+        #expect(state.queryItems.first(where: { $0.name == "first_air_date_year" }) == nil)
+    }
+
+    @Test func seriesSearchUsesFirstAirDateYearParameter() async throws {
+        final class RequestState: @unchecked Sendable { var queryItems: [URLQueryItem] = [] }
+        let state = RequestState()
+
+        let session = makeStubSession { request in
+            let url = try #require(request.url)
+            state.queryItems = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            let body = #"{"page":1,"results":[],"total_pages":0,"total_results":0}"#
+            return (response, Data(body.utf8))
+        }
+
+        let service = TMDBService(apiKey: "key", session: session)
+        let _ = try await service.search(query: "Severance", type: .series, page: 1, year: 2022, language: nil)
+
+        #expect(state.queryItems.first(where: { $0.name == "first_air_date_year" })?.value == "2022")
+        #expect(state.queryItems.first(where: { $0.name == "year" }) == nil)
+    }
+
+    @Test func discoverSeriesUsesFirstAirDateDescendingSort() async throws {
+        final class RequestState: @unchecked Sendable { var queryItems: [URLQueryItem] = [] }
+        let state = RequestState()
+
+        let session = makeStubSession { request in
+            let url = try #require(request.url)
+            state.queryItems = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            let body = #"{"page":1,"results":[],"total_pages":0,"total_results":0}"#
+            return (response, Data(body.utf8))
+        }
+
+        let service = TMDBService(apiKey: "key", session: session)
+        let filters = DiscoverFilters(sortBy: .releaseDateDesc)
+        let _ = try await service.discover(type: .series, filters: filters)
+
+        #expect(state.queryItems.first(where: { $0.name == "sort_by" })?.value == "first_air_date.desc")
+    }
+
+    @Test func discoverSeriesUsesNameAscendingSort() async throws {
+        final class RequestState: @unchecked Sendable { var queryItems: [URLQueryItem] = [] }
+        let state = RequestState()
+
+        let session = makeStubSession { request in
+            let url = try #require(request.url)
+            state.queryItems = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            let body = #"{"page":1,"results":[],"total_pages":0,"total_results":0}"#
+            return (response, Data(body.utf8))
+        }
+
+        let service = TMDBService(apiKey: "key", session: session)
+        let filters = DiscoverFilters(sortBy: .titleAsc)
+        let _ = try await service.discover(type: .series, filters: filters)
+
+        #expect(state.queryItems.first(where: { $0.name == "sort_by" })?.value == "name.asc")
     }
 
     @Test func searchParsesMovieResults() async throws {
@@ -232,20 +372,120 @@ struct TMDBIDExtractionTests {
     }
 
     @Test func rateLimitedThrowsTMDBError() async {
+        let recorder = AttemptRecorder()
         let session = makeStubSession { request in
+            _ = recorder.nextAttempt()
             let response = HTTPURLResponse(url: request.url!, statusCode: 429, httpVersion: nil, headerFields: nil)!
             return (response, Data())
         }
 
-        let service = TMDBService(apiKey: "key", session: session)
+        let service = TMDBService(apiKey: "key", session: session) { nanoseconds in
+            recorder.recordSleep(nanoseconds)
+        }
         do {
             let _ = try await service.search(query: "Test", type: .movie)
             Issue.record("Expected TMDBError.rateLimited")
         } catch let error as TMDBError {
             #expect(error == .rateLimited)
+            let snapshot = recorder.snapshot()
+            #expect(snapshot.attempts == 3)
+            #expect(snapshot.sleeps == [500_000_000, 1_000_000_000])
         } catch {
             Issue.record("Unexpected error type: \(error)")
         }
+    }
+
+    @Test func rateLimitedRetriesUsingRetryAfterHeaderThenSucceeds() async throws {
+        let recorder = AttemptRecorder()
+        let session = makeStubSession { request in
+            let attempt = recorder.nextAttempt()
+            if attempt == 1 {
+                let response = HTTPURLResponse(
+                    url: request.url!,
+                    statusCode: 429,
+                    httpVersion: nil,
+                    headerFields: ["Retry-After": "2"]
+                )!
+                return (response, Data())
+            }
+
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            let body = #"{"page":1,"results":[],"total_pages":0,"total_results":0}"#
+            return (response, Data(body.utf8))
+        }
+
+        let service = TMDBService(apiKey: "key", session: session) { nanoseconds in
+            recorder.recordSleep(nanoseconds)
+        }
+        let result = try await service.search(query: "Dune", type: .movie)
+
+        #expect(result.totalResults == 0)
+        let snapshot = recorder.snapshot()
+        #expect(snapshot.attempts == 2)
+        #expect(snapshot.sleeps == [2_000_000_000])
+    }
+
+    @Test func rateLimitedRetriesUsingHttpDateRetryAfterHeaderThenSucceeds() async throws {
+        let recorder = AttemptRecorder()
+        let retryAfterDate = Date(timeIntervalSinceNow: 3)
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "EEE',' dd MMM yyyy HH':'mm':'ss zzz"
+
+        let session = makeStubSession { request in
+            let attempt = recorder.nextAttempt()
+            if attempt == 1 {
+                let response = HTTPURLResponse(
+                    url: request.url!,
+                    statusCode: 429,
+                    httpVersion: nil,
+                    headerFields: ["Retry-After": formatter.string(from: retryAfterDate)]
+                )!
+                return (response, Data())
+            }
+
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            let body = #"{"page":1,"results":[],"total_pages":0,"total_results":0}"#
+            return (response, Data(body.utf8))
+        }
+
+        let service = TMDBService(apiKey: "key", session: session) { nanoseconds in
+            recorder.recordSleep(nanoseconds)
+        }
+        let result = try await service.search(query: "Dune", type: .movie)
+
+        #expect(result.totalResults == 0)
+        let snapshot = recorder.snapshot()
+        #expect(snapshot.attempts == 2)
+        let recordedSleep = try #require(snapshot.sleeps.first)
+        #expect(recordedSleep >= 2_000_000_000)
+        #expect(recordedSleep <= 4_000_000_000)
+    }
+
+    @Test func rateLimitedRetriesWithExponentialBackoffWhenRetryAfterMissing() async throws {
+        let recorder = AttemptRecorder()
+        let session = makeStubSession { request in
+            let attempt = recorder.nextAttempt()
+            if attempt < 3 {
+                let response = HTTPURLResponse(url: request.url!, statusCode: 429, httpVersion: nil, headerFields: nil)!
+                return (response, Data())
+            }
+
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            let body = #"{"page":1,"results":[],"total_pages":0,"total_results":0}"#
+            return (response, Data(body.utf8))
+        }
+
+        let service = TMDBService(apiKey: "key", session: session) { nanoseconds in
+            recorder.recordSleep(nanoseconds)
+        }
+        let result = try await service.search(query: "Dune", type: .movie)
+
+        #expect(result.totalResults == 0)
+        let snapshot = recorder.snapshot()
+        #expect(snapshot.attempts == 3)
+        #expect(snapshot.sleeps == [500_000_000, 1_000_000_000])
     }
 
     @Test func findByImdbIdReturnsMovieId() async throws {

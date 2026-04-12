@@ -2,12 +2,20 @@ import Foundation
 
 struct APIBayIndexer: TorrentIndexer {
     let name = "APiBay"
+    private static let requestLimiter = IndexerRequestLimiter()
+    private static let defaultSession: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 20
+        configuration.timeoutIntervalForResource = 60
+        return URLSession(configuration: configuration)
+    }()
+
     private let baseURL: String
     private let session: URLSession
 
-    init(baseURL: String? = nil, session: URLSession = .shared) {
+    init(baseURL: String? = nil, session: URLSession? = nil) {
         self.baseURL = baseURL ?? "https://apibay.org"
-        self.session = session
+        self.session = session ?? Self.defaultSession
     }
 
     func search(imdbId: String, type: MediaType, season: Int?, episode: Int?) async throws -> [TorrentResult] {
@@ -32,7 +40,7 @@ struct APIBayIndexer: TorrentIndexer {
     private func fetchResults(query: String, type: MediaType, season: Int?, episode: Int?) async throws -> [TorrentResult] {
         let url = try buildSearchURL(query: query)
 
-        let (data, response) = try await session.data(from: url)
+        let (data, response) = try await Self.requestLimiter.data(from: url, session: session)
         guard let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) else {
             throw URLError(.badServerResponse)
         }

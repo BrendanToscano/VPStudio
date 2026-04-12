@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct LoadingOverlay: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let title: String
     var message: String?
 
@@ -19,6 +20,7 @@ struct LoadingOverlay: View {
                         .frame(width: 40, height: 40)
                         .rotationEffect(.degrees(rotation))
                         .onAppear {
+                            guard !reduceMotion else { return }
                             withAnimation(.linear(duration: 1.0).repeatForever(autoreverses: false)) {
                                 rotation = 360
                             }
@@ -52,6 +54,10 @@ struct LoadingOverlay: View {
         .scaleEffect(appeared ? 1 : 0.88)
         .opacity(appeared ? 1 : 0)
         .onAppear {
+            guard !reduceMotion else {
+                appeared = true
+                return
+            }
             withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                 appeared = true
             }
@@ -60,6 +66,7 @@ struct LoadingOverlay: View {
 }
 
 struct InlineLoadingStatusView: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let title: String
 
     @State private var appeared = false
@@ -77,6 +84,7 @@ struct InlineLoadingStatusView: View {
                         .frame(width: 20, height: 20)
                         .rotationEffect(.degrees(rotation))
                         .onAppear {
+                            guard !reduceMotion else { return }
                             withAnimation(.linear(duration: 1.0).repeatForever(autoreverses: false)) {
                                 rotation = 360
                             }
@@ -102,6 +110,10 @@ struct InlineLoadingStatusView: View {
         .opacity(appeared ? 1 : 0)
         .offset(y: appeared ? 0 : 8)
         .onAppear {
+            guard !reduceMotion else {
+                appeared = true
+                return
+            }
             withAnimation(.easeOut(duration: 0.25)) {
                 appeared = true
             }
@@ -128,6 +140,7 @@ struct AppErrorInlineView: View {
 }
 
 struct SkeletonBlock: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var width: CGFloat? = nil
     var height: CGFloat
     var cornerRadius: CGFloat = 12
@@ -138,24 +151,30 @@ struct SkeletonBlock: View {
         RoundedRectangle(cornerRadius: cornerRadius)
             .fill(Color.secondary.opacity(0.2))
             .overlay {
-                RoundedRectangle(cornerRadius: cornerRadius)
-                    .fill(
-                        LinearGradient(
-                            colors: [
-                                .clear,
-                                .white.opacity(0.12),
-                                .clear
-                            ],
-                            startPoint: .leading,
-                            endPoint: .trailing
+                if !reduceMotion {
+                    RoundedRectangle(cornerRadius: cornerRadius)
+                        .fill(
+                            LinearGradient(
+                                colors: [
+                                    .clear,
+                                    .white.opacity(0.12),
+                                    .clear
+                                ],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
                         )
-                    )
-                    .scaleEffect(x: 1.4, y: 1.0)
-                    .offset(x: phase * 360)
+                        .scaleEffect(x: 1.4, y: 1.0)
+                        .offset(x: phase * 360)
+                }
             }
             .frame(width: width, height: height)
             .clipped()
             .onAppear {
+                guard !reduceMotion else {
+                    phase = 0
+                    return
+                }
                 withAnimation(.linear(duration: 1.1).repeatForever(autoreverses: false)) {
                     phase = 0.8
                 }

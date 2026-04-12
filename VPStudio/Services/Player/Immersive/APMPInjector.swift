@@ -106,10 +106,10 @@ final class APMPInjector {
 
 /// `NSObject` subclass used as the `CADisplayLink` target.
 /// Holds strong references to the output and renderers so they survive even if
-/// `APMPInjector` is stopped and released during a tick. Marked
-/// `@unchecked Sendable` because its internal mutable state (the renderers) is
-/// only ever accessed from the main run-loop callback.
-private final class DisplayLinkTarget: NSObject, @unchecked Sendable {
+/// `APMPInjector` is stopped and released during a tick. This object is pinned
+/// to the main actor because `CADisplayLink` runs on the main run loop.
+@MainActor
+private final class DisplayLinkTarget: NSObject {
     let output: AVPlayerItemVideoOutput
     let renderer: AVSampleBufferVideoRenderer
     let layer: AVSampleBufferDisplayLayer

@@ -20,10 +20,14 @@ struct PlayerAspectRatioPolicyTests {
     }
 
     @Test
-    func fixedRatiosResolveToExpectedValues() {
-        #expect(PlayerAspectRatioPolicy.resolvedRatio(for: .sixteenByNine, detectedRatio: nil) == (16.0 / 9.0))
-        #expect(PlayerAspectRatioPolicy.resolvedRatio(for: .twentyOneByNine, detectedRatio: nil) == (21.0 / 9.0))
-        #expect(PlayerAspectRatioPolicy.resolvedRatio(for: .fourByThree, detectedRatio: nil) == (4.0 / 3.0))
+    func fixedRatiosResolveToExpectedValues() throws {
+        let sixteenByNine = try #require(PlayerAspectRatioPolicy.resolvedRatio(for: .sixteenByNine, detectedRatio: nil))
+        let twentyOneByNine = try #require(PlayerAspectRatioPolicy.resolvedRatio(for: .twentyOneByNine, detectedRatio: nil))
+        let fourByThree = try #require(PlayerAspectRatioPolicy.resolvedRatio(for: .fourByThree, detectedRatio: nil))
+
+        #expect(sixteenByNine == CGFloat(16.0 / 9.0))
+        #expect(twentyOneByNine == CGFloat(21.0 / 9.0))
+        #expect(fourByThree == CGFloat(4.0 / 3.0))
     }
 
     @Test

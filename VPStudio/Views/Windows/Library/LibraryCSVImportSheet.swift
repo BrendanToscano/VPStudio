@@ -298,7 +298,6 @@ struct LibraryCSVImportSheet: View {
                 try? await appState.database.pruneEmptyManualFolders()
                 importSummary = summary
                 multiImportSummaries = []
-                print("[VPStudio Import] file=\(urls[0].lastPathComponent) \(Self.summaryLogLine(summary))")
                 trace("single file=\(urls[0].lastPathComponent) \(Self.summaryLogLine(summary))")
                 if !Self.hasLibraryChanges(in: summary) {
                     csvImportNotice = Self.noLibraryChangesNotice(anyRatingsImported: summary.ratingsImported > 0)
@@ -319,7 +318,6 @@ struct LibraryCSVImportSheet: View {
                         autoFolderFromFilename: useAutoSubfolderPerFile
                     )
                     summaries.append(summary)
-                    print("[VPStudio Import] file=\(url.lastPathComponent) \(Self.summaryLogLine(summary))")
                     trace("file=\(url.lastPathComponent) \(Self.summaryLogLine(summary))")
                     if Self.hasLibraryChanges(in: summary) {
                         anyLibraryChange = true
@@ -328,7 +326,6 @@ struct LibraryCSVImportSheet: View {
                         anyRatingChange = true
                     }
                 } catch {
-                    print("[VPStudio Import] file=\(url.lastPathComponent) error=\(error.localizedDescription)")
                     trace("file=\(url.lastPathComponent) error=\(error.localizedDescription)")
                     // Record error for this file but continue with the rest
                     csvImportError = (csvImportError ?? "") + "\(url.lastPathComponent): \(error.localizedDescription)\n"
@@ -354,13 +351,11 @@ struct LibraryCSVImportSheet: View {
 
             if !summaries.isEmpty {
                 let aggregate = aggregatedSummary(summaries)
-                print("[VPStudio Import] aggregate files=\(summaries.count) \(Self.summaryLogLine(aggregate))")
                 trace("aggregate files=\(summaries.count) \(Self.summaryLogLine(aggregate))")
                 onImportComplete(aggregate)
             }
         } catch {
             csvImportNotice = nil
-            print("[VPStudio Import] import error=\(error.localizedDescription)")
             trace("import error=\(error.localizedDescription)")
             csvImportError = error.localizedDescription
         }

@@ -70,14 +70,34 @@ enum AIModelCatalog {
 
     // MARK: OpenAI Models
 
-    static let gpt52 = AIModelDefinition(
-        id: "gpt-5.2",
-        displayName: "GPT-5.2",
+    static let gpt54 = AIModelDefinition(
+        id: "gpt-5.4",
+        displayName: "GPT-5.4",
         provider: .openAI,
-        inputCostPer1MTokens: 2.0,
-        outputCostPer1MTokens: 8.0,
-        maxContextTokens: 128_000,
+        inputCostPer1MTokens: 2.50,
+        outputCostPer1MTokens: 15.0,
+        maxContextTokens: 1_050_000,
         isDefault: true
+    )
+
+    static let gpt54Mini = AIModelDefinition(
+        id: "gpt-5.4-mini",
+        displayName: "GPT-5.4 Mini",
+        provider: .openAI,
+        inputCostPer1MTokens: 0.75,
+        outputCostPer1MTokens: 4.50,
+        maxContextTokens: 400_000,
+        isDefault: false
+    )
+
+    static let gpt54Nano = AIModelDefinition(
+        id: "gpt-5.4-nano",
+        displayName: "GPT-5.4 Nano",
+        provider: .openAI,
+        inputCostPer1MTokens: 0.20,
+        outputCostPer1MTokens: 1.25,
+        maxContextTokens: 400_000,
+        isDefault: false
     )
 
     static let gpt5 = AIModelDefinition(
@@ -272,7 +292,7 @@ enum AIModelCatalog {
 
     static let allModels: [AIModelDefinition] = [
         claudeOpus46, claudeSonnet46, claudeOpus4, claudeSonnet4, claudeHaiku35,
-        gpt52, gpt5, gpt4o, gpt4oMini, o1,
+        gpt54, gpt54Mini, gpt54Nano, gpt5, gpt4o, gpt4oMini, o1,
         llama31, llama32, mistral,
         gemini25Flash, gemini25Pro,
         openRouterGeminiFlashLite, openRouterClaudeHaiku, openRouterGPT4oMini,
@@ -384,6 +404,7 @@ enum AIModelFetcher {
     /// Fetches locally installed models from an Ollama instance.
     static func fetchOllamaModels(baseURL: String) async -> [AIModelDefinition] {
         let endpoint = baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard AIOllamaEndpointPolicy.isAllowedBaseURL(endpoint) else { return [] }
         guard let url = URL(string: "\(endpoint)/api/tags") else { return [] }
         var request = URLRequest(url: url)
         request.timeoutInterval = 10
@@ -410,11 +431,66 @@ enum AIModelFetcher {
         .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
     }
 
+    /// Fetches available models from the OpenRouter API.
+    static func fetchOpenRouterModels(
+        apiKey: String,
+        session: URLSession = .shared
+    ) async -> [AIModelDefinition] {
+        let trimmedAPIKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedAPIKey.isEmpty else { return [] }
+
+        var request = URLRequest(url: URL(string: "https://openrouter.ai/api/v1/models")!)
+        request.timeoutInterval = 15
+        request.setValue("Bearer \(trimmedAPIKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+
+        guard let (data, response) = try? await session.data(for: request),
+              let http = response as? HTTPURLResponse, http.statusCode == 200 else { return [] }
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let items = json["data"] as? [[String: Any]] else { return [] }
+
+        return items.compactMap { item -> AIModelDefinition? in
+            guard let id = item["id"] as? String, !id.isEmpty else { return nil }
+            let catalogMatch = AIModelCatalog.model(byID: id)
+            let displayName = (item["name"] as? String)
+                ?? catalogMatch?.displayName
+                ?? formatModelID(id)
+            let pricing = item["pricing"] as? [String: Any]
+            let inputCost = catalogMatch?.inputCostPer1MTokens
+                ?? scaledOpenRouterPrice(from: pricing?["prompt"])
+                ?? 0
+            let outputCost = catalogMatch?.outputCostPer1MTokens
+                ?? scaledOpenRouterPrice(from: pricing?["completion"])
+                ?? 0
+            let contextLength = (item["context_length"] as? Int)
+                ?? catalogMatch?.maxContextTokens
+                ?? 128_000
+
+            return AIModelDefinition(
+                id: id,
+                displayName: displayName,
+                provider: .openRouter,
+                inputCostPer1MTokens: inputCost,
+                outputCostPer1MTokens: outputCost,
+                maxContextTokens: contextLength,
+                isDefault: catalogMatch?.isDefault ?? false
+            )
+        }
+        .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+    }
+
     /// Fetches available models from the Google Gemini API.
     static func fetchGeminiModels(apiKey: String) async -> [AIModelDefinition] {
-        guard !apiKey.isEmpty else { return [] }
-        var request = URLRequest(url: URL(string: "https://generativelanguage.googleapis.com/v1beta/models?key=\(apiKey)")!)
+        let trimmedAPIKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedAPIKey.isEmpty else { return [] }
+        var components = URLComponents(string: "https://generativelanguage.googleapis.com")
+        components?.path = "/v1beta/models"
+        guard let url = components?.url else { return [] }
+        var request = URLRequest(url: url)
+        request.setValue(trimmedAPIKey, forHTTPHeaderField: "x-goog-api-key")
         request.timeoutInterval = 15
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.httpShouldHandleCookies = false
         guard let (data, response) = try? await URLSession.shared.data(for: request),
               let http = response as? HTTPURLResponse, http.statusCode == 200 else { return [] }
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -447,5 +523,15 @@ enum AIModelFetcher {
           .split(separator: " ")
           .map { $0.prefix(1).uppercased() + $0.dropFirst() }
           .joined(separator: " ")
+    }
+
+    private static func scaledOpenRouterPrice(from value: Any?) -> Double? {
+        if let string = value as? String, let parsed = Double(string) {
+            return parsed * 1_000_000
+        }
+        if let number = value as? NSNumber {
+            return number.doubleValue * 1_000_000
+        }
+        return nil
     }
 }

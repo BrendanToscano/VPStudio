@@ -126,6 +126,11 @@ struct DetailView: View {
             libraryReloadTask?.cancel()
             libraryReloadTask = Task { await vm.reloadLibraryState() }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .watchHistoryDidChange)) { _ in
+            guard let vm = viewModel else { return }
+            libraryReloadTask?.cancel()
+            libraryReloadTask = Task { await vm.reloadLibraryState() }
+        }
         .onReceive(NotificationCenter.default.publisher(for: .tasteProfileDidChange)) { _ in
             guard let vm = viewModel else { return }
             feedbackReloadTask?.cancel()
@@ -238,7 +243,7 @@ struct DetailView: View {
                 set: { vm.error = $0 }
             ),
             onRetry: {
-                Task { await vm.searchTorrents() }
+                Task { await vm.retryLastFailedOperation(apiKey: tmdbApiKey) }
             }
         )
         .overlay(alignment: .top) {

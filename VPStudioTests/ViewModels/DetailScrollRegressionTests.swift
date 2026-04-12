@@ -140,7 +140,7 @@ struct DetailScrollRegressionTests {
 
     @Test
     @MainActor
-    func loadDetailPreselectsFirstSeasonAndEpisodeForSeriesScrollFlow() async {
+    func loadDetailPreselectsFirstSeasonButLeavesEpisodeUnselectedWithoutContext() async {
         let appState = AppState()
         let seasonOneEpisodes = [
             makeEpisode(mediaID: "ttscroll3", season: 1, episode: 1, title: "Pilot"),
@@ -173,7 +173,7 @@ struct DetailScrollRegressionTests {
         )
 
         #expect(viewModel.selectedSeason == 1)
-        #expect(viewModel.selectedEpisode?.id == seasonOneEpisodes.first?.id)
+        #expect(viewModel.selectedEpisode == nil)
         #expect(viewModel.episodes.map(\.id) == seasonOneEpisodes.map(\.id))
     }
 
@@ -240,7 +240,7 @@ struct DetailScrollRegressionTests {
 
         await loadTask.value
 
-        #expect(viewModel.selectedEpisode?.id == seasonTwoEpisodes.first?.id)
+        #expect(viewModel.selectedEpisode == nil)
         #expect(viewModel.episodes.map(\.id) == seasonTwoEpisodes.map(\.id))
     }
 
@@ -302,10 +302,13 @@ struct DetailScrollRegressionTests {
         await viewModel.loadSeason(2, apiKey: "")
 
         #expect(viewModel.selectedSeason == 2)
-        #expect(viewModel.selectedEpisode?.id == seasonTwoEpisodes.first?.id)
+        #expect(viewModel.selectedEpisode == nil)
         #expect(viewModel.torrentSearch.results.isEmpty)
         #expect(viewModel.streams.isEmpty)
         #expect(viewModel.error == nil)
+        #expect(viewModel.requiresFreshEpisodeSearch)
+
+        viewModel.selectEpisode(seasonTwoEpisodes[0])
         #expect(viewModel.requiresFreshEpisodeSearch)
 
         await viewModel.searchTorrents()
@@ -314,6 +317,108 @@ struct DetailScrollRegressionTests {
         #expect(viewModel.lastSearchEpisodeId == seasonTwoEpisodes.first?.id)
         #expect(viewModel.lastSearchContextKey == "ttscroll4-s2e1")
         #expect(viewModel.requiresFreshEpisodeSearch == false)
+    }
+
+    @Test
+    @MainActor
+    func staleSeasonResponseDoesNotOverwriteNewerSeasonSelection() async {
+        let appState = AppState()
+        let seasonOneEpisodes = [
+            makeEpisode(mediaID: "ttscroll-race", season: 1, episode: 1, title: "Pilot")
+        ]
+        let seasonTwoEpisodes = [
+            makeEpisode(mediaID: "ttscroll-race", season: 2, episode: 1, title: "Season 2 Premiere")
+        ]
+        let metadata = DelayedScrollRegressionMetadataProvider(
+            detailResult: MediaItem(id: "ttscroll-race", type: .series, title: "Race Show", tmdbId: 304),
+            seasonsResult: [
+                Season(id: 1, seasonNumber: 1, name: "Season 1", overview: nil, posterPath: nil, episodeCount: 1, airDate: nil),
+                Season(id: 2, seasonNumber: 2, name: "Season 2", overview: nil, posterPath: nil, episodeCount: 1, airDate: nil)
+            ],
+            episodesBySeason: [
+                1: seasonOneEpisodes,
+                2: seasonTwoEpisodes
+            ],
+            delayedSeason: 2,
+            delayNanoseconds: 60_000_000
+        )
+        let viewModel = DetailViewModel(
+            appState: appState,
+            metadataProviderFactory: { _ in metadata },
+            indexerManager: ScrollRegressionIndexerManager(resultsByContext: [:])
+        )
+
+        await viewModel.loadDetail(
+            preview: MediaPreview(
+                id: "ttscroll-race",
+                type: .series,
+                title: "Race Show",
+                tmdbId: 304
+            ),
+            apiKey: ""
+        )
+
+        let delayedSeasonLoad = Task {
+            await viewModel.loadSeason(2, apiKey: "")
+        }
+        await Task.yield()
+        await viewModel.loadSeason(1, apiKey: "")
+        await delayedSeasonLoad.value
+
+        #expect(viewModel.selectedSeason == 1)
+        #expect(viewModel.selectedEpisode == nil)
+        #expect(viewModel.episodes.map(\.id) == seasonOneEpisodes.map(\.id))
+    }
+
+    @Test
+    @MainActor
+    func retryReplaysLastFailedSeasonLoadInsteadOfTorrentSearch() async {
+        let appState = AppState()
+        let seasonOneEpisodes = [
+            makeEpisode(mediaID: "ttscroll-retry", season: 1, episode: 1, title: "Pilot")
+        ]
+        let seasonTwoEpisodes = [
+            makeEpisode(mediaID: "ttscroll-retry", season: 2, episode: 1, title: "Recovered Episode")
+        ]
+        let metadata = FlakySeasonMetadataProvider(
+            detailResult: MediaItem(id: "ttscroll-retry", type: .series, title: "Retry Show", tmdbId: 404),
+            seasonsResult: [
+                Season(id: 1, seasonNumber: 1, name: "Season 1", overview: nil, posterPath: nil, episodeCount: 1, airDate: nil),
+                Season(id: 2, seasonNumber: 2, name: "Season 2", overview: nil, posterPath: nil, episodeCount: 1, airDate: nil)
+            ],
+            episodesBySeason: [
+                1: seasonOneEpisodes,
+                2: seasonTwoEpisodes
+            ],
+            failingSeason: 2
+        )
+        let viewModel = DetailViewModel(
+            appState: appState,
+            metadataProviderFactory: { _ in metadata },
+            indexerManager: ScrollRegressionIndexerManager(resultsByContext: [:])
+        )
+
+        await viewModel.loadDetail(
+            preview: MediaPreview(
+                id: "ttscroll-retry",
+                type: .series,
+                title: "Retry Show",
+                tmdbId: 404
+            ),
+            apiKey: ""
+        )
+
+        await viewModel.loadSeason(2, apiKey: "")
+        #expect(viewModel.error != nil)
+        #expect(viewModel.torrentSearch.results.isEmpty)
+
+        await viewModel.retryLastFailedOperation(apiKey: "")
+
+        #expect(viewModel.error == nil)
+        #expect(viewModel.selectedSeason == 2)
+        #expect(viewModel.selectedEpisode == nil)
+        #expect(viewModel.episodes.map(\.id) == seasonTwoEpisodes.map(\.id))
+        #expect(viewModel.torrentSearch.results.isEmpty)
     }
 
     private func makeEpisode(mediaID: String, season: Int, episode: Int, title: String) -> Episode {
@@ -374,6 +479,37 @@ private actor DelayedScrollRegressionMetadataProvider: DetailMetadataProviding {
     func getEpisodes(tmdbId: Int, season: Int) async throws -> [Episode] {
         if season == delayedSeason {
             try? await Task.sleep(nanoseconds: delayNanoseconds)
+        }
+        return episodesBySeason[season] ?? []
+    }
+}
+
+private actor FlakySeasonMetadataProvider: DetailMetadataProviding {
+    let detailResult: MediaItem
+    let seasonsResult: [Season]
+    let episodesBySeason: [Int: [Episode]]
+    let failingSeason: Int
+    private var failedOnce = false
+
+    init(
+        detailResult: MediaItem,
+        seasonsResult: [Season],
+        episodesBySeason: [Int: [Episode]],
+        failingSeason: Int
+    ) {
+        self.detailResult = detailResult
+        self.seasonsResult = seasonsResult
+        self.episodesBySeason = episodesBySeason
+        self.failingSeason = failingSeason
+    }
+
+    func getDetail(id: String, type: MediaType) async throws -> MediaItem { detailResult }
+    func getSeasons(tmdbId: Int) async throws -> [Season] { seasonsResult }
+
+    func getEpisodes(tmdbId: Int, season: Int) async throws -> [Episode] {
+        if season == failingSeason, failedOnce == false {
+            failedOnce = true
+            throw URLError(.cannotLoadFromNetwork)
         }
         return episodesBySeason[season] ?? []
     }

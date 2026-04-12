@@ -4,6 +4,7 @@ import SwiftUI
 
 struct SetupWizardView: View {
     @Environment(AppState.self) private var appState
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.openURL) private var openURL
     @State private var currentStep = 0
     @State private var debridApiKey = ""
@@ -18,6 +19,14 @@ struct SetupWizardView: View {
     @State private var didRunQAAutoAdvance = false
 
     private let totalSteps = 5
+    private var stepTransition: AnyTransition {
+        reduceMotion
+            ? .opacity
+            : .asymmetric(
+                insertion: .move(edge: .trailing).combined(with: .opacity),
+                removal: .move(edge: .leading).combined(with: .opacity)
+            )
+    }
 
     var body: some View {
         ZStack {
@@ -34,42 +43,27 @@ struct SetupWizardView: View {
                 ZStack {
                     if currentStep == 0 {
                         welcomeStep
-                            .transition(.asymmetric(
-                                insertion: .move(edge: .trailing).combined(with: .opacity),
-                                removal: .move(edge: .leading).combined(with: .opacity)
-                            ))
+                            .transition(stepTransition)
                     }
                     if currentStep == 1 {
                         debridStep
-                            .transition(.asymmetric(
-                                insertion: .move(edge: .trailing).combined(with: .opacity),
-                                removal: .move(edge: .leading).combined(with: .opacity)
-                            ))
+                            .transition(stepTransition)
                     }
                     if currentStep == 2 {
                         metadataAIStep
-                            .transition(.asymmetric(
-                                insertion: .move(edge: .trailing).combined(with: .opacity),
-                                removal: .move(edge: .leading).combined(with: .opacity)
-                            ))
+                            .transition(stepTransition)
                     }
                     if currentStep == 3 {
                         preferencesStep
-                            .transition(.asymmetric(
-                                insertion: .move(edge: .trailing).combined(with: .opacity),
-                                removal: .move(edge: .leading).combined(with: .opacity)
-                            ))
+                            .transition(stepTransition)
                     }
                     if currentStep == 4 {
                         completeStep
-                            .transition(.asymmetric(
-                                insertion: .move(edge: .trailing).combined(with: .opacity),
-                                removal: .move(edge: .leading).combined(with: .opacity)
-                            ))
+                            .transition(stepTransition)
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .animation(.spring(response: 0.5, dampingFraction: 0.86), value: currentStep)
+                .animation(reduceMotion ? nil : .spring(response: 0.5, dampingFraction: 0.86), value: currentStep)
 
                 // ── Navigation buttons ───────────────────────────────────────
                 wizardNavigation
@@ -79,8 +73,12 @@ struct SetupWizardView: View {
         }
         .frame(minWidth: 640, minHeight: 560)
         .onAppear {
-            withAnimation(.easeOut(duration: 0.6)) {
+            if reduceMotion {
                 appeared = true
+            } else {
+                withAnimation(.easeOut(duration: 0.6)) {
+                    appeared = true
+                }
             }
 
             guard QARuntimeOptions.setupAutoAdvance else { return }
@@ -105,12 +103,16 @@ struct SetupWizardView: View {
                 }
 
                 while !Task.isCancelled {
-                    let shouldContinue = await MainActor.run {
-                        currentStep > 0 && currentStep < totalSteps - 1
+                    let stepBeforeAdvance = await MainActor.run {
+                        currentStep
                     }
-                    guard shouldContinue else { break }
+                    guard stepBeforeAdvance > 0 && stepBeforeAdvance < totalSteps - 1 else { break }
                     try? await Task.sleep(for: .milliseconds(250))
                     await handleNextStep()
+                    let stepAfterAdvance = await MainActor.run {
+                        currentStep
+                    }
+                    guard stepAfterAdvance > stepBeforeAdvance else { break }
                 }
 
                 let isCompleteStep = await MainActor.run { currentStep == totalSteps - 1 }
@@ -221,6 +223,8 @@ struct SetupWizardView: View {
                     }
                     .pickerStyle(.menu)
                     .tint(.white)
+                    .accessibilityLabel("Debrid service")
+                    .accessibilityHint("Choose the debrid provider to connect.")
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 12)
@@ -242,6 +246,8 @@ struct SetupWizardView: View {
                     SecureField("API Key", text: $debridApiKey)
                         .textFieldStyle(.plain)
                     PasteFieldButton { debridApiKey = $0 }
+                        .accessibilityLabel("Paste debrid API key from clipboard")
+                        .accessibilityHint("Pastes the debrid API key into the setup field.")
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 12)
@@ -317,6 +323,8 @@ struct SetupWizardView: View {
                     SecureField("TMDB API Key", text: $tmdbApiKey)
                         .textFieldStyle(.plain)
                     PasteFieldButton { tmdbApiKey = $0 }
+                        .accessibilityLabel("Paste TMDB API key from clipboard")
+                        .accessibilityHint("Pastes the TMDB API key into the setup field.")
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 12)
@@ -388,6 +396,8 @@ struct SetupWizardView: View {
                     }
                     .pickerStyle(.segmented)
                     .frame(maxWidth: 260)
+                    .accessibilityLabel("AI provider")
+                    .accessibilityHint("Choose an optional AI provider for recommendations and analysis.")
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 12)
@@ -410,6 +420,8 @@ struct SetupWizardView: View {
                         SecureField("\(selectedAIProvider.displayName) API Key", text: $aiApiKey)
                             .textFieldStyle(.plain)
                         PasteFieldButton { aiApiKey = $0 }
+                            .accessibilityLabel("Paste \(selectedAIProvider.displayName) API key from clipboard")
+                            .accessibilityHint("Pastes the AI API key into the setup field.")
                     }
                     .padding(.horizontal, 16)
                     .padding(.vertical, 12)
@@ -425,8 +437,8 @@ struct SetupWizardView: View {
                                 lineWidth: 1
                             )
                     }
-                    .transition(.move(edge: .top).combined(with: .opacity))
-                    .animation(.spring(response: 0.4, dampingFraction: 0.85), value: selectedAIProvider)
+                    .transition(reduceMotion ? .opacity : .move(edge: .top).combined(with: .opacity))
+                    .animation(reduceMotion ? nil : .spring(response: 0.4, dampingFraction: 0.85), value: selectedAIProvider)
                 }
 
                 Text("Optional — you can configure this later in Settings.")
@@ -445,7 +457,7 @@ struct SetupWizardView: View {
             Spacer()
         }
         .padding(.horizontal, 32)
-        .animation(.spring(response: 0.4, dampingFraction: 0.85), value: selectedAIProvider)
+        .animation(reduceMotion ? nil : .spring(response: 0.4, dampingFraction: 0.85), value: selectedAIProvider)
     }
 
     // MARK: - Step 3: Preferences
@@ -485,6 +497,8 @@ struct SetupWizardView: View {
                     }
                     .pickerStyle(.segmented)
                     .frame(maxWidth: 220)
+                    .accessibilityLabel("Preferred quality")
+                    .accessibilityHint("Choose the default streaming quality.")
                 }
 
                 // Subtitle language picker
@@ -499,6 +513,8 @@ struct SetupWizardView: View {
                     }
                     .pickerStyle(.menu)
                     .tint(.white)
+                    .accessibilityLabel("Subtitle language")
+                    .accessibilityHint("Choose the default subtitle language.")
                 }
             }
             .frame(maxWidth: 420)
@@ -527,9 +543,7 @@ struct SetupWizardView: View {
         HStack {
             if currentStep > 0 && currentStep < totalSteps - 1 {
                 Button {
-                    withAnimation(.spring(response: 0.5, dampingFraction: 0.86)) {
-                        currentStep -= 1
-                    }
+                    moveToStep(currentStep - 1)
                 } label: {
                     HStack(spacing: 6) {
                         Image(systemName: "chevron.left")
@@ -542,6 +556,7 @@ struct SetupWizardView: View {
                     .padding(.vertical, 10)
                 }
                 .buttonStyle(.plain)
+                .accessibilityHint("Returns to the previous setup step.")
             }
 
             Spacer()
@@ -553,10 +568,12 @@ struct SetupWizardView: View {
                 ) {
                     Task { await handleNextStep() }
                 }
+                .accessibilityHint("Saves this step and continues.")
             } else if currentStep == totalSteps - 1 {
                 WizardAccentButton(title: "Start Exploring", icon: "sparkles") {
                     appState.isShowingSetup = false
                 }
+                .accessibilityHint("Closes setup and opens the app.")
             }
         }
     }
@@ -564,8 +581,18 @@ struct SetupWizardView: View {
     // MARK: - Actions
 
     private func advanceStep() {
+        moveToStep(currentStep + 1)
+    }
+
+    private func moveToStep(_ nextStep: Int) {
+        let clampedStep = min(max(nextStep, 0), totalSteps - 1)
+        guard clampedStep != currentStep else { return }
+        guard !reduceMotion else {
+            currentStep = clampedStep
+            return
+        }
         withAnimation(.spring(response: 0.5, dampingFraction: 0.86)) {
-            currentStep += 1
+            currentStep = clampedStep
         }
     }
 
@@ -601,15 +628,17 @@ struct SetupWizardView: View {
             let normalizedTmdbKey = tmdbApiKey.trimmingCharacters(in: .whitespacesAndNewlines)
             let normalizedAiKey = aiApiKey.trimmingCharacters(in: .whitespacesAndNewlines)
 
+            guard SetupWizardValidationPolicy.canContinueFromMetadataStep(tmdbApiKey: normalizedTmdbKey) else {
+                saveError = SetupWizardValidationPolicy.requiredTMDBMessage
+                return
+            }
+
             do {
-                // Save TMDB key if provided
-                if !normalizedTmdbKey.isEmpty {
-                    try await appState.settingsManager.setValue(
-                        normalizedTmdbKey,
-                        forKey: SettingsKeys.tmdbApiKey
-                    )
-                    NotificationCenter.default.post(name: .tmdbApiKeyDidChange, object: nil)
-                }
+                try await appState.settingsManager.setValue(
+                    normalizedTmdbKey,
+                    forKey: SettingsKeys.tmdbApiKey
+                )
+                NotificationCenter.default.post(name: .tmdbApiKeyDidChange, object: nil)
 
                 // Save AI provider selection
                 try await appState.settingsManager.setValue(
@@ -650,7 +679,8 @@ struct SetupWizardView: View {
                     )
                 }
             } catch {
-                // Non-blocking — preferences can be set later
+                saveError = error.localizedDescription
+                return
             }
         }
 
@@ -675,6 +705,7 @@ struct SetupWizardView: View {
 // MARK: - Wizard Background
 
 private struct WizardBackgroundView: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let currentStep: Int
     @State private var gradientPhase: CGFloat = 0
 
@@ -737,9 +768,10 @@ private struct WizardBackgroundView: View {
                 )
             }
             .ignoresSafeArea()
-            .animation(.easeInOut(duration: 0.8), value: currentStep)
+            .animation(reduceMotion ? nil : .easeInOut(duration: 0.8), value: currentStep)
         }
         .onAppear {
+            guard !reduceMotion else { return }
             withAnimation(.linear(duration: 12).repeatForever(autoreverses: true)) {
                 gradientPhase = 1.0
             }
@@ -750,6 +782,7 @@ private struct WizardBackgroundView: View {
 // MARK: - Step Indicator
 
 private struct WizardStepIndicator: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let currentStep: Int
     let totalSteps: Int
 
@@ -761,9 +794,13 @@ private struct WizardStepIndicator: View {
                         ? AnyShapeStyle(LinearGradient.vpAccent)
                         : AnyShapeStyle(Color.white.opacity(0.2)))
                     .frame(width: index == currentStep ? 28 : 8, height: 8)
-                    .animation(.spring(response: 0.4, dampingFraction: 0.8), value: currentStep)
+                    .animation(reduceMotion ? nil : .spring(response: 0.4, dampingFraction: 0.8), value: currentStep)
             }
         }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Setup progress")
+        .accessibilityValue("Step \(currentStep + 1) of \(totalSteps)")
+        .accessibilityHint("The highlighted capsule shows your current setup step.")
     }
 }
 
@@ -815,6 +852,7 @@ private struct WizardFeatureHighlight: Identifiable {
 }
 
 private struct FeatureHighlightCard: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let feature: WizardFeatureHighlight
     @State private var appeared = false
 
@@ -869,8 +907,12 @@ private struct FeatureHighlightCard: View {
         .opacity(appeared ? 1 : 0)
         .offset(y: appeared ? 0 : 12)
         .onAppear {
-            withAnimation(.spring(response: 0.5, dampingFraction: 0.8).delay(0.1)) {
+            if reduceMotion {
                 appeared = true
+            } else {
+                withAnimation(.spring(response: 0.5, dampingFraction: 0.8).delay(0.1)) {
+                    appeared = true
+                }
             }
         }
     }
@@ -932,6 +974,7 @@ private struct WizardPreferenceRow<Control: View>: View {
 // MARK: - Completion Content
 
 private struct WizardCompletionContent: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let selectedService: DebridServiceType
     let debridApiKey: String
     let tmdbApiKey: String
@@ -1025,21 +1068,27 @@ private struct WizardCompletionContent: View {
         }
         .padding(.horizontal, 32)
         .onAppear {
-            withAnimation(.spring(response: 0.6, dampingFraction: 0.6).delay(0.15)) {
+            if reduceMotion {
                 checkmarkScale = 1.0
-            }
-            withAnimation(.easeOut(duration: 0.8).delay(0.3)) {
                 glowOpacity = 1.0
-            }
-            withAnimation(.easeOut(duration: 0.5).delay(0.5)) {
                 summaryOpacity = 1.0
-            }
-            withAnimation(
-                .easeInOut(duration: 2.0)
-                .repeatForever(autoreverses: true)
-                .delay(0.8)
-            ) {
-                pulseScale = 1.15
+            } else {
+                withAnimation(.spring(response: 0.6, dampingFraction: 0.6).delay(0.15)) {
+                    checkmarkScale = 1.0
+                }
+                withAnimation(.easeOut(duration: 0.8).delay(0.3)) {
+                    glowOpacity = 1.0
+                }
+                withAnimation(.easeOut(duration: 0.5).delay(0.5)) {
+                    summaryOpacity = 1.0
+                }
+                withAnimation(
+                    .easeInOut(duration: 2.0)
+                    .repeatForever(autoreverses: true)
+                    .delay(0.8)
+                ) {
+                    pulseScale = 1.15
+                }
             }
         }
     }
@@ -1104,6 +1153,7 @@ private struct WizardAccentButton: View {
             .shadow(color: .vpRed.opacity(0.4), radius: 12, y: 4)
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(title)
         #if os(visionOS)
         .hoverEffect(.lift)
         #endif
@@ -1135,6 +1185,14 @@ enum SubtitleLanguageOption: String, CaseIterable, Identifiable, Sendable {
         case .japanese: return "Japanese"
         case .korean: return "Korean"
         }
+    }
+}
+
+enum SetupWizardValidationPolicy {
+    static let requiredTMDBMessage = "TMDB API key is required to continue."
+
+    static func canContinueFromMetadataStep(tmdbApiKey: String) -> Bool {
+        !tmdbApiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 }
 

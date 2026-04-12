@@ -1,18 +1,16 @@
 import Foundation
 import AVFoundation
+import os
 
 /// Manages spatial audio configuration for immersive and windowed playback modes.
 /// Configures AVAudioSession for optimal spatial rendering on visionOS.
+@MainActor
 @Observable
-final class SpatialAudioManager: @unchecked Sendable {
+final class SpatialAudioManager {
+    private let logger = Logger(subsystem: "com.vpstudio", category: "SpatialAudioManager")
 
     private(set) var isImmersiveMode = false
     private(set) var isSpatialAudioAvailable = false
-
-    #if !os(macOS)
-    private var routeChangeObserver: NSObjectProtocol?
-    private var spatialChangeObserver: NSObjectProtocol?
-    #endif
 
     init() {
         refreshSpatialCapabilities()
@@ -21,12 +19,7 @@ final class SpatialAudioManager: @unchecked Sendable {
 
     deinit {
         #if !os(macOS)
-        if let observer = routeChangeObserver {
-            NotificationCenter.default.removeObserver(observer)
-        }
-        if let observer = spatialChangeObserver {
-            NotificationCenter.default.removeObserver(observer)
-        }
+        NotificationCenter.default.removeObserver(self)
         #endif
     }
 
@@ -71,7 +64,7 @@ final class SpatialAudioManager: @unchecked Sendable {
 
             try session.setActive(true)
         } catch {
-            print("[SpatialAudioManager] Failed to configure immersive audio: \(error)")
+            logger.error("Failed to configure immersive audio: \(error.localizedDescription, privacy: .public)")
         }
         #endif
 
@@ -85,7 +78,7 @@ final class SpatialAudioManager: @unchecked Sendable {
             try session.setCategory(.playback, mode: .moviePlayback)
             try session.setActive(true)
         } catch {
-            print("[SpatialAudioManager] Failed to restore windowed audio: \(error)")
+            logger.error("Failed to restore windowed audio: \(error.localizedDescription, privacy: .public)")
         }
         #endif
     }
@@ -109,23 +102,32 @@ final class SpatialAudioManager: @unchecked Sendable {
 
     private func observeAudioRouteChanges() {
         #if !os(macOS)
-        routeChangeObserver = NotificationCenter.default.addObserver(
-            forName: AVAudioSession.routeChangeNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            self?.refreshSpatialCapabilities()
-        }
+        NotificationCenter.default.removeObserver(self)
+
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleAudioRouteChange(_:)),
+            name: AVAudioSession.routeChangeNotification,
+            object: nil
+        )
 
         if #available(iOS 15.0, tvOS 15.0, visionOS 1.0, *) {
-            spatialChangeObserver = NotificationCenter.default.addObserver(
-                forName: AVAudioSession.spatialPlaybackCapabilitiesChangedNotification,
-                object: nil,
-                queue: .main
-            ) { [weak self] _ in
-                self?.refreshSpatialCapabilities()
-            }
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(handleSpatialPlaybackCapabilitiesChange(_:)),
+                name: AVAudioSession.spatialPlaybackCapabilitiesChangedNotification,
+                object: nil
+            )
         }
         #endif
+    }
+
+    @objc private func handleAudioRouteChange(_ notification: Notification) {
+        refreshSpatialCapabilities()
+    }
+
+    @available(iOS 15.0, tvOS 15.0, visionOS 1.0, *)
+    @objc private func handleSpatialPlaybackCapabilitiesChange(_ notification: Notification) {
+        refreshSpatialCapabilities()
     }
 }

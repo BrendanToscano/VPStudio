@@ -50,10 +50,10 @@ struct ExternalPlayerRoutingTests {
 
     @Test
     func customTemplateReplacesRawPlaceholder() {
-        let sourceURL = URL(string: "https://cdn.example.com/video.m3u8")!
+        let sourceURL = URL(string: "https://cdn.example.com/video.m3u8?token=abc")!
         let template = "myplayer://open?source={raw_url}"
         let url = ExternalPlayerRouting.launchURL(for: sourceURL, app: .custom, customURLTemplate: template)
-        let expected = "myplayer://open?source=\(sourceURL.absoluteString)"
+        let expected = "myplayer://open?source=\(encoded(sourceURL.absoluteString))"
         #expect(url?.absoluteString == expected)
     }
 
@@ -74,6 +74,34 @@ struct ExternalPlayerRoutingTests {
     }
 
     @Test
+    func customTemplateRejectsUnsupportedPlaceholders() {
+        let url = ExternalPlayerRouting.launchURL(
+            for: streamURL,
+            app: .custom,
+            customURLTemplate: "myplayer://open?source={token}"
+        )
+        #expect(url == nil)
+        #expect(
+            ExternalPlayerRouting.validationResult(forCustomTemplate: "myplayer://open?source={token}")
+                == .invalid("Unsupported placeholder {token}. Use {url}.")
+        )
+    }
+
+    @Test
+    func customTemplateRequiresAScheme() {
+        let url = ExternalPlayerRouting.launchURL(
+            for: streamURL,
+            app: .custom,
+            customURLTemplate: "open?source={url}"
+        )
+        #expect(url == nil)
+        #expect(
+            ExternalPlayerRouting.validationResult(forCustomTemplate: "open?source={url}")
+                == .invalid("Template must start with a URL scheme such as player://")
+        )
+    }
+
+    @Test
     func settingsLoaderReadsExternalPlayerValues() async throws {
         let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
@@ -87,7 +115,7 @@ struct ExternalPlayerRoutingTests {
         try await settings.setString(key: SettingsKeys.externalPlayerApp, value: ExternalPlayerApp.vlc.rawValue)
         try await settings.setString(
             key: SettingsKeys.externalPlayerURLTemplate,
-            value: " custom://play?url={url} "
+            value: " custom://play?url={raw_url} "
         )
 
         let preference = await ExternalPlayerSettings.loadPreference(from: settings)

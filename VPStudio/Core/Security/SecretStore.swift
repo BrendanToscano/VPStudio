@@ -31,8 +31,11 @@ actor KeychainSecretStore: SecretStore {
 
     func setSecret(_ secret: String, for key: String) async throws {
         let encoded = Data(secret.utf8)
-        let query = baseQuery(for: key)
-        let update: [String: Any] = [kSecValueData as String: encoded]
+        let query = lookupQuery(for: key)
+        let update: [String: Any] = [
+            kSecValueData as String: encoded,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+        ]
 
         let updateStatus = SecItemUpdate(query as CFDictionary, update as CFDictionary)
         if updateStatus == errSecSuccess { return }
@@ -40,7 +43,8 @@ actor KeychainSecretStore: SecretStore {
             throw SecretStoreError.unexpectedStatus(updateStatus, operation: "update")
         }
 
-        var addQuery = query
+        var addQuery = lookupQuery(for: key)
+        addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         addQuery[kSecValueData as String] = encoded
         let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
         guard addStatus == errSecSuccess else {
@@ -49,7 +53,7 @@ actor KeychainSecretStore: SecretStore {
     }
 
     func getSecret(for key: String) async throws -> String? {
-        var query = baseQuery(for: key)
+        var query = lookupQuery(for: key)
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
 
@@ -67,7 +71,7 @@ actor KeychainSecretStore: SecretStore {
     }
 
     func deleteSecret(for key: String) async throws {
-        let status = SecItemDelete(baseQuery(for: key) as CFDictionary)
+        let status = SecItemDelete(lookupQuery(for: key) as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw SecretStoreError.unexpectedStatus(status, operation: "delete")
         }
@@ -84,7 +88,7 @@ actor KeychainSecretStore: SecretStore {
         }
     }
 
-    private func baseQuery(for key: String) -> [String: Any] {
+    private func lookupQuery(for key: String) -> [String: Any] {
         [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: serviceName,

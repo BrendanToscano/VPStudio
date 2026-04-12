@@ -139,7 +139,7 @@ enum SettingsDestination: String, CaseIterable, Sendable, Identifiable {
         case .trakt:
             return "Connect Trakt to sync watch history, ratings, and watchlist."
         case .simkl:
-            return "Connect Simkl to sync watch history and list progress."
+            return "Simkl cleanup-only: authorization can be cleared here, but sync and scrobbling are unavailable in this build."
         case .imdbImport:
             return "Import your IMDb watchlist, ratings, and watch history from CSV exports."
         case .player:
@@ -181,9 +181,9 @@ enum SettingsDestination: String, CaseIterable, Sendable, Identifiable {
     /// Destinations that work out-of-the-box with sensible defaults are not essential.
     var isEssential: Bool {
         switch self {
-        case .debrid, .indexers, .metadata, .ai, .trakt, .simkl:
+        case .debrid, .indexers, .metadata, .ai, .trakt:
             return true
-        case .player, .subtitles, .environments, .library, .downloads, .resetData, .imdbImport, .testMode:
+        case .player, .subtitles, .environments, .library, .downloads, .resetData, .imdbImport, .testMode, .simkl:
             return false
         }
     }
@@ -197,11 +197,11 @@ enum SettingsDestination: String, CaseIterable, Sendable, Identifiable {
         case .metadata:
             return ["tmdb", "movie database", "api key"]
         case .ai:
-            return ["openai", "anthropic", "ollama", "llm", "assistant", "ratings", "imdb", "csv", "import", "local", "on-device", "mlx", "download model", "qwen", "phi", "llama"]
+            return ["openai", "anthropic", "ollama", "openrouter", "llm", "assistant", "ratings", "recommendations", "local", "on-device", "mlx", "download model", "qwen", "phi", "llama"]
         case .trakt:
             return ["watch history", "watchlist", "oauth", "scrobble"]
         case .simkl:
-            return ["simkl", "oauth", "watchlist", "history"]
+            return ["simkl", "oauth", "authorization", "disconnect", "cleanup", "cleanup-only"]
         case .imdbImport:
             return ["imdb", "import", "csv", "watchlist", "ratings", "watch history", "export"]
         case .player:

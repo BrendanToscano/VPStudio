@@ -93,6 +93,7 @@ struct DetailTorrentsSection: View {
                         }
                         .buttonStyle(.bordered)
                         .disabled(isPlayerOpening)
+                        .accessibilityHint("Loads more stream results for the current search.")
                     }
                 }
             }
@@ -208,6 +209,8 @@ struct TorrentResultRow: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .help("Play")
+                    .accessibilityLabel("Play \(torrent.title)")
+                    .accessibilityHint("Opens this stream in the player.")
                 }
             }
         }
@@ -237,6 +240,8 @@ struct TorrentResultRow: View {
                 .buttonStyle(.bordered)
                 .disabled(isPlayerOpening)
                 .help("Download")
+                .accessibilityLabel("Download \(torrent.title)")
+                .accessibilityHint("Queues this stream for offline playback.")
             }
         case .resolving:
             HStack(spacing: 6) {
@@ -263,6 +268,8 @@ struct TorrentResultRow: View {
                 .buttonStyle(.bordered)
                 .tint(.red)
                 .help("Retry download")
+                .accessibilityLabel("Retry download for \(torrent.title)")
+                .accessibilityHint("Attempts this download again.")
             }
         }
     }

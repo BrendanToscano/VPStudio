@@ -79,7 +79,7 @@ struct ExternalPlayerPreference: Sendable, Equatable {
 
     init(app: ExternalPlayerApp = .builtIn, customURLTemplate: String? = nil) {
         self.app = app
-        self.customURLTemplate = Self.normalizedTemplate(customURLTemplate)
+        self.customURLTemplate = ExternalPlayerRouting.normalizedCustomTemplate(customURLTemplate)
     }
 
     init(storedApp: String?, customURLTemplate: String?) {
@@ -92,12 +92,12 @@ struct ExternalPlayerPreference: Sendable, Equatable {
     var usesExternalPlayer: Bool {
         app != .builtIn
     }
+}
 
-    nonisolated private static func normalizedTemplate(_ template: String?) -> String? {
-        guard let template else { return nil }
-        let trimmed = template.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
-    }
+enum ExternalPlayerTemplateValidation: Equatable {
+    case empty
+    case valid
+    case invalid(String)
 }
 
 enum ExternalPlayerRouting {
@@ -122,44 +122,75 @@ enum ExternalPlayerRouting {
             template = preference.app.launchTemplate
         }
 
-        guard let normalizedTemplate = normalizedTemplate(template) else { return nil }
+        guard let normalizedTemplate = normalizedCustomTemplate(template) else { return nil }
+        guard case .valid = validationResult(forCustomTemplate: normalizedTemplate) else {
+            return nil
+        }
 
-        let encodedStreamURL = encodeForQueryValue(streamURL.absoluteString)
+        let encodedStreamURL = encodeAsOpaqueComponent(streamURL.absoluteString)
         let hasPlaceholder = normalizedTemplate.contains(encodedURLPlaceholder)
-            || normalizedTemplate.contains(rawURLPlaceholder)
 
         if hasPlaceholder {
             let resolved = normalizedTemplate
                 .replacingOccurrences(of: encodedURLPlaceholder, with: encodedStreamURL)
-                .replacingOccurrences(of: rawURLPlaceholder, with: streamURL.absoluteString)
             return URL(string: resolved)
         }
 
-        guard let templateComponents = URLComponents(string: normalizedTemplate) else {
-            guard let url = URL(string: normalizedTemplate) else { return nil }
-            var delimiter = "?"
-            if url.absoluteString.contains("?") {
-                delimiter = url.absoluteString.hasSuffix("?") || url.absoluteString.hasSuffix("&") ? "" : "&"
-            }
-            return URL(string: "\(url.absoluteString)\(delimiter)url=\(encodedStreamURL)") ?? url
+        if normalizedTemplate.hasSuffix("=") {
+            return URL(string: normalizedTemplate + encodedStreamURL)
         }
 
-        var components = templateComponents
+        guard var components = URLComponents(string: normalizedTemplate),
+              components.scheme?.isEmpty == false else {
+            return nil
+        }
         var queryItems = components.queryItems ?? []
         queryItems.append(URLQueryItem(name: "url", value: streamURL.absoluteString))
         components.queryItems = queryItems
         return components.url
     }
 
-    nonisolated private static func normalizedTemplate(_ template: String?) -> String? {
+    nonisolated static func normalizedCustomTemplate(_ template: String?) -> String? {
         guard let template else { return nil }
         let trimmed = template.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
+        guard !trimmed.isEmpty else { return nil }
+        return trimmed.replacingOccurrences(of: rawURLPlaceholder, with: encodedURLPlaceholder)
     }
 
-    nonisolated private static func encodeForQueryValue(_ value: String) -> String {
-        var allowed = CharacterSet.urlQueryAllowed
-        allowed.remove(charactersIn: "&=?+")
+    nonisolated static func validationResult(forCustomTemplate template: String?) -> ExternalPlayerTemplateValidation {
+        guard let normalizedTemplate = normalizedCustomTemplate(template) else {
+            return .empty
+        }
+
+        let invalidPlaceholders = placeholderTokens(in: normalizedTemplate).filter {
+            $0 != encodedURLPlaceholder
+        }
+        if !invalidPlaceholders.isEmpty {
+            let placeholders = invalidPlaceholders.joined(separator: ", ")
+            return .invalid("Unsupported placeholder \(placeholders). Use {url}.")
+        }
+
+        let scheme = URLComponents(string: normalizedTemplate)?.scheme ?? URL(string: normalizedTemplate)?.scheme
+        guard let scheme, !scheme.isEmpty else {
+            return .invalid("Template must start with a URL scheme such as player://")
+        }
+
+        return .valid
+    }
+
+    nonisolated private static func placeholderTokens(in template: String) -> [String] {
+        guard let regex = try? NSRegularExpression(pattern: #"\{[^}]+\}"#) else {
+            return []
+        }
+        let range = NSRange(template.startIndex..<template.endIndex, in: template)
+        return regex.matches(in: template, range: range).compactMap { match in
+            guard let swiftRange = Range(match.range, in: template) else { return nil }
+            return String(template[swiftRange])
+        }
+    }
+
+    nonisolated private static func encodeAsOpaqueComponent(_ value: String) -> String {
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
         return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
     }
 }

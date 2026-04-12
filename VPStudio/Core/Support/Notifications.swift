@@ -4,6 +4,8 @@ extension Notification.Name {
     static let libraryDidChange = Notification.Name("VPStudio.LibraryDidChange")
     static let tasteProfileDidChange = Notification.Name("VPStudio.TasteProfileDidChange")
     static let downloadsDidChange = Notification.Name("VPStudio.DownloadsDidChange")
+    static let watchHistoryDidChange = Notification.Name("VPStudio.WatchHistoryDidChange")
+    static let openSubtitlesDidChange = Notification.Name("VPStudio.OpenSubtitlesDidChange")
     static let environmentsDidChange = Notification.Name("VPStudio.EnvironmentsDidChange")
     static let indexersDidChange = Notification.Name("VPStudio.IndexersDidChange")
     static let tmdbApiKeyDidChange = Notification.Name("VPStudio.TMDBApiKeyDidChange")
@@ -24,7 +26,4 @@ extension Notification.Name {
     static let immersiveControlRequestEnvironmentSwitch = Notification.Name("VPStudio.ImmersiveControl.RequestEnvironmentSwitch")
     static let immersiveControlDismiss = Notification.Name("VPStudio.ImmersiveControl.Dismiss")
     static let immersiveControlCycleScreenSize = Notification.Name("VPStudio.ImmersiveControl.CycleScreenSize")
-
-    // Main window lifecycle
-    static let mainWindowDidActivate = Notification.Name("mainWindowDidActivate")
 }

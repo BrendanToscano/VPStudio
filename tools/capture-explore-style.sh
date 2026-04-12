@@ -626,6 +626,45 @@ if artboard_path.exists():
 PY
 }
 
+find_latest_app_bundle() {
+  python3 - "$HOME/Library/Developer/Xcode/DerivedData" <<'PY'
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+candidates = []
+
+if root.exists():
+    for path in root.rglob('VPStudio.app'):
+        if 'Build/Products' not in path.as_posix() or not path.is_dir():
+            continue
+        try:
+            candidates.append((path.stat().st_mtime, str(path)))
+        except FileNotFoundError:
+            continue
+
+if candidates:
+    candidates.sort(key=lambda item: item[0])
+    print(candidates[-1][1])
+PY
+}
+
+find_built_app_bundle() {
+  xcodebuild -project VPStudio.xcodeproj -scheme VPStudio -destination "$DESTINATION" -showBuildSettings 2>/dev/null | python3 -c "import sys
+target_build_dir = None
+full_product_name = None
+candidate = None
+for line in sys.stdin:
+    if ' TARGET_BUILD_DIR = ' in line:
+        target_build_dir = line.split(' = ', 1)[1].strip()
+    elif ' FULL_PRODUCT_NAME = ' in line:
+        full_product_name = line.split(' = ', 1)[1].strip()
+        if target_build_dir and full_product_name and full_product_name.endswith('.app'):
+            candidate = f'{target_build_dir}/{full_product_name}'
+if candidate:
+    print(candidate)"
+}
+
 fail_capture() {
   local message="$1"
   local exit_code="${2:-1}"
@@ -670,9 +709,12 @@ BUILD_LOG="$OUT_DIR/xcodebuild-build.log"
 if ! xcodebuild -project VPStudio.xcodeproj -scheme VPStudio -destination "$DESTINATION" build >"$BUILD_LOG" 2>&1; then
   fail_capture "capture failed: \`xcodebuild -project VPStudio.xcodeproj -scheme VPStudio -destination '$DESTINATION' build\` failed. See $BUILD_LOG." 70
 fi
-APP_BUNDLE_PATH="$(find "$HOME/Library/Developer/Xcode/DerivedData" -path '*/Build/Products/Debug-xrsimulator/VPStudio.app' | sort | tail -1)"
+APP_BUNDLE_PATH="$(find_built_app_bundle)"
 if [ -z "$APP_BUNDLE_PATH" ] || [ ! -d "$APP_BUNDLE_PATH" ]; then
-  fail_capture "capture failed: built VPStudio.app was not found after xcodebuild. See $BUILD_LOG." 71
+  APP_BUNDLE_PATH="$(find_latest_app_bundle)"
+fi
+if [ -z "$APP_BUNDLE_PATH" ] || [ ! -d "$APP_BUNDLE_PATH" ]; then
+  fail_capture "capture failed: built app bundle was not found after xcodebuild. See $BUILD_LOG." 71
 fi
 
 xcrun simctl boot "$SIM_DEVICE" >/dev/null 2>&1 || true

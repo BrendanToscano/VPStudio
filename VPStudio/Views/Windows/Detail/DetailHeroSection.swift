@@ -39,12 +39,8 @@ struct DetailHeroSection: View {
 
                     Spacer()
 
-                    // Top-right: Share, List, Cast, AI
+                    // Top-right: AI action
                     HStack(spacing: 4) {
-                        utilityButton(icon: "square.and.arrow.up", label: "Share") {}
-                        utilityButton(icon: "list.bullet", label: "List") {}
-                        utilityButton(icon: "airplayvideo", label: "Cast") {}
-
                         // AI — "Would I Like This?" pill button
                         Button {
                             Task { await viewModel.fetchAIAnalysis() }
@@ -94,6 +90,8 @@ struct DetailHeroSection: View {
                             .foregroundStyle(viewModel.mediaLibrary.isInFavorites ? .red : .white.opacity(0.85))
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel(viewModel.mediaLibrary.isInFavorites ? "Remove from Favorites" : "Add to Favorites")
+                    .accessibilityHint("Toggles this title in your Favorites list.")
                 }
 
                 // Synopsis
@@ -223,18 +221,4 @@ struct DetailHeroSection: View {
         }
     }
 
-    /// A pill-shaped utility icon button in the top-right cluster.
-    private func utilityButton(icon: String, label: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: icon)
-                .font(.system(size: 14))
-                .foregroundStyle(.white)
-                .frame(width: 34, height: 34)
-                .background(.ultraThinMaterial, in: Capsule())
-        }
-        .buttonStyle(.plain)
-        #if os(visionOS)
-        .hoverEffect(.lift)
-        #endif
-    }
 }

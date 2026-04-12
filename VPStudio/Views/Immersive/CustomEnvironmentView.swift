@@ -1,5 +1,6 @@
 #if os(visionOS)
 import os
+import Foundation
 import SwiftUI
 import RealityKit
 
@@ -8,6 +9,7 @@ private let logger = Logger(subsystem: "com.vpstudio.app", category: "CustomEnvi
 struct CustomEnvironmentView: View {
     @Environment(AppState.self) private var appState
     @Environment(VPPlayerEngine.self) private var engine
+    @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
 
     @State private var headTracker = HeadTracker()
     @State private var isShowingImmersiveControls = false
@@ -16,26 +18,18 @@ struct CustomEnvironmentView: View {
     @State private var lastMaterialSourceID: ObjectIdentifier?
     @State private var subtitleEntity: Entity?
     @State private var autoDismissTask: Task<Void, Never>?
+    @State private var loadingState: LoadingState = .loading
+    @State private var subtitleFontSize: Double = 24
+
+    private enum LoadingState: Equatable {
+        case loading
+        case loaded
+        case failed(String)
+    }
 
     var body: some View {
         RealityView { content, attachments in
-            guard let selected = appState.selectedEnvironmentAsset else {
-                logger.warning("No selectedEnvironmentAsset — space opened prematurely?")
-                return
-            }
-
-            guard let url = await appState.environmentCatalogManager.resolvedAssetURL(for: selected) else {
-                logger.warning("resolvedAssetURL returned nil for asset — file missing?")
-                return
-            }
-
-            do {
-                let entity = try await Entity(contentsOf: url)
-                content.add(entity)
-                cinemaScreen = findScreenEntity(in: entity)
-            } catch {
-                logger.error("Entity(contentsOf:) failed — \(error.localizedDescription, privacy: .public)")
-            }
+            loadingState = .loading
 
             // MARK: TapCatcher
             let tapShape = ShapeResource.generateBox(size: [200, 200, 0.5])
@@ -55,6 +49,53 @@ struct CustomEnvironmentView: View {
             if let controlsPanel = attachments.entity(for: "playerControls") {
                 controlsPanel.position = SIMD3<Float>(0, -0.15, -1.5)
                 anchor.addChild(controlsPanel)
+            }
+
+            if let loadingPanel = attachments.entity(for: "loadingIndicator") {
+                loadingPanel.position = SIMD3<Float>(0, 1.6, -4)
+                content.add(loadingPanel)
+                if case .loaded = loadingState {
+                    loadingPanel.removeFromParent()
+                }
+            }
+
+            guard let selected = appState.selectedEnvironmentAsset else {
+                logger.warning("No selectedEnvironmentAsset — space opened prematurely?")
+                let fallbackScreen = makeFallbackScreen()
+                content.add(fallbackScreen)
+                cinemaScreen = fallbackScreen
+                loadingState = .failed("No environment selected. Showing a fallback screen.")
+                return
+            }
+
+            guard let url = await appState.environmentCatalogManager.resolvedAssetURL(for: selected) else {
+                logger.warning("resolvedAssetURL returned nil for asset — file missing?")
+                let fallbackScreen = makeFallbackScreen()
+                content.add(fallbackScreen)
+                cinemaScreen = fallbackScreen
+                loadingState = .failed("The selected environment file is missing. Showing a fallback screen.")
+                return
+            }
+
+            do {
+                let entity = try await Entity(contentsOf: url)
+                content.add(entity)
+                if let screen = findScreenEntity(in: entity) {
+                    cinemaScreen = screen
+                    loadingState = .loaded
+                } else {
+                    let fallbackScreen = makeFallbackScreen()
+                    content.add(fallbackScreen)
+                    cinemaScreen = fallbackScreen
+                    logger.warning("No screen mesh found in custom environment '\(selected.name, privacy: .public)'")
+                    loadingState = .failed("No screen surface was found in this environment. Showing a fallback screen.")
+                }
+            } catch {
+                logger.error("Entity(contentsOf:) failed — \(error.localizedDescription, privacy: .public)")
+                let fallbackScreen = makeFallbackScreen()
+                content.add(fallbackScreen)
+                cinemaScreen = fallbackScreen
+                loadingState = .failed("The environment failed to load. Showing a fallback screen.")
             }
 
             // MARK: Subtitle attachment
@@ -110,22 +151,33 @@ struct CustomEnvironmentView: View {
             }
 
             // MARK: Controls anchor tracking
-            if headTracker.isTracking, let anchor = controlsAnchor {
-                let m = headTracker.headTransform
-                let col3 = m.columns.3
-                let headPos = SIMD3<Float>(col3.x, col3.y - 0.15, col3.z)
-                let col2 = m.columns.2
-                let forward = normalize(SIMD3<Float>(-col2.x, 0, -col2.z))
-                let target = headPos + forward * 1.5
-                anchor.position = simd_mix(anchor.position, target, SIMD3<Float>(repeating: 0.08))
+            if let anchor = controlsAnchor {
+                if headTracker.isTracking {
+                    let m = headTracker.headTransform
+                    let col3 = m.columns.3
+                    let headPos = SIMD3<Float>(
+                        col3.x,
+                        col3.y + ImmersiveControlsPolicy.controlsVerticalOffset,
+                        col3.z
+                    )
+                    let col2 = m.columns.2
+                    let forward = safeHorizontalForward(from: col2)
+                    let target = headPos + forward * ImmersiveControlsPolicy.controlsForwardOffset
+                    anchor.position = ImmersiveControlsPolicy.smoothedPosition(
+                        current: anchor.position,
+                        target: target
+                    )
+                } else {
+                    anchor.position = ImmersiveControlsPolicy.fallbackControlsPosition
+                }
             }
 
         } attachments: {
             Attachment(id: "playerControls") {
                 if isShowingImmersiveControls {
-                    ImmersivePlayerControlsView()
+                    ImmersivePlayerControlsView(showsScreenSizeControl: false)
                         .frame(width: 520)
-                        .transition(.opacity.combined(with: .scale(0.92)))
+                        .transition(.opacity.combined(with: .scale(scale: 0.92)))
                 }
             }
 
@@ -133,11 +185,22 @@ struct CustomEnvironmentView: View {
                 if let subtitleText = engine.currentSubtitleText, !subtitleText.isEmpty {
                     ImmersiveSubtitleRenderer(
                         text: subtitleText,
-                        fontSize: ScreenSizePreset.cinema.subtitleFontSize,
+                        fontSize: subtitleFontSize,
                         maxWidth: ScreenSizePreset.cinema.subtitleMaxWidth
                     )
                     .transition(.opacity)
-                    .animation(.easeInOut(duration: 0.15), value: subtitleText)
+                    .animation(accessibilityReduceMotion ? nil : .easeInOut(duration: 0.15), value: subtitleText)
+                }
+            }
+
+            Attachment(id: "loadingIndicator") {
+                switch loadingState {
+                case .loading:
+                    loadingView
+                case .failed(let message):
+                    errorView(message: message)
+                case .loaded:
+                    EmptyView()
                 }
             }
         }
@@ -150,7 +213,7 @@ struct CustomEnvironmentView: View {
         )
         .preferredSurroundingsEffect(.systemDark)
         .onReceive(NotificationCenter.default.publisher(for: .immersiveTapCatcherDidFire)) { _ in
-            withAnimation(.easeInOut(duration: 0.25)) {
+            performOptionalAnimation(.easeInOut(duration: 0.25)) {
                 isShowingImmersiveControls.toggle()
             }
             headTracker.isIdle = !isShowingImmersiveControls
@@ -176,6 +239,7 @@ struct CustomEnvironmentView: View {
         .onAppear {
             appState.immersiveSpaceDidAppear(.customEnvironment)
             headTracker.start()
+            Task { await loadSubtitleAppearance() }
         }
         .onDisappear {
             autoDismissTask?.cancel()
@@ -196,13 +260,28 @@ struct CustomEnvironmentView: View {
         autoDismissTask?.cancel()
         guard isShowingImmersiveControls else { return }
         autoDismissTask = Task {
-            try? await Task.sleep(for: .seconds(10))
+            try? await Task.sleep(for: ImmersiveControlsPolicy.autoDismissInterval)
             guard !Task.isCancelled else { return }
-            withAnimation(.easeInOut(duration: 0.25)) {
+            performOptionalAnimation(.easeInOut(duration: 0.25)) {
                 isShowingImmersiveControls = false
             }
             headTracker.isIdle = true
         }
+    }
+
+    private func performOptionalAnimation(_ animation: Animation, updates: () -> Void) {
+        if accessibilityReduceMotion {
+            updates()
+        } else {
+            withAnimation(animation, updates)
+        }
+    }
+
+    @MainActor
+    private func loadSubtitleAppearance() async {
+        let storedSize = (try? await appState.settingsManager.getString(key: SettingsKeys.subtitleFontSize))
+            .flatMap(Double.init)
+        subtitleFontSize = storedSize.map { max(16, min(48, $0)) } ?? ScreenSizePreset.cinema.subtitleFontSize
     }
 
     /// Recursively scan the USDZ hierarchy to find the mesh intended to be the movie screen.
@@ -222,6 +301,69 @@ struct CustomEnvironmentView: View {
             }
         }
         return nil
+    }
+
+    private func safeHorizontalForward(from column: SIMD4<Float>) -> SIMD3<Float> {
+        let candidate = SIMD3<Float>(-column.x, 0, -column.z)
+        let lengthSquared = candidate.x * candidate.x + candidate.y * candidate.y + candidate.z * candidate.z
+        guard lengthSquared > .leastNonzeroMagnitude else {
+            return SIMD3<Float>(0, 0, -1)
+        }
+        return candidate / sqrt(lengthSquared)
+    }
+
+    private func makeFallbackScreen() -> ModelEntity {
+        let mesh = MeshResource.generatePlane(
+            width: ScreenSizePreset.personal.width,
+            height: ScreenSizePreset.personal.height
+        )
+        let material = SimpleMaterial(color: .black, isMetallic: false)
+        let screen = ModelEntity(mesh: mesh, materials: [material])
+        screen.name = "custom-fallback-screen"
+        screen.position = SIMD3<Float>(0, ImmersiveControlsPolicy.fallbackEyeHeight, -4)
+        return screen
+    }
+
+    private var loadingView: some View {
+        VStack(spacing: 12) {
+            ProgressView()
+                .tint(.white)
+            Text("Loading environment…")
+                .font(.callout)
+                .foregroundStyle(.white.opacity(0.7))
+        }
+        .padding(24)
+        .glassBackgroundEffect()
+    }
+
+    private func errorView(message: String) -> some View {
+        VStack(spacing: 12) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.title2)
+                .foregroundStyle(.yellow)
+            Text("Environment Warning")
+                .font(.callout.weight(.semibold))
+                .foregroundStyle(.white)
+            Text(message)
+                .font(.caption)
+                .foregroundStyle(.white.opacity(0.7))
+                .multilineTextAlignment(.center)
+            Button {
+                NotificationCenter.default.post(name: .immersiveControlDismiss, object: nil)
+            } label: {
+                Text("Close")
+                    .font(.callout.weight(.medium))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 8)
+                    .background(.ultraThinMaterial, in: Capsule())
+            }
+            .buttonStyle(.plain)
+            .hoverEffect(.highlight)
+        }
+        .padding(24)
+        .frame(maxWidth: 320)
+        .glassBackgroundEffect()
     }
 }
 #endif

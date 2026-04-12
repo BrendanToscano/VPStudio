@@ -8,9 +8,15 @@ import SwiftUI
 /// state from the shared `VPPlayerEngine` injected into the SwiftUI environment.
 struct ImmersivePlayerControlsView: View {
     @Environment(VPPlayerEngine.self) private var engine
+    @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
+    let showsScreenSizeControl: Bool
 
     @State private var isDraggingScrubber = false
     @State private var scrubPercent: Double = 0
+
+    init(showsScreenSizeControl: Bool = true) {
+        self.showsScreenSizeControl = showsScreenSizeControl
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -114,9 +120,16 @@ struct ImmersivePlayerControlsView: View {
                         x: width * max(0, min(1, displayPercent)),
                         y: geo.size.height / 2
                     )
-                    .animation(.easeOut(duration: 0.15), value: isDraggingScrubber)
+                    .animation(accessibilityReduceMotion ? nil : .easeOut(duration: 0.15), value: isDraggingScrubber)
             }
             .contentShape(Rectangle())
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Playback position")
+            .accessibilityValue(scrubberAccessibilityValue)
+            .accessibilityHint("Adjust to seek through the current video.")
+            .accessibilityAdjustableAction { direction in
+                adjustScrubberAccessibility(direction)
+            }
             .gesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in
@@ -224,7 +237,7 @@ struct ImmersivePlayerControlsView: View {
 
             // Subtitles
             controlButton(
-                icon: engine.selectedSubtitleTrack >= 0 ? "captions.bubble.fill" : "captions.bubble",
+                icon: engine.subtitlesEnabled ? "captions.bubble.fill" : "captions.bubble",
                 size: .callout
             ) {
                 NotificationCenter.default.post(name: .immersiveControlToggleSubtitles, object: nil)
@@ -237,11 +250,13 @@ struct ImmersivePlayerControlsView: View {
             }
             .accessibilityLabel("Audio track")
 
-            // Screen size
-            controlButton(icon: "tv", size: .callout) {
-                NotificationCenter.default.post(name: .immersiveControlCycleScreenSize, object: nil)
+            if showsScreenSizeControl {
+                // Screen size
+                controlButton(icon: "tv", size: .callout) {
+                    NotificationCenter.default.post(name: .immersiveControlCycleScreenSize, object: nil)
+                }
+                .accessibilityLabel("Cycle screen size")
             }
-            .accessibilityLabel("Cycle screen size")
 
             // Environment switch
             controlButton(icon: "mountain.2", size: .callout) {
@@ -281,6 +296,25 @@ struct ImmersivePlayerControlsView: View {
         }
         .buttonStyle(.plain)
         .hoverEffect(.highlight)
+    }
+
+    private var scrubberAccessibilityValue: String {
+        let current = isDraggingScrubber ? (scrubPercent * engine.duration) : engine.currentTime
+        guard engine.duration > 0 else { return current.formattedDuration }
+        return "\(current.formattedDuration) of \(engine.durationFormatted)"
+    }
+
+    private func adjustScrubberAccessibility(_ direction: AccessibilityAdjustmentDirection) {
+        let notification: Notification.Name
+        switch direction {
+        case .increment:
+            notification = .immersiveControlSeekForward
+        case .decrement:
+            notification = .immersiveControlSeekBack
+        default:
+            return
+        }
+        NotificationCenter.default.post(name: notification, object: nil)
     }
 }
 #endif

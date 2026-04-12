@@ -1,4 +1,5 @@
 import Foundation
+import GRDB
 
 enum LibraryCSVImportError: LocalizedError, Equatable {
     case unreadableFile
@@ -169,12 +170,13 @@ actor LibraryCSVImportService {
         let normalizedHeaders = header.map(Self.normalizeHeader)
         let format = Self.detectedFormat(from: normalizedHeaders)
         let mappedRows = Self.mappedRows(headers: normalizedHeaders, values: rows)
+        let preparedRows = mappedRows.compactMap(Self.parse)
 
         var summary = LibraryCSVImportSummary(
             detectedFormat: format,
             rowsRead: mappedRows.count,
             rowsImported: 0,
-            rowsSkipped: 0,
+            rowsSkipped: mappedRows.count - preparedRows.count,
             mediaItemsCreated: 0,
             mediaItemsUpdated: 0,
             watchlistImported: 0,
@@ -190,104 +192,99 @@ actor LibraryCSVImportService {
             fileURL: fileURL
         )
 
-        var targetFolderIDs: [UserLibraryEntry.ListType: String] = [:]
-        if let folderName = resolvedFolderName {
-            // Only create a folder for the destination list type (or both watchlist/favorites for .auto)
-            let listTypesNeedingFolder: [UserLibraryEntry.ListType]
-            switch options.destination {
-            case .watchlist: listTypesNeedingFolder = [.watchlist]
-            case .favorites: listTypesNeedingFolder = [.favorites]
-            case .history: listTypesNeedingFolder = [] // history has no folders
-            case .auto: listTypesNeedingFolder = [.watchlist, .favorites]
-            }
+        summary.targetFolderName = resolvedFolderName
 
-            for listType in listTypesNeedingFolder where listType.supportsFolders {
-                let folderID = try await resolveOrCreateFolder(
-                    named: folderName,
-                    listType: listType
-                )
-                targetFolderIDs[listType] = folderID
-            }
-            summary.targetFolderName = folderName
-            summary.targetFolderID = targetFolderIDs.values.first
+        // Parse and preflight the full CSV before any database writes begin.
+        if mappedRows.count > 0 && preparedRows.isEmpty {
+            throw LibraryCSVImportError.missingHeader
         }
 
-        let watchlistFolderID: String
-        if let cached = targetFolderIDs[.watchlist] {
-            watchlistFolderID = cached
-        } else {
-            watchlistFolderID = try await database.fetchSystemLibraryFolderID(listType: .watchlist)
-        }
-        let favoritesFolderID: String
-        if let cached = targetFolderIDs[.favorites] {
-            favoritesFolderID = cached
-        } else {
-            favoritesFolderID = try await database.fetchSystemLibraryFolderID(listType: .favorites)
-        }
-
-        for row in mappedRows {
-            guard let parsed = Self.parse(row: row) else {
-                summary.rowsSkipped += 1
-                continue
-            }
-
-            summary.rowsImported += 1
-            try await upsertMediaItem(from: parsed, summary: &summary)
-
-            var importedSentiment: FeedbackSentiment?
-            if options.importRatings,
-               let rawRating = parsed.userRating,
-               let ratingScale = parsed.userRatingScale {
-                importedSentiment = try await importRating(
-                    for: parsed,
-                    rawRating: rawRating,
-                    scale: ratingScale,
-                    options: options
-                )
-                summary.ratingsImported += 1
-            }
-
-            let importPlan = Self.destinationPlan(
-                format: format,
+        let preflightSummary = summary
+        summary = try await database.writeInTransaction { db in
+            var transactionalSummary = preflightSummary
+            let targetFolderIDs = try Self.resolveTargetFolderIDs(
+                resolvedFolderName: resolvedFolderName,
                 destination: options.destination,
-                sentiment: importedSentiment,
-                promoteLikedRatingsToFavorites: options.promoteLikedRatingsToFavorites
+                in: db
+            )
+            transactionalSummary.targetFolderID = targetFolderIDs.values.first
+
+            let watchlistFolderID = try Self.libraryFolderID(
+                for: .watchlist,
+                resolvedFolderIDs: targetFolderIDs,
+                in: db
+            )
+            let favoritesFolderID = try Self.libraryFolderID(
+                for: .favorites,
+                resolvedFolderIDs: targetFolderIDs,
+                in: db
             )
 
-            if importPlan.importWatchlist {
-                let isNew = try await addLibraryEntryIfNeeded(
-                    mediaID: parsed.mediaID,
-                    listType: .watchlist,
-                    folderID: watchlistFolderID,
-                    addedAt: parsed.occurredAt
+            for parsed in preparedRows {
+                try Self.upsertMediaItem(from: parsed, summary: &transactionalSummary, in: db)
+
+                var importedSentiment: FeedbackSentiment?
+                if options.importRatings,
+                   let rawRating = parsed.userRating,
+                   let ratingScale = parsed.userRatingScale {
+                    importedSentiment = try Self.importRating(
+                        for: parsed,
+                        rawRating: rawRating,
+                        scale: ratingScale,
+                        options: options,
+                        in: db
+                    )
+                    transactionalSummary.ratingsImported += 1
+                }
+
+                let importPlan = Self.destinationPlan(
+                    format: format,
+                    destination: options.destination,
+                    sentiment: importedSentiment,
+                    promoteLikedRatingsToFavorites: options.promoteLikedRatingsToFavorites
                 )
-                if isNew {
-                    summary.watchlistImported += 1
+
+                if importPlan.importWatchlist {
+                    let isNew = try Self.addLibraryEntryIfNeeded(
+                        mediaID: parsed.mediaID,
+                        listType: .watchlist,
+                        folderID: watchlistFolderID,
+                        addedAt: parsed.occurredAt,
+                        in: db
+                    )
+                    if isNew {
+                        transactionalSummary.watchlistImported += 1
+                    }
                 }
+
+                if importPlan.importFavorites {
+                    let isNew = try Self.addLibraryEntryIfNeeded(
+                        mediaID: parsed.mediaID,
+                        listType: .favorites,
+                        folderID: favoritesFolderID,
+                        addedAt: parsed.occurredAt,
+                        in: db
+                    )
+                    if isNew {
+                        transactionalSummary.favoritesImported += 1
+                    }
+                }
+
+                if importPlan.importHistory {
+                    let isNew = try Self.saveHistoryIfNeeded(for: parsed, in: db)
+                    if isNew {
+                        transactionalSummary.historyImported += 1
+                    }
+                }
+
+                transactionalSummary.rowsImported += 1
             }
 
-            if importPlan.importFavorites {
-                let isNew = try await addLibraryEntryIfNeeded(
-                    mediaID: parsed.mediaID,
-                    listType: .favorites,
-                    folderID: favoritesFolderID,
-                    addedAt: parsed.occurredAt
-                )
-                if isNew {
-                    summary.favoritesImported += 1
-                }
+            if transactionalSummary.ratingsImported > 0 {
+                _ = try DatabaseManager.applyTasteEventsRetentionPolicy(in: db, userId: options.userId)
             }
 
-            if importPlan.importHistory {
-                let isNew = try await saveHistoryIfNeeded(for: parsed)
-                if isNew {
-                    summary.historyImported += 1
-                }
-            }
-        }
-
-        if mappedRows.count > 0 && summary.rowsImported == 0 {
-            throw LibraryCSVImportError.missingHeader
+            return transactionalSummary
         }
 
         return summary
@@ -332,12 +329,55 @@ actor LibraryCSVImportService {
         return nil
     }
 
+    private static func resolveTargetFolderIDs(
+        resolvedFolderName: String?,
+        destination: LibraryCSVImportDestination,
+        in db: Database
+    ) throws -> [UserLibraryEntry.ListType: String] {
+        guard let resolvedFolderName else { return [:] }
+
+        let listTypesNeedingFolder: [UserLibraryEntry.ListType]
+        switch destination {
+        case .watchlist:
+            listTypesNeedingFolder = [.watchlist]
+        case .favorites:
+            listTypesNeedingFolder = [.favorites]
+        case .history:
+            listTypesNeedingFolder = []
+        case .auto:
+            listTypesNeedingFolder = [.watchlist, .favorites]
+        }
+
+        return try listTypesNeedingFolder.reduce(into: [:]) { partialResult, listType in
+            guard listType.supportsFolders else { return }
+            partialResult[listType] = try resolveOrCreateFolder(
+                named: resolvedFolderName,
+                listType: listType,
+                in: db
+            )
+        }
+    }
+
+    private static func libraryFolderID(
+        for listType: UserLibraryEntry.ListType,
+        resolvedFolderIDs: [UserLibraryEntry.ListType: String],
+        in db: Database
+    ) throws -> String {
+        if let folderID = resolvedFolderIDs[listType] {
+            return folderID
+        }
+        try DatabaseManager.ensureSystemLibraryFoldersForImport(in: db)
+        return LibraryFolder.systemFolderID(for: listType)
+    }
+
     /// Finds an existing manual folder by name and list type, or creates a new one.
-    private func resolveOrCreateFolder(
+    private static func resolveOrCreateFolder(
         named name: String,
-        listType: UserLibraryEntry.ListType
-    ) async throws -> String {
+        listType: UserLibraryEntry.ListType,
+        in db: Database
+    ) throws -> String {
         let normalized = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        try DatabaseManager.ensureSystemLibraryFoldersForImport(in: db)
 
         // Never create manual folders that duplicate system root names.
         // Route "Watchlist"/"Favorites" back to their system roots.
@@ -346,21 +386,47 @@ actor LibraryCSVImportService {
             return LibraryFolder.systemFolderID(for: listType)
         }
 
-        let existingFolders = try await database.fetchAllLibraryFolders(listType: listType)
-        if let existing = existingFolders.first(where: {
-            !$0.isSystem && $0.name.caseInsensitiveCompare(normalized) == .orderedSame
-        }) {
+        let existingFolders = try LibraryFolder
+            .filter(LibraryFolder.Columns.listType == listType.rawValue)
+            .order(
+                LibraryFolder.Columns.isSystem.desc,
+                LibraryFolder.Columns.sortOrder.asc,
+                LibraryFolder.Columns.name.asc
+            )
+            .fetchAll(db)
+        if let existing = existingFolders.first(where: { !$0.isSystem && $0.name.caseInsensitiveCompare(normalized) == .orderedSame }) {
             return existing.id
         }
-        let folder = try await database.createLibraryFolder(name: normalized, listType: listType)
+
+        let maxSortOrder = try Int.fetchOne(
+            db,
+            sql: """
+            SELECT COALESCE(MAX(sortOrder), -1) FROM library_folders
+            WHERE listType = ? AND isSystem = 0
+            """,
+            arguments: [listType.rawValue]
+        ) ?? -1
+        let folder = LibraryFolder(
+            id: UUID().uuidString,
+            name: normalized,
+            parentId: LibraryFolder.systemFolderID(for: listType),
+            listType: listType,
+            folderKind: .manual,
+            isSystem: false,
+            sortOrder: maxSortOrder + 1,
+            createdAt: Date(),
+            updatedAt: Date()
+        )
+        try folder.save(db)
         return folder.id
     }
 
-    private func upsertMediaItem(
+    private static func upsertMediaItem(
         from row: ParsedRow,
-        summary: inout LibraryCSVImportSummary
-    ) async throws {
-        if var existing = try await database.fetchMediaItem(id: row.mediaID) {
+        summary: inout LibraryCSVImportSummary,
+        in db: Database
+    ) throws {
+        if var existing = try MediaItem.fetchOne(db, key: row.mediaID) {
             var didUpdate = false
 
             if existing.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -377,7 +443,7 @@ actor LibraryCSVImportService {
             }
 
             if didUpdate {
-                try await database.saveMediaItem(existing)
+                try existing.save(db)
                 summary.mediaItemsUpdated += 1
             }
         } else {
@@ -389,17 +455,18 @@ actor LibraryCSVImportService {
                 imdbRating: row.imdbRating,
                 lastFetched: Date()
             )
-            try await database.saveMediaItem(item)
+            try item.save(db)
             summary.mediaItemsCreated += 1
         }
     }
 
-    private func importRating(
+    private static func importRating(
         for row: ParsedRow,
         rawRating: Double,
         scale: FeedbackScaleMode,
-        options: LibraryCSVImportOptions
-    ) async throws -> FeedbackSentiment {
+        options: LibraryCSVImportOptions,
+        in db: Database
+    ) throws -> FeedbackSentiment {
         let canonicalScale = scale.canonicalMode
         let clamped = canonicalScale.clamp(rawRating)
         let normalized = canonicalScale.normalizedValue(clamped)
@@ -423,18 +490,22 @@ actor LibraryCSVImportService {
             ],
             createdAt: row.occurredAt
         )
-        try await database.saveTasteEvent(event)
+        try event.save(db)
 
         return sentiment
     }
 
-    private func addLibraryEntryIfNeeded(
+    private static func addLibraryEntryIfNeeded(
         mediaID: String,
         listType: UserLibraryEntry.ListType,
         folderID: String,
-        addedAt: Date
-    ) async throws -> Bool {
-        let exists = try await database.isInLibrary(mediaId: mediaID, listType: listType)
+        addedAt: Date,
+        in db: Database
+    ) throws -> Bool {
+        let exists = try UserLibraryEntry
+            .filter(UserLibraryEntry.Columns.mediaId == mediaID)
+            .filter(UserLibraryEntry.Columns.listType == listType.rawValue)
+            .fetchCount(db) > 0
         if !exists {
             let entry = UserLibraryEntry(
                 id: "\(mediaID)-\(listType.rawValue)",
@@ -443,18 +514,27 @@ actor LibraryCSVImportService {
                 listType: listType,
                 addedAt: addedAt
             )
-            try await database.addToLibrary(entry)
+            try entry.save(db)
         }
         return !exists
     }
 
-    private func saveHistoryIfNeeded(for row: ParsedRow) async throws -> Bool {
-        let existing = try await database.fetchWatchHistory(mediaId: row.mediaID)
-        let isDuplicate = existing?.isCompleted == true
-            && abs((existing?.watchedAt.timeIntervalSince1970 ?? 0) - row.occurredAt.timeIntervalSince1970) < 1
+    private static func saveHistoryIfNeeded(
+        for row: ParsedRow,
+        in db: Database
+    ) throws -> Bool {
+        let lowerBound = row.occurredAt.addingTimeInterval(-1)
+        let upperBound = row.occurredAt.addingTimeInterval(1)
+        let isDuplicate = try WatchHistory
+            .filter(WatchHistory.Columns.mediaId == row.mediaID)
+            .filter(WatchHistory.Columns.episodeId == nil)
+            .filter(WatchHistory.Columns.isCompleted == true)
+            .filter(WatchHistory.Columns.watchedAt >= lowerBound)
+            .filter(WatchHistory.Columns.watchedAt <= upperBound)
+            .fetchCount(db) > 0
 
         if !isDuplicate {
-            let history = WatchHistory(
+            var history = WatchHistory(
                 id: Self.historyID(mediaID: row.mediaID, occurredAt: row.occurredAt),
                 mediaId: row.mediaID,
                 episodeId: nil,
@@ -467,7 +547,9 @@ actor LibraryCSVImportService {
                 watchedAt: row.occurredAt,
                 isCompleted: true
             )
-            try await database.saveWatchHistory(history)
+            history = history.normalizedForPersistence
+            history.streamURL = nil
+            try history.save(db)
         }
         return !isDuplicate
     }
@@ -733,10 +815,10 @@ actor LibraryCSVImportService {
 
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone(secondsFromGMT: 0)
 
         for format in dateFormats {
             formatter.dateFormat = format
+            formatter.timeZone = format.contains("H") ? TimeZone(secondsFromGMT: 0) : .current
             if let date = formatter.date(from: raw) {
                 return date
             }

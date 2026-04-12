@@ -163,6 +163,8 @@ struct GlassIconButton: View {
     let icon: String
     var tint: Color?
     var size: CGFloat = 36
+    var accessibilityLabel: String?
+    var accessibilityHint: String?
     let action: () -> Void
 
     var body: some View {
@@ -187,9 +189,33 @@ struct GlassIconButton: View {
         .buttonStyle(.plain)
         .shadow(color: .black.opacity(0.07), radius: 24, y: 0)
         .shadow(color: .black.opacity(0.13), radius: 8, y: 4)
+        .modifier(
+            GlassIconButtonAccessibilityModifier(
+                accessibilityLabel: accessibilityLabel,
+                accessibilityHint: accessibilityHint
+            )
+        )
         #if os(visionOS)
         .hoverEffect(.lift)
         #endif
+    }
+}
+
+private struct GlassIconButtonAccessibilityModifier: ViewModifier {
+    let accessibilityLabel: String?
+    let accessibilityHint: String?
+
+    func body(content: Content) -> some View {
+        if let accessibilityLabel {
+            content
+                .accessibilityLabel(accessibilityLabel)
+                .accessibilityHint(accessibilityHint ?? "")
+        } else if let accessibilityHint {
+            content
+                .accessibilityHint(accessibilityHint)
+        } else {
+            content
+        }
     }
 }
 
@@ -501,10 +527,14 @@ struct PasteFieldButton: View {
             #endif
         } label: {
             Image(systemName: "doc.on.clipboard")
-                .font(.system(size: 14, weight: .medium))
+                .font(.system(size: 16, weight: .medium))
                 .foregroundStyle(.secondary)
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityLabel("Paste from Clipboard")
+        .accessibilityHint("Pastes the current clipboard text into this field.")
         #if os(visionOS)
         .hoverEffect(.highlight)
         #endif

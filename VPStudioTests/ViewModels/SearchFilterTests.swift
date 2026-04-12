@@ -209,8 +209,8 @@ struct SearchLanguageOptionTests {
         #expect(!SearchLanguageOption.common.isEmpty)
     }
 
-    @Test func commonLanguagesCountIsSeventeen() {
-        #expect(SearchLanguageOption.common.count == 17)
+    @Test func commonLanguagesCountMatchesExpandedCatalog() {
+        #expect(SearchLanguageOption.common.count == 19)
     }
 
     @Test func englishIsFirstCommonLanguage() {
@@ -305,6 +305,21 @@ struct SearchLanguageOptionTests {
         // Unknown code falls through displayName which returns the code itself
         let summary = SearchLanguageOption.summaryName(for: ["xx-ZZ"])
         #expect(summary == "xx-ZZ")
+    }
+
+    @Test func normalizeSelectionPreservesMultipleKnownLanguages() {
+        let normalized = SearchLanguageOption.normalizeSelection(from: ["fr-FR", "en-US", "ja-JP"])
+        #expect(normalized == ["fr-FR", "en-US", "ja-JP"])
+    }
+
+    @Test func normalizeSelectionDropsUnknownCodes() {
+        let normalized = SearchLanguageOption.normalizeSelection(from: ["fr-FR", "xx-ZZ"])
+        #expect(normalized == ["fr-FR"])
+    }
+
+    @Test func normalizeSelectionDefaultsToEnglishWhenNoKnownCodesRemain() {
+        let normalized = SearchLanguageOption.normalizeSelection(from: ["xx-ZZ"])
+        #expect(normalized == ["en-US"])
     }
 
     // MARK: - Specific Language Presence

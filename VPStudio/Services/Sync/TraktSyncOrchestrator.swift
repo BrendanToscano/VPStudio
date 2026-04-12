@@ -7,7 +7,7 @@ import Foundation
 /// - Ratings become `TasteEvent(eventType: .rated)` with 1-10 scale
 /// - History items become `WatchHistory` records (isCompleted=true) **and**
 ///   `UserLibraryEntry(listType: .history)` for backwards compatibility.
-///   Pull paginates up to 20 pages (1,000 items) per media type.
+///   Pull paginates until Trakt returns a short page by default.
 ///
 /// **Push (Local -> Trakt):**
 /// - Local watchlist entries with IMDb IDs are added to Trakt watchlist
@@ -26,17 +26,21 @@ actor TraktSyncOrchestrator {
         traktService: TraktSyncService,
         database: DatabaseManager,
         settingsManager: SettingsManager,
-        maxHistoryPages: Int = defaultMaxHistoryPages
+        maxHistoryPages: Int? = defaultMaxHistoryPages
     ) {
         self.traktService = traktService
         self.database = database
         self.settingsManager = settingsManager
-        self.maxPages = maxHistoryPages
+        self.maxPages = maxHistoryPages.flatMap { $0 > 0 ? $0 : nil }
     }
 
     /// Performs a full bi-directional sync based on current toggle settings.
     func sync() async -> SyncResult {
         var result = SyncResult()
+        var attemptedEnabledOperation = false
+        var completedMeaningfulOperation = false
+
+        guard !isCancellationRequested else { return result }
 
         let syncWatchlist = (try? await settingsManager.getBool(
             key: SettingsKeys.traktSyncWatchlist, default: true
@@ -53,44 +57,62 @@ actor TraktSyncOrchestrator {
         // --- Pull ---
 
         if syncWatchlist {
+            guard !isCancellationRequested else { return result }
+            attemptedEnabledOperation = true
             let pullResult = await pullWatchlist()
             result.watchlistPulled = pullResult.count
             result.errors.append(contentsOf: pullResult.errors)
             result.localRefreshTargets.formUnion(pullResult.localRefreshTargets)
+            completedMeaningfulOperation = completedMeaningfulOperation || pullResult.shouldAdvanceLastSyncDate
         }
 
         if syncRatings {
+            guard !isCancellationRequested else { return result }
+            attemptedEnabledOperation = true
             let pullResult = await pullRatings()
             result.ratingsPulled = pullResult.count
             result.errors.append(contentsOf: pullResult.errors)
             result.localRefreshTargets.formUnion(pullResult.localRefreshTargets)
+            completedMeaningfulOperation = completedMeaningfulOperation || pullResult.shouldAdvanceLastSyncDate
         }
 
         if syncHistory {
+            guard !isCancellationRequested else { return result }
+            attemptedEnabledOperation = true
             let pullResult = await pullHistory()
             result.historyPulled = pullResult.count
             result.errors.append(contentsOf: pullResult.errors)
             result.localRefreshTargets.formUnion(pullResult.localRefreshTargets)
+            completedMeaningfulOperation = completedMeaningfulOperation || pullResult.shouldAdvanceLastSyncDate
         }
 
         // --- Push ---
 
         if syncWatchlist {
+            guard !isCancellationRequested else { return result }
+            attemptedEnabledOperation = true
             let pushResult = await pushWatchlist()
             result.watchlistPushed = pushResult.count
             result.errors.append(contentsOf: pushResult.errors)
+            completedMeaningfulOperation = completedMeaningfulOperation || pushResult.shouldAdvanceLastSyncDate
         }
 
         if syncRatings {
+            guard !isCancellationRequested else { return result }
+            attemptedEnabledOperation = true
             let pushResult = await pushRatings()
             result.ratingsPushed = pushResult.count
             result.errors.append(contentsOf: pushResult.errors)
+            completedMeaningfulOperation = completedMeaningfulOperation || pushResult.shouldAdvanceLastSyncDate
         }
 
         if syncHistory {
+            guard !isCancellationRequested else { return result }
+            attemptedEnabledOperation = true
             let pushResult = await pushHistory()
             result.historyPushed = pushResult.count
             result.errors.append(contentsOf: pushResult.errors)
+            completedMeaningfulOperation = completedMeaningfulOperation || pushResult.shouldAdvanceLastSyncDate
         }
 
         // --- Folders (bi-directional, uses Trakt custom lists) ---
@@ -100,19 +122,26 @@ actor TraktSyncOrchestrator {
         )) ?? false
 
         if syncFolders {
+            guard !isCancellationRequested else { return result }
+            attemptedEnabledOperation = true
             let folderResult = await syncCustomLists()
             result.foldersPulled = folderResult.pulled
             result.foldersPushed = folderResult.pushed
             result.errors.append(contentsOf: folderResult.errors)
             result.localRefreshTargets.formUnion(folderResult.localRefreshTargets)
+            completedMeaningfulOperation = completedMeaningfulOperation || folderResult.shouldAdvanceLastSyncDate
         }
 
-        // Record last sync timestamp
-        let formatter = ISO8601DateFormatter()
-        try? await settingsManager.setString(
-            key: SettingsKeys.traktLastSyncDate,
-            value: formatter.string(from: Date())
-        )
+        // Keep the last-sync marker useful even when part of the sync failed.
+        // If at least one enabled operation completed meaningfully, or nothing
+        // was enabled at all, advance the marker while still surfacing errors.
+        if !isCancellationRequested, completedMeaningfulOperation || !attemptedEnabledOperation {
+            let formatter = ISO8601DateFormatter()
+            try? await settingsManager.setString(
+                key: SettingsKeys.traktLastSyncDate,
+                value: formatter.string(from: Date())
+            )
+        }
 
         return result
     }
@@ -125,36 +154,72 @@ actor TraktSyncOrchestrator {
         var localRefreshTargets: SyncResult.LocalRefreshTargets = []
 
         for mediaType in [MediaType.movie, MediaType.series] {
-            do {
-                let items = try await traktService.getWatchlist(type: mediaType)
-                for item in items {
-                    guard let mediaId = extractMediaId(from: item) else { continue }
-                    do {
-                        let exists = try await database.isInLibrary(
-                            mediaId: mediaId, listType: .watchlist
-                        )
-                        if !exists {
-                            let entry = UserLibraryEntry(
-                                id: UUID().uuidString,
-                                mediaId: mediaId,
-                                folderId: LibraryFolder.systemFolderID(for: .watchlist),
-                                listType: .watchlist,
-                                addedAt: Date()
-                            )
-                            try await database.addToLibrary(entry)
-                            created += 1
-                            localRefreshTargets.insert(.library)
-                        }
-                        // Ensure a stub MediaItem exists so LibraryView can display it
-                        if (try? await ensureMediaItem(from: item, mediaId: mediaId)) == true {
-                            localRefreshTargets.insert(.library)
-                        }
-                    } catch {
-                        errors.append("Pull watchlist entry \(mediaId): \(error.localizedDescription)")
-                    }
+            guard !isCancellationRequested else {
+                return OperationResult(
+                    count: created,
+                    errors: errors,
+                    localRefreshTargets: localRefreshTargets
+                )
+            }
+            let items: [TraktItem]
+            switch await collectRemotePages(
+                resource: "Remote Trakt \(mediaType.rawValue) watchlist pull",
+                fetchPage: { [self] page in
+                    try await self.traktService.getWatchlist(type: mediaType, page: page)
                 }
-            } catch {
-                errors.append("Pull watchlist (\(mediaType.rawValue)): \(error.localizedDescription)")
+            ) {
+            case .success(let fetchedItems):
+                items = fetchedItems
+            case .cancelled:
+                return OperationResult(
+                    count: created,
+                    errors: errors,
+                    localRefreshTargets: localRefreshTargets
+                )
+            case .failure(let error):
+                errors.append(error)
+                continue
+            }
+
+            for item in items {
+                guard !isCancellationRequested else {
+                    return OperationResult(
+                        count: created,
+                        errors: errors,
+                        localRefreshTargets: localRefreshTargets
+                    )
+                }
+                guard let mediaId = extractMediaId(from: item) else { continue }
+                do {
+                    let exists = try await database.isInLibrary(
+                        mediaId: mediaId, listType: .watchlist
+                    )
+                    if !exists {
+                        let entry = UserLibraryEntry(
+                            id: UUID().uuidString,
+                            mediaId: mediaId,
+                            folderId: LibraryFolder.systemFolderID(for: .watchlist),
+                            listType: .watchlist,
+                            addedAt: Date()
+                        )
+                        try await database.addToLibrary(entry)
+                        created += 1
+                        localRefreshTargets.insert(.library)
+                    }
+                    // Ensure a stub MediaItem exists so LibraryView can display it
+                    if (try? await ensureMediaItem(from: item, mediaId: mediaId)) == true {
+                        localRefreshTargets.insert(.library)
+                    }
+                } catch {
+                    if isCancellationError(error) {
+                        return OperationResult(
+                            count: created,
+                            errors: errors,
+                            localRefreshTargets: localRefreshTargets
+                        )
+                    }
+                    errors.append("Pull watchlist entry \(mediaId): \(error.localizedDescription)")
+                }
             }
         }
 
@@ -171,51 +236,87 @@ actor TraktSyncOrchestrator {
         var localRefreshTargets: SyncResult.LocalRefreshTargets = []
 
         for mediaType in [MediaType.movie, MediaType.series] {
-            do {
-                let items = try await traktService.getRatings(type: mediaType)
-                for item in items {
-                    guard let mediaId = extractRatingMediaId(from: item) else { continue }
-                    do {
-                        let existing = try await database.fetchLatestTasteRating(mediaId: mediaId)
-                        let remoteRating = Double(item.rating)
-                        let localRating = existing?.feedbackValue?.rounded()
-                        let remoteRatedAt = parseHistoryDate(item.ratedAt)
-                        let shouldWriteEvent: Bool
-
-                        if existing == nil {
-                            shouldWriteEvent = true
-                        } else if localRating != remoteRating.rounded() {
-                            shouldWriteEvent = true
-                        } else if let existing,
-                                  let remoteRatedAt,
-                                  remoteRatedAt > existing.createdAt {
-                            shouldWriteEvent = true
-                        } else {
-                            shouldWriteEvent = false
-                        }
-
-                        guard shouldWriteEvent else { continue }
-
-                        let event = TasteEvent(
-                            userId: "default",
-                            mediaId: mediaId,
-                            eventType: .rated,
-                            signalStrength: 1.0,
-                            feedbackScale: .oneToTen,
-                            feedbackValue: remoteRating,
-                            source: .automatic,
-                            metadata: ["trakt_synced": "true"],
-                            createdAt: remoteRatedAt ?? Date()
-                        )
-                        try await database.saveTasteEvent(event)
-                        createdOrUpdated += 1
-                        localRefreshTargets.insert(.tasteProfile)
-                    } catch {
-                        errors.append("Pull rating \(mediaId): \(error.localizedDescription)")
-                    }
+            guard !isCancellationRequested else {
+                return OperationResult(
+                    count: createdOrUpdated,
+                    errors: errors,
+                    localRefreshTargets: localRefreshTargets
+                )
+            }
+            let items: [TraktRatingItem]
+            switch await collectRemotePages(
+                resource: "Remote Trakt \(mediaType.rawValue) ratings pull",
+                fetchPage: { [self] page in
+                    try await self.traktService.getRatings(type: mediaType, page: page)
                 }
-            } catch {
-                errors.append("Pull ratings (\(mediaType.rawValue)): \(error.localizedDescription)")
+            ) {
+            case .success(let fetchedItems):
+                items = fetchedItems
+            case .cancelled:
+                return OperationResult(
+                    count: createdOrUpdated,
+                    errors: errors,
+                    localRefreshTargets: localRefreshTargets
+                )
+            case .failure(let error):
+                errors.append(error)
+                continue
+            }
+
+            for item in items {
+                guard !isCancellationRequested else {
+                    return OperationResult(
+                        count: createdOrUpdated,
+                        errors: errors,
+                        localRefreshTargets: localRefreshTargets
+                    )
+                }
+                guard let mediaId = extractRatingMediaId(from: item) else { continue }
+                do {
+                    let existing = try await database.fetchLatestTasteRating(mediaId: mediaId)
+                    let remoteRating = Double(item.rating)
+                    let localRating = existing?.feedbackValue?.rounded()
+                    let remoteRatedAt = parseHistoryDate(item.ratedAt)
+                    let shouldWriteEvent: Bool
+
+                    if existing == nil {
+                        shouldWriteEvent = true
+                    } else if localRating != remoteRating.rounded() {
+                        shouldWriteEvent = true
+                    } else if let existing,
+                              let remoteRatedAt,
+                              remoteRatedAt > existing.createdAt {
+                        shouldWriteEvent = true
+                    } else {
+                        shouldWriteEvent = false
+                    }
+
+                    guard shouldWriteEvent else { continue }
+
+                    let event = TasteEvent(
+                        userId: "default",
+                        mediaId: mediaId,
+                        eventType: .rated,
+                        signalStrength: 1.0,
+                        feedbackScale: .oneToTen,
+                        feedbackValue: remoteRating,
+                        source: .automatic,
+                        metadata: ["trakt_synced": "true"],
+                        createdAt: remoteRatedAt ?? Date()
+                    )
+                    try await database.saveTasteEvent(event)
+                    createdOrUpdated += 1
+                    localRefreshTargets.insert(.tasteProfile)
+                } catch {
+                    if isCancellationError(error) {
+                        return OperationResult(
+                            count: createdOrUpdated,
+                            errors: errors,
+                            localRefreshTargets: localRefreshTargets
+                        )
+                    }
+                    errors.append("Pull rating \(mediaId): \(error.localizedDescription)")
+                }
             }
         }
 
@@ -226,12 +327,12 @@ actor TraktSyncOrchestrator {
         )
     }
 
-    /// Maximum number of pages to fetch during history pull (each page = 50 items).
-    /// Overridable for tests via init parameter.
-    static let defaultMaxHistoryPages = 20
+    /// Maximum number of pages to fetch during remote page collection.
+    /// `nil` disables the cap; tests may inject a smaller explicit limit.
+    static let defaultMaxHistoryPages: Int? = nil
     /// Backwards-compatible alias.
-    static var maxHistoryPages: Int { defaultMaxHistoryPages }
-    private let maxPages: Int
+    static var maxHistoryPages: Int? { defaultMaxHistoryPages }
+    private let maxPages: Int?
 
     private func pullHistory() async -> OperationResult {
         var created = 0
@@ -239,27 +340,62 @@ actor TraktSyncOrchestrator {
         var localRefreshTargets: SyncResult.LocalRefreshTargets = []
 
         for mediaType in [MediaType.movie, MediaType.series] {
+            guard !isCancellationRequested else {
+                return OperationResult(
+                    count: created,
+                    errors: errors,
+                    localRefreshTargets: localRefreshTargets
+                )
+            }
             do {
                 var page = 1
                 var keepPaging = true
 
-                while keepPaging, page <= maxPages {
+                while keepPaging {
+                    guard !isCancellationRequested else {
+                        return OperationResult(
+                            count: created,
+                            errors: errors,
+                            localRefreshTargets: localRefreshTargets
+                        )
+                    }
+                    if let maxPages, page > maxPages {
+                        errors.append(
+                            "Pull history (\(mediaType.rawValue)) exceeded the \(maxPages)-page cap. Remote state is incomplete."
+                        )
+                        break
+                    }
                     let items = try await traktService.getHistory(type: mediaType, page: page)
+                    guard !isCancellationRequested else {
+                        return OperationResult(
+                            count: created,
+                            errors: errors,
+                            localRefreshTargets: localRefreshTargets
+                        )
+                    }
 
                     for item in items {
+                        guard !isCancellationRequested else {
+                            return OperationResult(
+                                count: created,
+                                errors: errors,
+                                localRefreshTargets: localRefreshTargets
+                            )
+                        }
                         guard let identifiers = extractHistoryIdentifiers(from: item) else { continue }
                         let mediaId = identifiers.mediaId
                         let episodeId = identifiers.episodeId
 
                         do {
                             // Write to WatchHistory table (what the app actually displays)
-                            let existingWatch = try await database.fetchWatchHistory(
+                            let watchedAt = parseHistoryDate(item.watchedAt) ?? Date()
+                            let existingWatch = try await database.hasCompletedWatchHistoryEntry(
                                 mediaId: mediaId,
-                                episodeId: episodeId
+                                episodeId: episodeId,
+                                watchedAt: watchedAt
                             )
-                            if existingWatch == nil {
+                            if !existingWatch {
                                 let title = extractHistoryTitle(from: item)
-                                let watchedAt = parseHistoryDate(item.watchedAt) ?? Date()
 
                                 let watchHistory = WatchHistory(
                                     id: UUID().uuidString,
@@ -306,6 +442,13 @@ actor TraktSyncOrchestrator {
                                 localRefreshTargets.insert(.library)
                             }
                         } catch {
+                            if isCancellationError(error) {
+                                return OperationResult(
+                                    count: created,
+                                    errors: errors,
+                                    localRefreshTargets: localRefreshTargets
+                                )
+                            }
                             errors.append("Pull history entry \(mediaId): \(error.localizedDescription)")
                         }
                     }
@@ -315,6 +458,13 @@ actor TraktSyncOrchestrator {
                     page += 1
                 }
             } catch {
+                if isCancellationError(error) {
+                    return OperationResult(
+                        count: created,
+                        errors: errors,
+                        localRefreshTargets: localRefreshTargets
+                    )
+                }
                 errors.append("Pull history (\(mediaType.rawValue)): \(error.localizedDescription)")
             }
         }
@@ -333,11 +483,25 @@ actor TraktSyncOrchestrator {
         var errors: [String] = []
 
         do {
+            guard !isCancellationRequested else {
+                return OperationResult(count: pushed, errors: errors, localRefreshTargets: [])
+            }
             let localEntries = try await database.fetchLibraryEntries(listType: .watchlist)
-            // Fetch remote watchlist IMDb IDs for deduplication
-            let remoteImdbIds = await fetchRemoteWatchlistImdbIds()
+            let remoteImdbIds: Set<String>
+            switch await fetchRemoteWatchlistImdbIds() {
+            case .success(let ids):
+                remoteImdbIds = ids
+            case .cancelled:
+                return OperationResult(count: pushed, errors: errors, localRefreshTargets: [])
+            case .failure(let error):
+                errors.append(error)
+                return OperationResult(count: 0, errors: errors, localRefreshTargets: [])
+            }
 
             for entry in localEntries {
+                guard !isCancellationRequested else {
+                    return OperationResult(count: pushed, errors: errors, localRefreshTargets: [])
+                }
                 let mediaId = entry.mediaId
                 // Only push items that look like IMDb IDs (the format Trakt expects)
                 guard mediaId.hasPrefix("tt") else { continue }
@@ -348,10 +512,16 @@ actor TraktSyncOrchestrator {
                     try await traktService.addToWatchlist(imdbId: mediaId, type: mediaType)
                     pushed += 1
                 } catch {
+                    if isCancellationError(error) {
+                        return OperationResult(count: pushed, errors: errors, localRefreshTargets: [])
+                    }
                     errors.append("Push watchlist \(mediaId): \(error.localizedDescription)")
                 }
             }
         } catch {
+            if isCancellationError(error) {
+                return OperationResult(count: pushed, errors: errors, localRefreshTargets: [])
+            }
             errors.append("Push watchlist fetch: \(error.localizedDescription)")
         }
 
@@ -367,7 +537,19 @@ actor TraktSyncOrchestrator {
         var errors: [String] = []
 
         do {
-            let remoteRatingsByImdb = await fetchRemoteRatingsByImdbId()
+            guard !isCancellationRequested else {
+                return OperationResult(count: pushed, errors: errors, localRefreshTargets: [])
+            }
+            let remoteRatingsByImdb: [String: TraktRatingItem]
+            switch await fetchRemoteRatingsByImdbId() {
+            case .success(let ratings):
+                remoteRatingsByImdb = ratings
+            case .cancelled:
+                return OperationResult(count: pushed, errors: errors, localRefreshTargets: [])
+            case .failure(let error):
+                errors.append(error)
+                return OperationResult(count: 0, errors: errors, localRefreshTargets: [])
+            }
 
             // Deduplicate across all local pages: keep the newest event per mediaId.
             var latestEventsByMediaId: [String: TasteEvent] = [:]
@@ -375,6 +557,9 @@ actor TraktSyncOrchestrator {
             var offset = 0
 
             while true {
+                guard !isCancellationRequested else {
+                    return OperationResult(count: pushed, errors: errors, localRefreshTargets: [])
+                }
                 let page = try await database.fetchTasteEvents(
                     eventType: .rated,
                     limit: pageSize,
@@ -394,10 +579,10 @@ actor TraktSyncOrchestrator {
             }
 
             for (mediaId, event) in latestEventsByMediaId {
-                guard let feedbackValue = event.feedbackValue else { continue }
-
-                let rating = Int(feedbackValue.rounded())
-                let clampedRating = max(1, min(10, rating))
+                guard !isCancellationRequested else {
+                    return OperationResult(count: pushed, errors: errors, localRefreshTargets: [])
+                }
+                guard let clampedRating = traktRating(from: event) else { continue }
 
                 if let remoteRating = remoteRatingsByImdb[mediaId],
                    remoteRating.rating == clampedRating {
@@ -413,10 +598,16 @@ actor TraktSyncOrchestrator {
                     )
                     pushed += 1
                 } catch {
+                    if isCancellationError(error) {
+                        return OperationResult(count: pushed, errors: errors, localRefreshTargets: [])
+                    }
                     errors.append("Push rating \(mediaId): \(error.localizedDescription)")
                 }
             }
         } catch {
+            if isCancellationError(error) {
+                return OperationResult(count: pushed, errors: errors, localRefreshTargets: [])
+            }
             errors.append("Push ratings fetch: \(error.localizedDescription)")
         }
 
@@ -432,11 +623,26 @@ actor TraktSyncOrchestrator {
         var errors: [String] = []
 
         do {
-            let remoteHistoryKeys = await fetchRemoteHistoryKeys()
+            guard !isCancellationRequested else {
+                return OperationResult(count: pushed, errors: errors, localRefreshTargets: [])
+            }
+            let remoteHistoryKeys: Set<String>
+            switch await fetchRemoteHistoryKeys() {
+            case .success(let keys):
+                remoteHistoryKeys = keys
+            case .cancelled:
+                return OperationResult(count: pushed, errors: errors, localRefreshTargets: [])
+            case .failure(let error):
+                errors.append(error)
+                return OperationResult(count: 0, errors: errors, localRefreshTargets: [])
+            }
             let pageSize = 1000
             var offset = 0
 
             while true {
+                guard !isCancellationRequested else {
+                    return OperationResult(count: pushed, errors: errors, localRefreshTargets: [])
+                }
                 let localEntries = try await database.fetchCompletedWatchHistory(
                     limit: pageSize,
                     offset: offset
@@ -444,11 +650,18 @@ actor TraktSyncOrchestrator {
                 if localEntries.isEmpty { break }
 
                 for entry in localEntries {
+                    guard !isCancellationRequested else {
+                        return OperationResult(count: pushed, errors: errors, localRefreshTargets: [])
+                    }
                     let mediaId = entry.mediaId
                     // Only push items that look like IMDb IDs (the format Trakt expects)
                     guard mediaId.hasPrefix("tt") else { continue }
 
-                    let syncKey = historySyncKey(mediaId: mediaId, episodeId: entry.episodeId)
+                    let syncKey = historySyncKey(
+                        mediaId: mediaId,
+                        episodeId: entry.episodeId,
+                        watchedAt: entry.watchedAt
+                    )
                     guard !remoteHistoryKeys.contains(syncKey) else { continue }
 
                     do {
@@ -467,6 +680,9 @@ actor TraktSyncOrchestrator {
                         )
                         pushed += 1
                     } catch {
+                        if isCancellationError(error) {
+                            return OperationResult(count: pushed, errors: errors, localRefreshTargets: [])
+                        }
                         errors.append("Push history \(mediaId): \(error.localizedDescription)")
                     }
                 }
@@ -475,6 +691,9 @@ actor TraktSyncOrchestrator {
                 offset += localEntries.count
             }
         } catch {
+            if isCancellationError(error) {
+                return OperationResult(count: pushed, errors: errors, localRefreshTargets: [])
+            }
             errors.append("Push history fetch: \(error.localizedDescription)")
         }
 
@@ -492,6 +711,10 @@ actor TraktSyncOrchestrator {
         var pushed: Int
         var errors: [String]
         var localRefreshTargets: SyncResult.LocalRefreshTargets
+
+        var shouldAdvanceLastSyncDate: Bool {
+            pulled > 0 || pushed > 0 || errors.isEmpty
+        }
     }
 
     /// Bi-directional sync between local Library folders and Trakt custom lists.
@@ -514,6 +737,14 @@ actor TraktSyncOrchestrator {
             let mappedTraktIds = Set(existingMappings.map(\.traktListId))
 
             for list in remoteLists {
+                guard !isCancellationRequested else {
+                    return FolderSyncResult(
+                        pulled: pulled,
+                        pushed: pushed,
+                        errors: errors,
+                        localRefreshTargets: localRefreshTargets
+                    )
+                }
                 let traktId = list.ids.trakt
 
                 if mappedTraktIds.contains(traktId) {
@@ -529,6 +760,13 @@ actor TraktSyncOrchestrator {
                         if pullResult.didMutateLibrary {
                             localRefreshTargets.insert(.library)
                         }
+                    } catch is CancellationError {
+                        return FolderSyncResult(
+                            pulled: pulled,
+                            pushed: pushed,
+                            errors: errors,
+                            localRefreshTargets: localRefreshTargets
+                        )
                     } catch {
                         errors.append("Pull list items \(list.name): \(error.localizedDescription)")
                     }
@@ -557,12 +795,27 @@ actor TraktSyncOrchestrator {
                         if pullResult.didMutateLibrary {
                             localRefreshTargets.insert(.library)
                         }
+                    } catch is CancellationError {
+                        return FolderSyncResult(
+                            pulled: pulled,
+                            pushed: pushed,
+                            errors: errors,
+                            localRefreshTargets: localRefreshTargets
+                        )
                     } catch {
                         errors.append("Create folder for Trakt list \(list.name): \(error.localizedDescription)")
                     }
                 }
             }
         } catch {
+            if isCancellationError(error) {
+                return FolderSyncResult(
+                    pulled: pulled,
+                    pushed: pushed,
+                    errors: errors,
+                    localRefreshTargets: localRefreshTargets
+                )
+            }
             errors.append("Fetch Trakt custom lists: \(error.localizedDescription)")
         }
 
@@ -575,6 +828,14 @@ actor TraktSyncOrchestrator {
             let mappedFolderIds = Set(existingMappings.map(\.localFolderId))
 
             for folder in customFolders {
+                guard !isCancellationRequested else {
+                    return FolderSyncResult(
+                        pulled: pulled,
+                        pushed: pushed,
+                        errors: errors,
+                        localRefreshTargets: localRefreshTargets
+                    )
+                }
                 if mappedFolderIds.contains(folder.id) {
                     // Already mapped — push local items not yet on the Trakt list
                     guard let mapping = existingMappings.first(where: { $0.localFolderId == folder.id }) else { continue }
@@ -585,6 +846,13 @@ actor TraktSyncOrchestrator {
                             listType: mapping.listType
                         )
                         pushed += itemsPushed
+                    } catch is CancellationError {
+                        return FolderSyncResult(
+                            pulled: pulled,
+                            pushed: pushed,
+                            errors: errors,
+                            localRefreshTargets: localRefreshTargets
+                        )
                     } catch {
                         errors.append("Push folder items \(folder.name): \(error.localizedDescription)")
                     }
@@ -606,12 +874,27 @@ actor TraktSyncOrchestrator {
                             listType: .watchlist
                         )
                         pushed += itemsPushed
+                    } catch is CancellationError {
+                        return FolderSyncResult(
+                            pulled: pulled,
+                            pushed: pushed,
+                            errors: errors,
+                            localRefreshTargets: localRefreshTargets
+                        )
                     } catch {
                         errors.append("Create Trakt list for folder \(folder.name): \(error.localizedDescription)")
                     }
                 }
             }
         } catch {
+            if isCancellationError(error) {
+                return FolderSyncResult(
+                    pulled: pulled,
+                    pushed: pushed,
+                    errors: errors,
+                    localRefreshTargets: localRefreshTargets
+                )
+            }
             errors.append("Fetch local folders: \(error.localizedDescription)")
         }
 
@@ -629,6 +912,7 @@ actor TraktSyncOrchestrator {
         localFolderId: String,
         listType: UserLibraryEntry.ListType
     ) async throws -> (count: Int, didMutateLibrary: Bool) {
+        try Task.checkCancellation()
         let items = try await traktService.getListItems(listId: traktListId)
         var created = 0
         var removed = 0
@@ -637,6 +921,7 @@ actor TraktSyncOrchestrator {
         var remoteMediaIds = Set<String>()
 
         for item in items {
+            try Task.checkCancellation()
             let mediaId: String?
             if let imdb = item.movie?.ids.imdb, !imdb.isEmpty { mediaId = imdb }
             else if let imdb = item.show?.ids.imdb, !imdb.isEmpty { mediaId = imdb }
@@ -677,6 +962,7 @@ actor TraktSyncOrchestrator {
         // Delete local entries that were removed from the remote list.
         let localEntries = try await database.fetchLibraryEntries(listType: listType, folderId: localFolderId)
         for entry in localEntries where !remoteMediaIds.contains(entry.mediaId) {
+            try Task.checkCancellation()
             try await database.removeFromLibrary(
                 mediaId: entry.mediaId,
                 listType: listType,
@@ -695,6 +981,7 @@ actor TraktSyncOrchestrator {
         traktListId: Int,
         listType: UserLibraryEntry.ListType
     ) async throws -> Int {
+        try Task.checkCancellation()
         let entries = try await database.fetchLibraryEntries(
             listType: listType,
             folderId: localFolderId
@@ -718,11 +1005,13 @@ actor TraktSyncOrchestrator {
         // Collect additions.
         var toAdd: [(id: String, type: MediaType)] = []
         for imdbId in localImdbIds.subtracting(remoteImdbIds) {
+            try Task.checkCancellation()
             let mediaType = await resolveMediaType(for: imdbId)
             toAdd.append((id: imdbId, type: mediaType))
         }
 
         if !toAdd.isEmpty {
+            try Task.checkCancellation()
             try await traktService.addToCustomList(listId: traktListId, imdbIds: toAdd)
         }
 
@@ -732,6 +1021,7 @@ actor TraktSyncOrchestrator {
             return (id: imdbId, type: mediaType)
         }
         if !toRemove.isEmpty {
+            try Task.checkCancellation()
             try await traktService.removeFromCustomList(listId: traktListId, imdbIds: toRemove)
         }
 
@@ -760,6 +1050,55 @@ actor TraktSyncOrchestrator {
     private struct HistoryIdentifiers {
         let mediaId: String
         let episodeId: String?
+    }
+
+    private enum RemotePageCollection<T> {
+        case success(T)
+        case cancelled
+        case failure(String)
+    }
+
+    private func collectRemotePages<T>(
+        resource: String,
+        fetchPage: @escaping (Int) async throws -> [T]
+    ) async -> RemotePageCollection<[T]> {
+        var itemsByPage: [T] = []
+        var page = 1
+
+        while true {
+            if isCancellationRequested {
+                return .cancelled
+            }
+            do {
+                let pageItems = try await fetchPage(page)
+                if isCancellationRequested {
+                    return .cancelled
+                }
+                itemsByPage.append(contentsOf: pageItems)
+
+                let hasMorePages = pageItems.count >= 50
+                guard hasMorePages else {
+                    return .success(itemsByPage)
+                }
+
+                if let maxPages, page == maxPages {
+                    return .failure(
+                        "\(resource) exceeded the \(maxPages)-page deduplication cap. Remote state is incomplete, so the push was skipped."
+                    )
+                }
+
+                page += 1
+            } catch {
+                if isCancellationError(error) {
+                    return .cancelled
+                }
+                return .failure(
+                    "\(resource) page \(page) failed during deduplication: \(error.localizedDescription)"
+                )
+            }
+        }
+
+        return .success(itemsByPage)
     }
 
     private func extractHistoryIdentifiers(from item: TraktHistoryItem) -> HistoryIdentifiers? {
@@ -797,82 +1136,116 @@ actor TraktSyncOrchestrator {
     }
 
     /// Fetches all IMDb IDs in the remote Trakt watchlist for deduplication during push.
-    private func fetchRemoteWatchlistImdbIds() async -> Set<String> {
+    private func fetchRemoteWatchlistImdbIds() async -> RemotePageCollection<Set<String>> {
         var ids = Set<String>()
         for mediaType in [MediaType.movie, MediaType.series] {
-            var page = 1
-            var keepPaging = true
-
-            while keepPaging {
-                guard let items = try? await traktService.getWatchlist(type: mediaType, page: page) else {
-                    break
+            if isCancellationRequested {
+                return .cancelled
+            }
+            let remoteItems: [TraktItem]
+            switch await collectRemotePages(
+                resource: "Remote Trakt \(mediaType.rawValue) watchlist",
+                fetchPage: { [self] page in
+                    try await self.traktService.getWatchlist(type: mediaType, page: page)
                 }
+            ) {
+            case .success(let items):
+                remoteItems = items
+            case .cancelled:
+                return .cancelled
+            case .failure(let error):
+                return .failure(error)
+            }
 
-                for item in items {
-                    if let imdb = item.movie?.ids.imdb ?? item.show?.ids.imdb {
-                        ids.insert(imdb)
-                    }
+            for item in remoteItems {
+                if isCancellationRequested {
+                    return .cancelled
                 }
-
-                keepPaging = items.count >= 50
-                page += 1
+                if let imdb = item.movie?.ids.imdb ?? item.show?.ids.imdb {
+                    ids.insert(imdb)
+                }
             }
         }
-        return ids
+        return .success(ids)
     }
 
     /// Fetches latest Trakt ratings keyed by IMDb ID.
-    private func fetchRemoteRatingsByImdbId() async -> [String: TraktRatingItem] {
+    private func fetchRemoteRatingsByImdbId() async -> RemotePageCollection<[String: TraktRatingItem]> {
         var ratings: [String: TraktRatingItem] = [:]
 
         for mediaType in [MediaType.movie, MediaType.series] {
-            var page = 1
-            var keepPaging = true
-
-            while keepPaging {
-                guard let items = try? await traktService.getRatings(type: mediaType, page: page) else {
-                    break
+            if isCancellationRequested {
+                return .cancelled
+            }
+            let remoteItems: [TraktRatingItem]
+            switch await collectRemotePages(
+                resource: "Remote Trakt \(mediaType.rawValue) ratings",
+                fetchPage: { [self] page in
+                    try await self.traktService.getRatings(type: mediaType, page: page)
                 }
+            ) {
+            case .success(let items):
+                remoteItems = items
+            case .cancelled:
+                return .cancelled
+            case .failure(let error):
+                return .failure(error)
+            }
 
-                for item in items {
-                    guard let imdb = item.movie?.ids.imdb ?? item.show?.ids.imdb,
-                          !imdb.isEmpty else { continue }
-                    if ratings[imdb] == nil {
-                        ratings[imdb] = item
-                    }
+            for item in remoteItems {
+                if isCancellationRequested {
+                    return .cancelled
                 }
-
-                keepPaging = items.count >= 50
-                page += 1
+                guard let imdb = item.movie?.ids.imdb ?? item.show?.ids.imdb,
+                      !imdb.isEmpty else { continue }
+                if ratings[imdb] == nil {
+                    ratings[imdb] = item
+                }
             }
         }
 
-        return ratings
+        return .success(ratings)
     }
 
     /// Fetches remote Trakt history keys for deduplication during push.
-    /// Respects the same page limit as pullHistory to avoid unbounded paging.
-    private func fetchRemoteHistoryKeys() async -> Set<String> {
+    /// Respects the same optional page limit as pullHistory when one is injected.
+    private func fetchRemoteHistoryKeys() async -> RemotePageCollection<Set<String>> {
         var keys = Set<String>()
         for mediaType in [MediaType.movie, MediaType.series] {
-            var page = 1
-            var keepPaging = true
-
-            while keepPaging, page <= maxPages {
-                guard let items = try? await traktService.getHistory(type: mediaType, page: page) else {
-                    break
+            if isCancellationRequested {
+                return .cancelled
+            }
+            let remoteItems: [TraktHistoryItem]
+            switch await collectRemotePages(
+                resource: "Remote Trakt \(mediaType.rawValue) history",
+                fetchPage: { [self] page in
+                    try await self.traktService.getHistory(type: mediaType, page: page)
                 }
+            ) {
+            case .success(let items):
+                remoteItems = items
+            case .cancelled:
+                return .cancelled
+            case .failure(let error):
+                return .failure(error)
+            }
 
-                for item in items {
-                    guard let identifiers = extractHistoryIdentifiers(from: item) else { continue }
-                    keys.insert(historySyncKey(mediaId: identifiers.mediaId, episodeId: identifiers.episodeId))
+            for item in remoteItems {
+                if isCancellationRequested {
+                    return .cancelled
                 }
-
-                keepPaging = items.count >= 50
-                page += 1
+                guard let identifiers = extractHistoryIdentifiers(from: item) else { continue }
+                let watchedAt = parseHistoryDate(item.watchedAt)
+                keys.insert(
+                    historySyncKey(
+                        mediaId: identifiers.mediaId,
+                        episodeId: identifiers.episodeId,
+                        watchedAt: watchedAt
+                    )
+                )
             }
         }
-        return keys
+        return .success(keys)
     }
 
     /// Extracts a display title from a Trakt history item.
@@ -921,13 +1294,22 @@ actor TraktSyncOrchestrator {
         return true
     }
 
-    private func historySyncKey(mediaId: String, episodeId: String?) -> String {
+    private func historySyncKey(mediaId: String, episodeId: String?, watchedAt: Date? = nil) -> String {
         let normalizedEpisode = episodeId?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let timestampComponent = watchedAt.map { String(Int($0.timeIntervalSince1970.rounded())) } ?? "unknown"
         if let normalizedEpisode,
            !normalizedEpisode.isEmpty {
-            return "\(mediaId)#\(normalizedEpisode)"
+            return "\(mediaId)#\(normalizedEpisode)#\(timestampComponent)"
         }
-        return "\(mediaId)#movie"
+        return "\(mediaId)#movie#\(timestampComponent)"
+    }
+
+    private func traktRating(from event: TasteEvent) -> Int? {
+        guard let feedbackValue = event.feedbackValue else { return nil }
+        let sourceScale = (event.feedbackScale ?? .oneToTen).canonicalMode
+        let normalized = sourceScale.normalizedValue(feedbackValue)
+        let traktValue = FeedbackScaleMode.oneToTen.value(fromNormalized: normalized)
+        return Int(FeedbackScaleMode.oneToTen.clamp(traktValue).rounded())
     }
 
     /// Resolves the media type for a given mediaId.
@@ -947,6 +1329,14 @@ actor TraktSyncOrchestrator {
         }
 
         return .movie
+    }
+
+    private var isCancellationRequested: Bool {
+        Task.isCancelled
+    }
+
+    private func isCancellationError(_ error: Error) -> Bool {
+        error is CancellationError || Task.isCancelled
     }
 }
 
@@ -999,5 +1389,9 @@ extension TraktSyncOrchestrator {
         let count: Int
         let errors: [String]
         let localRefreshTargets: SyncResult.LocalRefreshTargets
+
+        var shouldAdvanceLastSyncDate: Bool {
+            count > 0 || errors.isEmpty
+        }
     }
 }

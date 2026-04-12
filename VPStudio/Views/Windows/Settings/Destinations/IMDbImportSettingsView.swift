@@ -124,15 +124,18 @@ struct IMDbCSVImportSheet: View {
 
                 Section {
                     Button {
-                        isShowingPreview = true
+                        if selectedFileURL == nil {
+                            isShowingPreview = true
+                        } else {
+                            Task { await importSelectedOrPickedCSV() }
+                        }
                     } label: {
-                        Label(previewDetected ? "Change CSV File" : "Preview CSV Before Importing", systemImage: "doc.text.magnifyingglass")
-                    }
-                    .disabled(csvImportInFlight)
-
-                    Button(csvImportInFlight ? "Importing..." : "Choose & Import CSV", systemImage: "square.and.arrow.down") {
-                        isShowingPreview = false
-                        Task { await importSelectedOrPickedCSV() }
+                        Label(
+                            selectedFileURL == nil
+                                ? (previewDetected ? "Change CSV File" : "Preview CSV Before Importing")
+                                : (csvImportInFlight ? "Importing..." : "Import Selected CSV"),
+                            systemImage: "square.and.arrow.down"
+                        )
                     }
                     .disabled(csvImportInFlight)
                 }
@@ -193,8 +196,7 @@ struct IMDbCSVImportSheet: View {
                             selectedFileURL = url
                             await analyzeCSVHeaders(url: url)
                             previewDetected = true
-                            // Also offer to import immediately after preview
-                            await importSelectedOrPickedCSV()
+                            isShowingPreview = false
                         }
                     case .failure(let error):
                         csvImportError = error.localizedDescription

@@ -94,6 +94,32 @@ extension MetadataProvider {
     }
 }
 
+extension DiscoverFilters.SortOption {
+    nonisolated func tmdbValue(for type: MediaType) -> String {
+        switch (self, type) {
+        case (.releaseDateDesc, .series):
+            return "first_air_date.desc"
+        case (.releaseDateAsc, .series):
+            return "first_air_date.asc"
+        case (.titleAsc, .series):
+            return "name.asc"
+        default:
+            return rawValue
+        }
+    }
+}
+
+extension MediaType {
+    nonisolated var tmdbSearchYearParameterName: String {
+        switch self {
+        case .movie:
+            return "year"
+        case .series:
+            return "first_air_date_year"
+        }
+    }
+}
+
 struct MetadataSearchResult: Sendable {
     var items: [MediaPreview]
     var page: Int

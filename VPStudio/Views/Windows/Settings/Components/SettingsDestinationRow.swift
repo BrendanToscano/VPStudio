@@ -58,6 +58,27 @@ struct SettingsDestinationRow: View {
             }
         }
         .padding(.vertical, 4)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(
+            SettingsAccessibilityPolicy.rowLabel(
+                title: destination.title,
+                status: accessibilityStatus
+            )
+        )
+        .accessibilityHint(
+            SettingsAccessibilityPolicy.rowHint(hasWarning: status?.kind == .warning)
+        )
+    }
+
+    private var accessibilityStatus: String? {
+        var components: [String] = []
+        if isRecent {
+            components.append("Recent")
+        }
+        if let statusMessage = status?.message, !statusMessage.isEmpty {
+            components.append(statusMessage)
+        }
+        return components.isEmpty ? nil : components.joined(separator: ", ")
     }
 
     private func statusBadge(_ status: SettingsDestinationStatus) -> some View {

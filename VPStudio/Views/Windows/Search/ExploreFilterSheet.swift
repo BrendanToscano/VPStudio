@@ -51,7 +51,7 @@ struct ExploreFilterSheet: View {
                     }
                 }
 
-                // Language (multi-select)
+                // Language
                 Section("Languages") {
                     languageRows
                 }
@@ -60,6 +60,9 @@ struct ExploreFilterSheet: View {
             #if os(visionOS)
             .navigationBarTitleDisplayMode(.inline)
             #endif
+            .onAppear {
+                selectedLanguages = SearchLanguageOption.normalizeSelection(from: selectedLanguages)
+            }
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Apply") {
@@ -88,11 +91,25 @@ struct ExploreFilterSheet: View {
     }
 
     private func toggleLanguage(_ code: String) {
+        let defaultLanguageCode = "en-US"
+
+        if code == defaultLanguageCode {
+            selectedLanguages = [defaultLanguageCode]
+            return
+        }
+
         if selectedLanguages.contains(code) {
             selectedLanguages.remove(code)
-        } else {
-            selectedLanguages.insert(code)
+            if selectedLanguages.isEmpty {
+                selectedLanguages = [defaultLanguageCode]
+            }
+            return
         }
+
+        if selectedLanguages == [defaultLanguageCode] {
+            selectedLanguages = []
+        }
+        selectedLanguages.insert(code)
     }
 }
 

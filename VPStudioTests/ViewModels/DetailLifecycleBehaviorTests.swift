@@ -401,6 +401,65 @@ struct DetailLifecycleBehaviorTests {
         #expect(viewModel.torrentSearch.didSearch == false)
     }
 
+    @Test
+    @MainActor
+    func retryReplaysFailedStreamResolutionForLastTorrent() async {
+        let appState = AppState()
+        let debrid = RetryableDetailDebridManager()
+        let viewModel = DetailViewModel(
+            appState: appState,
+            indexerManager: StubIndexerManager(),
+            debridManager: debrid,
+            downloadManager: StubDownloadManager()
+        )
+        viewModel.mediaItem = MediaItem(id: "ttretry-stream", type: .movie, title: "Retry Stream")
+        let torrent = Fixtures.torrent(hash: "retry-stream-hash", title: "Retry.Stream.1080p")
+
+        let initialStream = await viewModel.resolveStream(torrent: torrent)
+
+        #expect(initialStream == nil)
+        #expect(viewModel.error != nil)
+        #expect(await debrid.resolveCallCount() == 1)
+        #expect(viewModel.debridResolver.streams.isEmpty)
+
+        await viewModel.retryLastFailedOperation(apiKey: "")
+
+        #expect(viewModel.error == nil)
+        #expect(await debrid.resolveCallCount() == 2)
+        #expect(viewModel.debridResolver.streams.count == 1)
+        #expect(viewModel.debridResolver.streams.first?.recoveryContext?.infoHash == "retry-stream-hash")
+    }
+
+    @Test
+    @MainActor
+    func retryReplaysFailedDownloadQueueForLastTorrent() async {
+        let appState = AppState()
+        let debrid = RetryableDetailDebridManager(initialResolveFailures: 0)
+        let downloads = RetryableDetailDownloadManager()
+        let viewModel = DetailViewModel(
+            appState: appState,
+            indexerManager: StubIndexerManager(),
+            debridManager: debrid,
+            downloadManager: downloads
+        )
+        viewModel.mediaItem = MediaItem(id: "ttretry-download", type: .movie, title: "Retry Download")
+        let torrent = Fixtures.torrent(hash: "retry-download-hash", title: "Retry.Download.1080p")
+
+        await viewModel.queueDownload(torrent: torrent)
+
+        #expect(viewModel.error != nil)
+        #expect(await downloads.enqueueCallCount() == 1)
+        #expect(await downloads.downloadCount() == 0)
+        #expect(viewModel.downloadState(for: torrent) == .failed)
+
+        await viewModel.retryLastFailedOperation(apiKey: "")
+
+        #expect(viewModel.error == nil)
+        #expect(await downloads.enqueueCallCount() == 2)
+        #expect(await downloads.downloadCount() == 1)
+        #expect(viewModel.downloadState(for: torrent) == .downloading)
+    }
+
     private func makeTorrentResults(count: Int) -> [TorrentResult] {
         (0..<count).map { index in
             Fixtures.torrent(
@@ -531,5 +590,79 @@ private actor BlockingDetailIndexerManager: DetailIndexerManaging {
 
     func searchCallCount() -> Int {
         searchCalls
+    }
+}
+
+private actor RetryableDetailDebridManager: DetailDebridManaging {
+    private var remainingResolveFailures: Int
+    private var resolvedStream = Fixtures.stream(url: "https://cdn.example.com/retry-stream.mkv")
+    private var resolveCalls = 0
+
+    init(initialResolveFailures: Int = 1) {
+        self.remainingResolveFailures = initialResolveFailures
+    }
+
+    func resolveCallCount() -> Int {
+        resolveCalls
+    }
+
+    func checkCacheAcrossServices(hashes: [String]) async throws -> [String: (CacheStatus, DebridServiceType)] {
+        [:]
+    }
+
+    func resolveStream(hash: String, preferredService: DebridServiceType?, seasonNumber: Int?, episodeNumber: Int?) async throws -> StreamInfo {
+        resolveCalls += 1
+        if remainingResolveFailures > 0 {
+            remainingResolveFailures -= 1
+            throw URLError(.timedOut)
+        }
+        return resolvedStream
+    }
+}
+
+private actor RetryableDetailDownloadManager: DetailDownloadManaging {
+    private var remainingEnqueueFailures = 1
+    private var downloads: [DownloadTask] = []
+    private var enqueueCalls = 0
+
+    func enqueueCallCount() -> Int {
+        enqueueCalls
+    }
+
+    func downloadCount() -> Int {
+        downloads.count
+    }
+
+    func enqueueDownload(
+        stream: StreamInfo,
+        mediaId: String,
+        episodeId: String?,
+        mediaTitle: String,
+        mediaType: String,
+        posterPath: String?,
+        seasonNumber: Int?,
+        episodeNumber: Int?,
+        episodeTitle: String?
+    ) async throws -> DownloadTask {
+        enqueueCalls += 1
+        if remainingEnqueueFailures > 0 {
+            remainingEnqueueFailures -= 1
+            throw URLError(.cannotConnectToHost)
+        }
+
+        let task = DownloadTask(
+            mediaId: mediaId,
+            episodeId: episodeId,
+            streamURL: stream.streamURL.absoluteString,
+            fileName: stream.fileName,
+            mediaTitle: mediaTitle,
+            mediaType: mediaType,
+            posterPath: posterPath,
+            seasonNumber: seasonNumber,
+            episodeNumber: episodeNumber,
+            episodeTitle: episodeTitle
+        )
+        downloads.append(task)
+        return task
     }
 }

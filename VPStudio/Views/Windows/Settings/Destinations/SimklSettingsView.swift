@@ -1,96 +1,91 @@
 import SwiftUI
-import UniformTypeIdentifiers
 
 // MARK: - Simkl Settings
 
 struct SimklSettingsView: View {
     @Environment(AppState.self) private var appState
-    @Environment(\.openURL) private var openURL
-    @State private var isConnected = false
-    @State private var clientId = ""
-    @State private var accessToken = ""
+    @State private var hasSavedAuthorization = false
+    @State private var isShowingDisconnectConfirmation = false
     @State private var statusMessage: String?
-    @State private var simklClientIdSaveTask: Task<Void, Never>?
+    @State private var errorMessage: String?
 
     var body: some View {
         Form {
             Section {
-                if isConnected {
-                    Label("Connected", systemImage: "checkmark.circle.fill")
-                        .foregroundStyle(.green)
+                VStack(alignment: .leading, spacing: 8) {
+                    Label("Cleanup Only in This Build", systemImage: "pause.circle")
+                        .foregroundStyle(.secondary)
+                    Text("Simkl sync and scrobbling are unavailable in this build. This screen is read-only and only lets you review or clear any saved authorization.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                     if let statusMessage {
                         Text(statusMessage)
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
+                    if let errorMessage {
+                        Text(errorMessage)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
+                }
+            }
+
+            if hasSavedAuthorization {
+                Section("Saved Authorization") {
+                    Label("Saved credentials are present", systemImage: "checkmark.circle")
+                        .foregroundStyle(.secondary)
                     Button("Disconnect", role: .destructive) {
-                        isConnected = false
-                        statusMessage = nil
-                        Task {
-                            try? await appState.settingsManager.setString(key: SettingsKeys.simklAccessToken, value: nil)
-                        }
+                        isShowingDisconnectConfirmation = true
                     }
-                } else {
-                    TextField("Client ID", text: $clientId)
-                    HStack {
-                        SecureField("Access Token", text: $accessToken)
-                        PasteFieldButton { accessToken = $0 }
-                    }
-                    Button("Open Authorization Page") {
-                        openAuthorizationPage()
-                    }
-                    .disabled(SettingsInputValidation.normalizedText(clientId).isEmpty)
-                    Button("Save Credentials") {
-                        Task {
-                            let trimmedClientID = SettingsInputValidation.normalizedText(clientId)
-                            let trimmedAccessToken = SettingsInputValidation.normalizedText(accessToken)
-                            guard !trimmedClientID.isEmpty, !trimmedAccessToken.isEmpty else { return }
-                            try? await appState.settingsManager.setString(key: SettingsKeys.simklClientId, value: trimmedClientID)
-                            try? await appState.settingsManager.setString(key: SettingsKeys.simklAccessToken, value: trimmedAccessToken)
-                            isConnected = true
-                            statusMessage = "Connected with saved token."
-                        }
-                    }
-                    .disabled(!SettingsInputValidation.hasSimklCredentials(clientId: clientId, accessToken: accessToken))
+                    .accessibilityHint("Removes any saved Simkl authorization from this device.")
                 }
             }
         }
         .navigationTitle("Simkl")
+        .alert("Disconnect Simkl?", isPresented: $isShowingDisconnectConfirmation) {
+            Button("Disconnect", role: .destructive) {
+                disconnect()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This removes any saved Simkl authorization from this device. Simkl remains cleanup-only in this build.")
+        }
         .task {
-            clientId = (try? await appState.settingsManager.getString(key: SettingsKeys.simklClientId)) ?? ""
-            if let token = try? await appState.settingsManager.getString(key: SettingsKeys.simklAccessToken),
-               !token.isEmpty {
-                accessToken = token
-                isConnected = true
-                statusMessage = "Connected with stored token."
-            } else {
-                accessToken = ""
-                isConnected = false
-                statusMessage = nil
-            }
-        }
-        .onChange(of: clientId) { _, newValue in
-            simklClientIdSaveTask?.cancel()
-            simklClientIdSaveTask = Task {
-                try? await Task.sleep(for: .milliseconds(500))
-                guard !Task.isCancelled else { return }
-                try? await appState.settingsManager.setString(key: SettingsKeys.simklClientId, value: newValue)
-            }
-        }
-        .onDisappear {
-            simklClientIdSaveTask?.cancel()
-            simklClientIdSaveTask = nil
+            await loadSavedAuthorizationState()
         }
     }
 
-    private func openAuthorizationPage() {
-        let trimmedClientID = SettingsInputValidation.normalizedText(clientId)
-        guard !trimmedClientID.isEmpty else { return }
-        let service = SimklSyncService(clientId: trimmedClientID)
+    @MainActor
+    private func loadSavedAuthorizationState() async {
+        do {
+            let clientId = (try await appState.settingsManager.getString(key: SettingsKeys.simklClientId)) ?? ""
+            let accessToken = (try await appState.settingsManager.getString(key: SettingsKeys.simklAccessToken)) ?? ""
+            hasSavedAuthorization = SettingsInputValidation.hasSimklCredentials(
+                clientId: clientId,
+                accessToken: accessToken
+            )
+            statusMessage = hasSavedAuthorization
+                ? "Saved authorization exists, but Simkl remains cleanup-only in this build."
+                : "No Simkl authorization is saved."
+            errorMessage = nil
+        } catch {
+            hasSavedAuthorization = false
+            statusMessage = nil
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func disconnect() {
         Task {
-            guard let url = await service.getAuthorizationURL() else { return }
-            await MainActor.run {
-                openURL(url)
+            do {
+                try await appState.settingsManager.setString(key: SettingsKeys.simklAccessToken, value: nil)
+                try await appState.settingsManager.setString(key: SettingsKeys.simklRefreshToken, value: nil)
+                await loadSavedAuthorizationState()
+            } catch {
+                await MainActor.run {
+                    errorMessage = error.localizedDescription
+                }
             }
         }
     }

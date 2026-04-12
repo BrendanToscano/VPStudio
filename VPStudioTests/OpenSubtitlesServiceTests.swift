@@ -214,7 +214,7 @@ struct OpenSubtitlesSearchTests {
         #expect(results[0].isHearingImpaired == true)
     }
 
-    @Test func searchFallsBackToReleaseNameWhenNoFile() async throws {
+    @Test func searchSkipsUnsupportedSubtitleFormats() async throws {
         let json = """
         {
             "data": [{
@@ -225,7 +225,40 @@ struct OpenSubtitlesSearchTests {
                     "ratings": 5.0,
                     "download_count": 10,
                     "hearing_impaired": false,
-                    "files": []
+                    "files": [
+                        {"file_id": 401, "file_name": "Movie.2024.BluRay.Release.txt"}
+                    ]
+                }
+            }]
+        }
+        """
+
+        let session = makeSubtitleStubSession { request in
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (response, Data(json.utf8))
+        }
+
+        let service = OpenSubtitlesService(apiKey: "key", session: session)
+        let results = try await service.search(query: "Movie")
+
+        #expect(results.isEmpty)
+    }
+
+    @Test func searchPrefersSupportedSubtitleFilesWhenMultipleArePresent() async throws {
+        let json = """
+        {
+            "data": [{
+                "id": 401,
+                "attributes": {
+                    "language": "en",
+                    "release": "Movie.2024.Release",
+                    "ratings": 6.5,
+                    "download_count": 20,
+                    "hearing_impaired": false,
+                    "files": [
+                        {"file_id": 402, "file_name": "Movie.2024.Release.txt"},
+                        {"file_id": 403, "file_name": "Movie.2024.Release.srt"}
+                    ]
                 }
             }]
         }
@@ -240,8 +273,45 @@ struct OpenSubtitlesSearchTests {
         let results = try await service.search(query: "Movie")
 
         #expect(results.count == 1)
-        #expect(results[0].fileName == "Movie.2024.BluRay.Release")
-        #expect(results[0].fileId == nil)
+        #expect(results[0].fileName == "Movie.2024.Release.srt")
+        #expect(results[0].format == .srt)
+        #expect(results[0].fileId == 403)
+    }
+
+    @Test func searchRetriesAfter429Response() async throws {
+        final class CallState: @unchecked Sendable {
+            private let lock = NSLock()
+            private var value = 0
+            func increment() -> Int {
+                lock.lock(); defer { lock.unlock() }
+                value += 1
+                return value
+            }
+            var currentValue: Int {
+                lock.lock(); defer { lock.unlock() }
+                return value
+            }
+        }
+        let state = CallState()
+
+        let session = makeSubtitleStubSession { request in
+            let callCount = state.increment()
+            let url = request.url!
+            if callCount == 1 {
+                let headers = ["Retry-After": "0"]
+                let response = HTTPURLResponse(url: url, statusCode: 429, httpVersion: nil, headerFields: headers)!
+                return (response, Data())
+            }
+
+            let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (response, Data(Self.sampleSearchResponse.utf8))
+        }
+
+        let service = OpenSubtitlesService(apiKey: "test-key", session: session)
+        let results = try await service.search(query: "Movie 2024")
+
+        #expect(state.currentValue == 2)
+        #expect(results.count == 2)
     }
 }
 
@@ -380,6 +450,27 @@ struct OpenSubtitlesDownloadTests {
 
         #expect(state.capturedBody?["file_id"] as? Int == 42)
     }
+
+    @Test func downloadSubtitleFallsBackToUtf16WhenUtf8Fails() async throws {
+        let subtitleBody = "1\n00:00:01,000 --> 00:00:02,000\nCafé\n"
+        let utf16Data = subtitleBody.data(using: .utf16)!
+
+        let session = makeSubtitleStubSession { request in
+            let url = request.url!
+            if url.path.hasSuffix("/download") {
+                let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+                return (response, Data(#"{"link":"https://cdn.example.com/subtitle.srt"}"#.utf8))
+            }
+
+            let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (response, utf16Data)
+        }
+
+        let service = OpenSubtitlesService(apiKey: "key", session: session)
+        let content = try await service.downloadSubtitle(fileId: 7)
+
+        #expect(content.contains("Café"))
+    }
 }
 
 // MARK: - Error Tests
@@ -516,6 +607,7 @@ struct SubtitleFormatParseTests {
     @Test func unknownExtensionReturnsUnknown() {
         #expect(SubtitleFormat.parse(from: "movie.txt") == .unknown)
         #expect(SubtitleFormat.parse(from: "movie") == .unknown)
+        #expect(SubtitleFormat.parse(from: "movie.txt").isSupportedSubtitle == false)
     }
 
     @Test func caseInsensitiveParsing() {

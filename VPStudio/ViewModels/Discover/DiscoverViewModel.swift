@@ -28,6 +28,7 @@ final class DiscoverViewModel {
     private var database: DatabaseManager?
     private let metadataServiceFactory: @Sendable (String) -> any MetadataProvider
     private var configuredApiKey: String?
+    private var loadGeneration = 0
 
     init(
         metadataService: (any MetadataProvider)? = nil,
@@ -40,12 +41,20 @@ final class DiscoverViewModel {
     }
 
     func configure(database: DatabaseManager) {
-        if self.database == nil {
+        let isFirstConfiguration = self.database == nil
+        if isFirstConfiguration {
             self.database = database
+        }
+
+        guard isFirstConfiguration, hasPerformedInitialLoad else { return }
+        Task { [weak self] in
+            await self?.refreshLocalPersonalizationState()
         }
     }
 
     func load(apiKey: String) async {
+        loadGeneration &+= 1
+        let generation = loadGeneration
         let normalizedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
 
         if normalizedKey.isEmpty {
@@ -57,13 +66,17 @@ final class DiscoverViewModel {
 
                 if QARuntimeOptions.traktRefreshFixturePath != nil {
                     await loadContinueWatching()
-                    isLoading = false
-                    error = nil
+                    if generation == loadGeneration {
+                        isLoading = false
+                        error = nil
+                    }
                     return
                 }
 
-                isLoading = false
-                error = .tmdbSetupRequired(feature: "Discover")
+                if generation == loadGeneration {
+                    isLoading = false
+                    error = .tmdbSetupRequired(feature: "Discover")
+                }
                 return
             }
 
@@ -72,13 +85,17 @@ final class DiscoverViewModel {
 
                 if QARuntimeOptions.traktRefreshFixturePath != nil {
                     await loadContinueWatching()
-                    isLoading = false
-                    error = nil
+                    if generation == loadGeneration {
+                        isLoading = false
+                        error = nil
+                    }
                     return
                 }
 
-                isLoading = false
-                error = .tmdbSetupRequired(feature: "Discover")
+                if generation == loadGeneration {
+                    isLoading = false
+                    error = .tmdbSetupRequired(feature: "Discover")
+                }
                 return
             }
         } else if metadataService == nil {
@@ -94,8 +111,10 @@ final class DiscoverViewModel {
         }
 
         guard let service = metadataService else {
-            isLoading = false
-            error = .tmdbSetupRequired(feature: "Discover")
+            if generation == loadGeneration {
+                isLoading = false
+                error = .tmdbSetupRequired(feature: "Discover")
+            }
             return
         }
         isLoading = true
@@ -103,6 +122,7 @@ final class DiscoverViewModel {
 
         // Load continue watching from local database (non-blocking for TMDB fetches).
         await loadContinueWatching()
+        guard generation == loadGeneration else { return }
 
         // Fetch all categories concurrently while preserving first domain error.
         async let trendingMoviesResult = fetchResult { try await service.getTrending(type: .movie, timeWindow: .week, page: 1) }
@@ -120,6 +140,8 @@ final class DiscoverViewModel {
             guard case .failure(let error) = result else { return nil }
             return error
         }.first
+
+        guard generation == loadGeneration else { return }
 
         if case .success(let movies) = moviesResult {
             trendingMovies = movies.items
@@ -151,6 +173,7 @@ final class DiscoverViewModel {
     }
 
     func loadContinueWatching() async {
+        let generation = loadGeneration
         guard let database else { return }
         do {
             let recentHistory = try await database.fetchWatchHistory(limit: 20)
@@ -160,6 +183,7 @@ final class DiscoverViewModel {
 
             let cachedItems = try await database.fetchMediaItems(ids: inProgress.map(\.mediaId))
             let cachedByID = Dictionary(uniqueKeysWithValues: cachedItems.map { ($0.id, $0) })
+            guard generation == loadGeneration else { return }
 
             continueWatching = inProgress.compactMap { entry in
                 guard let cached = cachedByID[entry.mediaId] else { return nil }

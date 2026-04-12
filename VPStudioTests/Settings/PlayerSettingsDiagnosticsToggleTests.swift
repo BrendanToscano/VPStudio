@@ -19,6 +19,17 @@ struct PlayerSettingsDiagnosticsToggleTests {
         #expect(SettingsKeys.runtimeDiagnosticsEnabled == "runtime_diagnostics_enabled")
     }
 
+    @Test
+    func playerSettingsSurfacePersistenceErrorsInsteadOfSilentTryWrites() throws {
+        let source = try contents(of: "VPStudio/Views/Windows/Settings/Destinations/PlayerSettingsView.swift")
+
+        #expect(source.contains("@State private var surfaceError: AppError?"))
+        #expect(source.contains("SettingsErrorBanner(error: surfaceError)"))
+        #expect(source.contains("persistBoolSetting(key:"))
+        #expect(source.contains("persistStringSetting(key:"))
+        #expect(source.contains("Task { try? await appState.settingsManager.set") == false)
+    }
+
     private func contents(of relativePath: String) throws -> String {
         let absolutePath = repoRootURL().appendingPathComponent(relativePath).path
         return try String(contentsOfFile: absolutePath, encoding: .utf8)

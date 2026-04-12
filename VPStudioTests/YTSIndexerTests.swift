@@ -98,6 +98,42 @@ struct YTSIndexerTests {
     }
 
     @Test
+    func searchByQueryRetriesAfter429OnPrimaryHost() async throws {
+        final class RequestState: @unchecked Sendable {
+            var requestCount: Int = 0
+        }
+        let state = RequestState()
+
+        let session = URLProtocolHarness.makeSession { request in
+            let url = try #require(request.url)
+            state.requestCount += 1
+
+            if state.requestCount == 1 {
+                let response = HTTPURLResponse(
+                    url: url,
+                    statusCode: 429,
+                    httpVersion: nil,
+                    headerFields: ["Retry-After": "0.001"]
+                )!
+                return (response, Data())
+            }
+
+            let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            let payload = """
+            {"data":{"movies":[{"title":"The Matrix","title_long":"The Matrix (1999)","year":1999,"torrents":[{"hash":"ABCDEF123456","quality":"1080p","type":"bluray","size_bytes":1234567890,"seeds":120,"peers":4}]}]}}
+            """
+            return (response, Data(payload.utf8))
+        }
+
+        let indexer = YTSIndexer(session: session)
+        let results = try await indexer.searchByQuery(query: "The Matrix", type: .movie)
+
+        #expect(state.requestCount == 2)
+        #expect(results.count == 1)
+        #expect(results.first?.infoHash == "abcdef123456")
+    }
+
+    @Test
     func nilQualityAndTypeProducesValidResult() async throws {
         let session = URLProtocolHarness.makeSession { request in
             let url = try #require(request.url)
@@ -157,5 +193,29 @@ struct YTSIndexerTests {
 
         #expect(results.isEmpty)
         #expect(state.requestCount == 0)
+    }
+
+    @Test
+    func malformedJSONAcrossHostsSurfacesParseError() async {
+        let session = URLProtocolHarness.makeSession { request in
+            let url = try #require(request.url)
+            let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (response, Data(#"{not-json}"#.utf8))
+        }
+
+        let indexer = YTSIndexer(session: session)
+
+        do {
+            _ = try await indexer.searchByQuery(query: "Dune", type: .movie)
+            Issue.record("Expected invalid payload error")
+        } catch let error as IndexerParseError {
+            switch error {
+            case .invalidPayload(let indexer, let reason):
+                #expect(indexer == "YTS")
+                #expect(reason.localizedCaseInsensitiveContains("json"))
+            }
+        } catch {
+            Issue.record("Unexpected error type: \(error)")
+        }
     }
 }

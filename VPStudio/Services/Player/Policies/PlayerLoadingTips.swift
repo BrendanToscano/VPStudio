@@ -115,9 +115,16 @@ enum PlayerLoadingTipCatalog {
 ///
 /// Attach as `@State` in the view that shows the loading overlay. The
 /// `currentTip` property updates automatically via the Observation framework.
+@MainActor
 @Observable
-final class PlayerLoadingTipRotator: @unchecked Sendable {
+final class PlayerLoadingTipRotator {
     // MARK: - Public State
+
+    private static let fallbackTip = PlayerLoadingTip(
+        id: "loading",
+        text: "Preparing playback...",
+        icon: "hourglass"
+    )
 
     private(set) var currentTip: PlayerLoadingTip
 
@@ -138,8 +145,10 @@ final class PlayerLoadingTipRotator: @unchecked Sendable {
         tips: [PlayerLoadingTip] = PlayerLoadingTipCatalog.allTips,
         interval: TimeInterval = 4.5
     ) {
-        precondition(!tips.isEmpty, "PlayerLoadingTipRotator requires at least one tip.")
-        let shuffled = tips.shuffled()
+        let seededTips = tips.isEmpty
+            ? (PlayerLoadingTipCatalog.allTips.isEmpty ? [Self.fallbackTip] : PlayerLoadingTipCatalog.allTips)
+            : tips
+        let shuffled = seededTips.shuffled()
         self.interval = interval
         self.tips = shuffled
         self.currentTip = shuffled[0]
@@ -149,7 +158,6 @@ final class PlayerLoadingTipRotator: @unchecked Sendable {
 
     /// Begins automatic tip rotation. Safe to call multiple times; subsequent
     /// calls cancel the previous timer.
-    @MainActor
     func start() {
         stop()
         rotationTask = Task { [weak self] in
@@ -172,7 +180,6 @@ final class PlayerLoadingTipRotator: @unchecked Sendable {
 
     /// Advances to the next tip, wrapping around and reshuffling when
     /// the end of the list is reached. Guarantees no immediate repeat.
-    @MainActor
     func advance() {
         currentIndex += 1
         if currentIndex >= tips.count {

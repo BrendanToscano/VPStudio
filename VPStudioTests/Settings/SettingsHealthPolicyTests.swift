@@ -57,9 +57,9 @@ struct SettingsHealthPolicyTests {
 
     @Test
     func essentialTotalCountsOnlyEssentialDestinations() {
-        // Essential: debrid, indexers, metadata, ai, trakt, simkl = 6
-        // Non-essential: player, subtitles, environments = 3
-        #expect(SettingsHealthPolicy.essentialTotal == 6)
+        // Essential in this build: debrid, indexers, metadata, ai, trakt = 5
+        // Simkl remains visible for credential cleanup, but is not active in this build.
+        #expect(SettingsHealthPolicy.essentialTotal == 5)
     }
 
     @Test
@@ -99,7 +99,7 @@ struct SettingsHealthPolicyTests {
             .simkl: SettingsDestinationStatus(message: "Connected", kind: .positive),
         ]
         let count = SettingsHealthPolicy.essentialConfiguredCount(statuses: statuses)
-        #expect(count == 6)
+        #expect(count == 5)
         #expect(count == SettingsHealthPolicy.essentialTotal)
     }
 
@@ -126,12 +126,12 @@ struct SettingsHealthPolicyTests {
 
     @Test
     func healthProgressUsesEssentialDenominator() {
-        // With 3 of 6 essential configured, progress should be 0.5
+        // With 3 of 5 essential configured, progress should be 0.6
         let progress = SettingsHealthPolicy.configurationProgress(
             configured: 3,
             total: SettingsHealthPolicy.essentialTotal
         )
-        #expect(progress == 0.5)
+        #expect(progress == 0.6)
     }
 
     @Test
@@ -140,6 +140,6 @@ struct SettingsHealthPolicyTests {
             configured: 4,
             total: SettingsHealthPolicy.essentialTotal
         )
-        #expect(label == "4/6 configured")
+        #expect(label == "4/5 configured")
     }
 }

@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import os
 
 enum ExplorePhase: Equatable {
     case idle
@@ -70,6 +71,7 @@ struct SearchFilterDraft: Sendable, Equatable {
 @Observable
 @MainActor
 final class SearchViewModel {
+    private static let logger = Logger(subsystem: "com.vpstudio", category: "search-view-model")
     /// The most recently committed text query backing active/paginated search results.
     /// Raw typing lives in `queryDraft` so the Search field can change without constantly
     /// mutating the committed search state used by load-more and reload paths.
@@ -159,10 +161,13 @@ final class SearchViewModel {
     var yearFilter: Int?
     var yearRangePreset: YearRangePreset?
     var languageFilters: Set<String> = ["en-US"]
+    private static let defaultLanguageCode = "en-US"
 
-    /// Primary language sent to the API (first from set, fallback "en-US").
+    /// Primary language sent to the API. When multiple languages are selected,
+    /// this returns the first known non-default choice so the search path remains
+    /// deterministic.
     var primaryLanguage: String? {
-        languageFilters.isEmpty ? nil : (languageFilters.sorted().first ?? "en-US")
+        preferredLanguageCode(in: languageFilters)
     }
 
     /// ISO 639-1 original-language code used for TMDB `with_original_language`.
@@ -177,7 +182,7 @@ final class SearchViewModel {
         var count = 0
         if sortOption != .popularityDesc { count += 1 }
         if yearFilter != nil || yearRangePreset != nil { count += 1 }
-        if languageFilters != ["en-US"] { count += 1 }
+        if hasExplicitLanguageSelection { count += 1 }
         if selectedGenre != nil { count += 1 }
         return count
     }
@@ -223,6 +228,23 @@ final class SearchViewModel {
     /// other shell chrome can depend on this instead of observing live typing.
     private(set) var submittedQuery = ""
 
+    var emptyStateQuery: String {
+        let trimmedSubmittedQuery = submittedQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedSubmittedQuery.isEmpty {
+            return trimmedSubmittedQuery
+        }
+
+        if let selectedGenre {
+            return selectedGenre.name
+        }
+
+        if let activeMoodCard {
+            return activeMoodCard.title
+        }
+
+        return ""
+    }
+
     // MARK: - Scroll Control
 
     /// Incremented each time the view should scroll back to the top (e.g. new search).
@@ -244,7 +266,8 @@ final class SearchViewModel {
         if error != nil && results.isEmpty { return .error }
         let hasSubmittedTextQuery = hasAttemptedTextSearch && !queryDraft.trimmingCharacters(in: .whitespaces).isEmpty
         let hasResults = !results.isEmpty || !aiRecommendations.isEmpty
-        if hasResults || isLoadingAI || selectedGenre != nil || activeMoodCard != nil { return .results }
+        if hasResults || isLoadingAI { return .results }
+        if selectedGenre != nil || activeMoodCard != nil { return .empty }
         if hasSubmittedTextQuery { return .empty }
         return .idle
     }
@@ -285,6 +308,10 @@ final class SearchViewModel {
     /// an ID set from the full grid on every new page.
     private var resultIDCache: Set<String> = []
     private var shouldRebuildResultIDCache = true
+
+    private var hasExplicitLanguageSelection: Bool {
+        !languageFilters.isEmpty && languageFilters != [Self.defaultLanguageCode]
+    }
 
     init(
         metadataService: (any MetadataProvider)? = nil,
@@ -532,11 +559,13 @@ final class SearchViewModel {
                 )
                 let result = try await service.discover(type: type, filters: filters)
                 guard !Task.isCancelled, let self, self.searchGeneration == generation else { return }
+                self.error = nil
                 self.appendUniqueResults(result.items)
                 self.currentPage = nextPage
                 self.totalPages = result.totalPages
             } catch {
-                // silently fail pagination
+                guard let self else { return }
+                self.publishPaginationFailure(error, generation: generation)
             }
         }
     }
@@ -559,11 +588,14 @@ final class SearchViewModel {
                 let result = try await service.search(query: expectedQuery, type: selectedType, page: nextPage, year: year, language: language)
                 guard !Task.isCancelled, let self, self.searchGeneration == generation else { return }
                 guard self.query.trimmingCharacters(in: .whitespaces) == expectedQuery else { return }
+                self.error = nil
                 self.appendUniqueResults(result.items)
                 self.currentPage = nextPage
                 self.totalPages = result.totalPages
             } catch {
-                // silently fail pagination
+                guard let self else { return }
+                guard self.query.trimmingCharacters(in: .whitespaces) == expectedQuery else { return }
+                self.publishPaginationFailure(error, generation: generation)
             }
         }
     }
@@ -606,13 +638,25 @@ final class SearchViewModel {
                 let result = try await service.discover(type: type, filters: filters)
                 guard !Task.isCancelled, let self, self.searchGeneration == generation else { return }
                 guard self.selectedGenre?.id == genre.id else { return }
+                self.error = nil
                 self.appendUniqueResults(result.items)
                 self.currentPage = nextPage
                 self.totalPages = result.totalPages
             } catch {
-                // silently fail pagination
+                guard let self else { return }
+                guard self.selectedGenre?.id == genre.id else { return }
+                self.publishPaginationFailure(error, generation: generation)
             }
         }
+    }
+
+    private func publishPaginationFailure(_ error: Error, generation: Int) {
+        guard !Task.isCancelled, searchGeneration == generation else { return }
+        lastPaginationTime = nil
+        self.error = AppError(
+            error,
+            fallback: .network(.transport("Couldn't load more results. Try again."))
+        )
     }
 
     func clear() {
@@ -681,7 +725,11 @@ final class SearchViewModel {
                     self.genres = loadedGenres
                 }
             } catch {
-                // Non-fatal — genres are optional UI enhancement
+                guard !Task.isCancelled, let self else { return }
+                if (self.selectedType ?? .movie) == type {
+                    self.genres = []
+                }
+                Self.logger.error("Genre load failed for \(type.rawValue, privacy: .public): \(error.localizedDescription, privacy: .public)")
             }
 
             guard let self, self.genreLoadTaskType == type else { return }
@@ -902,12 +950,7 @@ final class SearchViewModel {
 
     func applyYearFilter(_ year: Int?) {
         yearFilter = year
-        // Clear preset if setting a specific year that doesn't match any preset
-        if let year {
-            yearRangePreset = YearRangePreset.allCases.first(where: { $0.contains(year: year) })
-        } else {
-            yearRangePreset = nil
-        }
+        yearRangePreset = nil
         requery()
     }
 
@@ -931,14 +974,29 @@ final class SearchViewModel {
     }
 
     func applyLanguageFilters(_ languages: Set<String>) {
-        languageFilters = languages
+        let nextSelection = Set(languages.filter { !$0.isEmpty })
+        guard nextSelection != languageFilters else { return }
+
+        languageFilters = nextSelection
         requery()
     }
 
     func toggleLanguage(_ code: String) {
-        if languageFilters.contains(code) {
+        if code == Self.defaultLanguageCode {
+            if languageFilters == [Self.defaultLanguageCode] {
+                languageFilters = []
+            } else {
+                languageFilters = [Self.defaultLanguageCode]
+            }
+        } else if languageFilters.contains(code) {
             languageFilters.remove(code)
+            if languageFilters.isEmpty {
+                languageFilters = [Self.defaultLanguageCode]
+            }
         } else {
+            if languageFilters == [Self.defaultLanguageCode] {
+                languageFilters.removeAll()
+            }
             languageFilters.insert(code)
         }
         requery()
@@ -983,6 +1041,25 @@ final class SearchViewModel {
         }
     }
 
+    private func preferredLanguageCode(in selection: Set<String>) -> String? {
+        guard !selection.isEmpty else { return nil }
+
+        let prioritizedKnownCodes = SearchLanguageOption.common.map(\.code)
+        if let preferred = prioritizedKnownCodes.first(where: { selection.contains($0) && $0 != Self.defaultLanguageCode }) {
+            return preferred
+        }
+
+        if selection == [Self.defaultLanguageCode] {
+            return nil
+        }
+
+        if let fallback = selection.first(where: { $0 != Self.defaultLanguageCode }) {
+            return fallback
+        }
+
+        return nil
+    }
+
     // MARK: - Recent Searches
 
     func addRecentSearch(_ term: String) {
@@ -1004,22 +1081,32 @@ final class SearchViewModel {
     }
 
     func loadRecentSearches(from settingsManager: SettingsManager) {
-        Task {
-            guard let json = try? await settingsManager.getString(key: SettingsKeys.recentSearches),
-                  let data = json.data(using: .utf8),
-                  let decoded = try? JSONDecoder().decode([String].self, from: data)
-            else { return }
-            self.recentSearches = decoded
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                guard let json = try await settingsManager.getString(key: SettingsKeys.recentSearches),
+                      let data = json.data(using: .utf8) else {
+                    self.recentSearches = []
+                    return
+                }
+                self.recentSearches = try JSONDecoder().decode([String].self, from: data)
+            } catch {
+                self.recentSearches = []
+                Self.logger.error("Recent search load failed: \(error.localizedDescription, privacy: .public)")
+            }
         }
     }
 
     func saveRecentSearches(to settingsManager: SettingsManager) {
         let searches = recentSearches
         Task {
-            guard let data = try? JSONEncoder().encode(searches),
-                  let json = String(data: data, encoding: .utf8)
-            else { return }
-            try? await settingsManager.setString(key: SettingsKeys.recentSearches, value: json)
+            do {
+                let data = try JSONEncoder().encode(searches)
+                guard let json = String(data: data, encoding: .utf8) else { return }
+                try await settingsManager.setString(key: SettingsKeys.recentSearches, value: json)
+            } catch {
+                Self.logger.error("Recent search save failed: \(error.localizedDescription, privacy: .public)")
+            }
         }
     }
 

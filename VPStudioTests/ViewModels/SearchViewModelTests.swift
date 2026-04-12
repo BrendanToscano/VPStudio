@@ -5,15 +5,27 @@ import Testing
 
 @Suite(.serialized)
 struct SearchViewModelTests {
+    private enum SearchStubError: Error {
+        case forcedFailure
+    }
+
     private actor SearchMetadataStub: MetadataProvider {
         var responseByPage: [Int: MetadataSearchResult] = [:]
+        var failingPages: Set<Int> = []
 
         func setResponses(_ responses: [Int: MetadataSearchResult]) {
             responseByPage = responses
         }
 
+        func setFailingPages(_ pages: Set<Int>) {
+            failingPages = pages
+        }
+
         func search(query: String, type: MediaType?, page: Int) async throws -> MetadataSearchResult {
-            responseByPage[page] ?? MetadataSearchResult(items: [], page: page, totalPages: page, totalResults: 0)
+            if failingPages.contains(page) {
+                throw SearchStubError.forcedFailure
+            }
+            return responseByPage[page] ?? MetadataSearchResult(items: [], page: page, totalPages: page, totalResults: 0)
         }
 
         func getDetail(id: String, type: MediaType) async throws -> MediaItem { fatalError("unused") }
@@ -183,6 +195,10 @@ struct SearchViewModelTests {
             lastDiscoverFilters?.originalLanguage
         }
 
+        func currentLanguage() -> String? {
+            lastDiscoverFilters?.language
+        }
+
         func currentDiscoverCallCount() -> Int {
             discoverCallCount
         }
@@ -302,6 +318,46 @@ struct SearchViewModelTests {
         try await Self.waitUntil { viewModel.currentPage == 2 && viewModel.isLoadingMore == false }
 
         #expect(viewModel.results.map(\.id) == ["page-1-a", "page-1-b", "page-2-c"])
+    }
+
+    @Test
+    @MainActor
+    func loadMoreFailureSurfacesErrorAndAllowsImmediateRetry() async throws {
+        let stub = SearchMetadataStub()
+        await stub.setResponses([
+            1: MetadataSearchResult(
+                items: [Fixtures.mediaPreview(id: "page-1")],
+                page: 1,
+                totalPages: 2,
+                totalResults: 2
+            ),
+            2: MetadataSearchResult(
+                items: [Fixtures.mediaPreview(id: "page-2")],
+                page: 2,
+                totalPages: 2,
+                totalResults: 2
+            ),
+        ])
+        await stub.setFailingPages([2])
+
+        let viewModel = SearchViewModel(metadataService: stub)
+        viewModel.query = "retry me"
+        viewModel.search()
+        try await Self.waitUntil { viewModel.results.count == 1 }
+
+        viewModel.loadMore()
+        try await Self.waitUntil { viewModel.isLoadingMore == false && viewModel.error != nil }
+
+        #expect(viewModel.results.map(\.id) == ["page-1"])
+        #expect(viewModel.currentPage == 1)
+
+        await stub.setFailingPages([])
+        viewModel.loadMore()
+        try await Self.waitUntil { viewModel.results.count == 2 }
+
+        #expect(viewModel.results.map(\.id) == ["page-1", "page-2"])
+        #expect(viewModel.currentPage == 2)
+        #expect(viewModel.error == nil)
     }
 
     @Test
@@ -578,6 +634,15 @@ struct SearchViewModelTests {
         #expect(viewModel.originalLanguageCode == nil)
     }
 
+    @Test
+    @MainActor
+    func primaryLanguagePrefersFirstKnownLanguageWhenMultipleSelected() {
+        let viewModel = SearchViewModel()
+        viewModel.languageFilters = ["ja-JP", "fr-FR"]
+
+        #expect(viewModel.primaryLanguage == "fr-FR")
+    }
+
     @Test(arguments: ["hi-IN", "ta-IN", "te-IN", "bn-IN"])
     @MainActor
     func originalLanguageCodeDoesNotSendForHindiOrRelatedIndianLocales(localeCode: String) {
@@ -636,5 +701,27 @@ struct SearchViewModelTests {
 
         #expect(await stub.currentDiscoverCallCount() > 0)
         #expect(await stub.currentOriginalLanguage() == "fr")
+    }
+
+    @Test
+    @MainActor
+    func browseGenreUsesPreferredLanguageWhenMultipleLanguagesSelected() async throws {
+        let stub = DiscoverFilterCaptureMetadataStub()
+        let viewModel = SearchViewModel(metadataService: stub)
+        viewModel.languageFilters = ["ja-JP", "fr-FR"]
+
+        viewModel.selectGenre(Genre(id: 18, name: "Drama"))
+
+        var capturedLanguage = await stub.currentLanguage()
+        var attempts = 0
+        while capturedLanguage != "fr-FR" && attempts < 40 {
+            attempts += 1
+            try await Task.sleep(for: .milliseconds(40))
+            capturedLanguage = await stub.currentLanguage()
+        }
+
+        #expect(await stub.currentDiscoverCallCount() > 0)
+        #expect(await stub.currentLanguage() == "fr-FR")
+        #expect(await stub.currentOriginalLanguage() == nil)
     }
 }

@@ -1,25 +1,58 @@
 import Foundation
+import OSLog
 
 /// Multi-provider AI assistant for recommendations and conversation
 actor AIAssistantManager {
+    private static let logger = Logger(subsystem: "VPStudio", category: "AI")
     private let database: DatabaseManager
     private var providers: [AIProviderKind: any AIProvider] = [:]
+    private var configuredModels: [AIProviderKind: String] = [:]
     private let contextAssembler = AssistantContextAssembler()
+    private(set) var lastUsagePersistenceErrorMessage: String?
+
+    nonisolated static let defaultProviderResolutionOrder: [AIProviderKind] = [
+        .anthropic,
+        .openAI,
+        .gemini,
+        .openRouter,
+        .ollama,
+        .local,
+    ]
 
     init(database: DatabaseManager) {
         self.database = database
     }
 
     var hasConfiguredProvider: Bool {
-        !providers.isEmpty
+        !usableProviders().isEmpty
     }
 
     func registerProvider(kind: AIProviderKind, provider: any AIProvider) {
         providers[kind] = provider
+        configuredModels[kind] = Self.inferredModelID(from: provider) ?? AIModelCatalog.defaultModel(for: kind)?.id
     }
 
     func clearProviders() {
         providers.removeAll()
+        configuredModels.removeAll()
+    }
+
+    nonisolated static func resolvedDefaultProvider(
+        preferredProvider: AIProviderKind?,
+        availableProviders: [AIProviderKind]
+    ) -> AIProviderKind? {
+        let availableSet = Set(availableProviders)
+        guard !availableSet.isEmpty else { return nil }
+
+        if let preferredProvider, availableSet.contains(preferredProvider) {
+            return preferredProvider
+        }
+
+        for candidate in defaultProviderResolutionOrder where availableSet.contains(candidate) {
+            return candidate
+        }
+
+        return availableProviders.sorted { $0.rawValue < $1.rawValue }.first
     }
 
     func configure(provider: AIProviderKind, apiKey: String, baseURL: String? = nil, model: String? = nil) {
@@ -37,8 +70,32 @@ actor AIAssistantManager {
         case .openAI:
             providers[.openAI] = OpenAIProvider(apiKey: apiKey, model: resolvedModel)
         case .ollama:
+            let resolvedBaseURL = (baseURL ?? "http://localhost:11434")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !resolvedBaseURL.isEmpty else {
+                providers.removeValue(forKey: .ollama)
+                configuredModels.removeValue(forKey: .ollama)
+                Self.logger.info("Skipped Ollama configuration because the endpoint was empty.")
+                return
+            }
+
+            if let warning = AIOllamaEndpointPolicy.warningMessage(for: resolvedBaseURL) {
+                providers.removeValue(forKey: .ollama)
+                configuredModels.removeValue(forKey: .ollama)
+                if warning.contains("Plain HTTP is only allowed") {
+                    Self.logger.error(
+                        "Rejected insecure Ollama endpoint: \(resolvedBaseURL, privacy: .public)"
+                    )
+                } else {
+                    Self.logger.info(
+                        "Skipped Ollama configuration because the endpoint was invalid."
+                    )
+                }
+                return
+            }
+
             providers[.ollama] = OllamaProvider(
-                baseURL: baseURL ?? "http://localhost:11434",
+                baseURL: resolvedBaseURL,
                 model: resolvedModel
             )
         case .gemini:
@@ -51,21 +108,52 @@ actor AIAssistantManager {
         case .local:
             break // Local provider is registered directly via registerProvider in AppState
         }
+
+        configuredModels[provider] = resolvedModel
     }
 
     /// Ask the AI a question with optional context
     func ask(prompt: String, provider: AIProviderKind? = nil, context: AssistantContext? = nil) async throws -> AIProviderResponse {
-        let selectedProvider = provider ?? providers.keys.sorted(by: { $0.rawValue < $1.rawValue }).first
+        let selectedProvider = await resolvedProvider(for: provider)
         guard let kind = selectedProvider, let aiProvider = providers[kind] else {
             throw AIError.noProviderConfigured
         }
 
         let assembledNotes = await assembledContextNotes()
         let resolvedContext = await contextualizedContext(from: context)
-        let systemPrompt = buildSystemPrompt(context: resolvedContext, assembledNotes: assembledNotes)
+        let systemPrompt = buildSystemPrompt(
+            context: resolvedContext,
+            assembledNotes: assembledNotes,
+            budgetTokens: promptBudgetTokens(for: kind)
+        )
         let response = try await aiProvider.complete(system: systemPrompt, userMessage: prompt)
-        logUsage(response: response, requestType: .ask)
+        await logUsage(response: response, requestType: .ask)
         return response
+    }
+
+    private func resolvedProvider(for requestedProvider: AIProviderKind?) async -> AIProviderKind? {
+        let availableProviders = usableProviders()
+        guard !availableProviders.isEmpty else { return nil }
+
+        if let requestedProvider {
+            return Self.resolvedDefaultProvider(
+                preferredProvider: requestedProvider,
+                availableProviders: Array(availableProviders.keys)
+            )
+        }
+
+        let preferredProvider = await preferredDefaultProvider()
+        return Self.resolvedDefaultProvider(
+            preferredProvider: preferredProvider,
+            availableProviders: Array(availableProviders.keys)
+        )
+    }
+
+    private func preferredDefaultProvider() async -> AIProviderKind? {
+        guard let rawValue = try? await database.getSetting(key: SettingsKeys.defaultAIProvider) else {
+            return nil
+        }
+        return AIProviderKind(rawValue: rawValue)
     }
 
     /// Get movie/show recommendations based on user taste
@@ -96,7 +184,7 @@ actor AIAssistantManager {
     ) async throws -> AIPersonalizedAnalysis {
         let yearStr = year.map { " (\($0))" } ?? ""
         let genreStr = genres.isEmpty ? "" : " Genres: \(genres.joined(separator: ", "))."
-        let overviewStr = (overview ?? "").isEmpty ? "" : " Synopsis: \(overview!)"
+        let overviewStr = overview.flatMap { $0.isEmpty ? nil : " Synopsis: \($0)" } ?? ""
 
         let prompt = """
         Analyze this \(type == .movie ? "movie" : "TV show") for me personally based on my taste profile:
@@ -124,23 +212,19 @@ actor AIAssistantManager {
             return configuredModel
         }
 
-        if provider == .anthropic || provider == .openAI {
-            return fallbackModelID(for: provider)
-        }
-
-        if provider == .gemini {
-            return catalogDefault ?? fallbackModelID(for: provider)
-        }
-
         return catalogDefault ?? fallbackModelID(for: provider)
     }
 
     nonisolated static func fallbackModelID(for provider: AIProviderKind) -> String {
+        if let catalogDefault = AIModelCatalog.defaultModel(for: provider)?.id {
+            return catalogDefault
+        }
+
         switch provider {
         case .anthropic:
             return AIModelCatalog.claudeSonnet4.id
         case .openAI:
-            return AIModelCatalog.gpt4o.id
+            return AIModelCatalog.gpt54.id
         case .gemini:
             return AIModelCatalog.gemini25Flash.id
         case .ollama:
@@ -149,6 +233,27 @@ actor AIAssistantManager {
             return AIModelCatalog.openRouterGeminiFlashLite.id
         case .local:
             return AIModelCatalog.localSmolLM2.id
+        }
+    }
+
+    nonisolated static func availableDefaultProviders(
+        configuredCloudProviders: [AIProviderKind],
+        hasOllamaEndpoint: Bool,
+        hasUsableLocalProvider: Bool
+    ) -> [AIProviderKind] {
+        var available = configuredCloudProviders
+        if hasOllamaEndpoint {
+            available.append(.ollama)
+        }
+        if hasUsableLocalProvider {
+            available.append(.local)
+        }
+
+        var seen = Set<AIProviderKind>()
+        return defaultProviderResolutionOrder.filter { provider in
+            guard available.contains(provider), !seen.contains(provider) else { return false }
+            seen.insert(provider)
+            return true
         }
     }
 
@@ -178,13 +283,17 @@ actor AIAssistantManager {
 
     /// Compare recommendations across providers
     func compareProviders(prompt: String, context: AssistantContext?) async throws -> AICompareResult {
-        let providersCopy = providers
+        let providersCopy = usableProviders()
         var results: [AIProviderKind: AIProviderResponse] = [:]
         var errors: [AIProviderKind: String] = [:]
 
         let assembledNotes = await assembledContextNotes()
         let resolvedContext = await contextualizedContext(from: context)
-        let systemPrompt = buildSystemPrompt(context: resolvedContext, assembledNotes: assembledNotes)
+        let systemPrompt = buildSystemPrompt(
+            context: resolvedContext,
+            assembledNotes: assembledNotes,
+            budgetTokens: promptBudgetTokens(for: Array(providersCopy.keys))
+        )
 
         await withTaskGroup(of: (AIProviderKind, Result<AIProviderResponse, Error>).self) { group in
             for (kind, provider) in providersCopy {
@@ -208,26 +317,26 @@ actor AIAssistantManager {
         }
 
         for (_, response) in results {
-            logUsage(response: response, requestType: .compare)
+            await logUsage(response: response, requestType: .compare)
         }
 
         return AICompareResult(prompt: prompt, responses: results, errors: errors)
     }
 
     /// Build contextual system prompt, merging assembled context notes with any ad-hoc context.
-    private func buildSystemPrompt(context: AssistantContext?, assembledNotes: [String] = []) -> String {
+    private func buildSystemPrompt(
+        context: AssistantContext?,
+        assembledNotes: [String] = [],
+        budgetTokens: Int
+    ) -> String {
         var parts = [
             "You are VPStudio AI, a knowledgeable movie and TV show assistant.",
             "You help users discover content they'll love based on their preferences.",
             "Provide specific, actionable recommendations with reasoning.",
         ]
 
-        // Inject assembled context notes (from periodic indexing)
-        for note in assembledNotes {
-            parts.append(note)
-        }
-
-        // Overlay any ad-hoc context from the caller
+        // Overlay any ad-hoc context from the caller first so request-scoped data is
+        // preserved when the prompt needs to be trimmed to a model-specific budget.
         if let ctx = context {
             if !ctx.recentlyWatched.isEmpty {
                 parts.append("Recently watched: \(ctx.recentlyWatched.joined(separator: ", "))")
@@ -264,7 +373,12 @@ actor AIAssistantManager {
             }
         }
 
-        return parts.joined(separator: "\n")
+        // Inject assembled context notes (from periodic indexing) after caller-supplied data.
+        for note in assembledNotes {
+            parts.append(note)
+        }
+
+        return AssistantPromptBudgetPolicy.composePrompt(from: parts, budgetTokens: budgetTokens)
     }
 
     private func parseRecommendations(from content: String) throws -> [AIMovieRecommendation] {
@@ -475,6 +589,63 @@ actor AIAssistantManager {
         }
     }
 
+    private func usableProviders() -> [AIProviderKind: any AIProvider] {
+        Dictionary(uniqueKeysWithValues: providers.filter { kind, provider in
+            providerIsUsable(kind: kind, provider: provider)
+        })
+    }
+
+    private func providerIsUsable(kind: AIProviderKind, provider: any AIProvider) -> Bool {
+        guard kind == .local else { return true }
+
+        guard let modelID = Self.inferredModelID(from: provider), !modelID.isEmpty else {
+            return false
+        }
+
+        return Self.localModelArtifactsExist(modelID: modelID)
+    }
+
+    func promptBudgetTokens(for provider: AIProviderKind) -> Int {
+        let configuredModelID = configuredModels[provider] ?? AIModelCatalog.defaultModel(for: provider)?.id
+        let maxContextTokens = configuredModelID.flatMap { AIModelCatalog.model(byID: $0)?.maxContextTokens }
+            ?? AIModelCatalog.defaultModel(for: provider)?.maxContextTokens
+            ?? 4096
+
+        return max(512, maxContextTokens / 2)
+    }
+
+    func promptBudgetTokens(for providers: [AIProviderKind]) -> Int {
+        let budgets = providers.map { promptBudgetTokens(for: $0) }
+        return budgets.min() ?? 4096
+    }
+
+    private nonisolated static func inferredModelID(from provider: any AIProvider) -> String? {
+        let mirror = Mirror(reflecting: provider)
+        for child in mirror.children {
+            if child.label == "modelID", let modelID = child.value as? String, !modelID.isEmpty {
+                return modelID
+            }
+        }
+        return nil
+    }
+
+    private nonisolated static func localModelArtifactsExist(modelID: String) -> Bool {
+        let fileManager = FileManager.default
+        let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+        let caches = fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first
+        let sanitizedDirectoryName = modelID.replacingOccurrences(of: "/", with: "_")
+        let sanitizedCacheName = modelID.replacingOccurrences(of: "/", with: "--")
+
+        let candidateURLs = [
+            appSupport?.appendingPathComponent("VPStudio/Models", isDirectory: true)
+                .appendingPathComponent(sanitizedDirectoryName, isDirectory: true),
+            caches?.appendingPathComponent("huggingface/hub", isDirectory: true)
+                .appendingPathComponent("models--\(sanitizedCacheName)", isDirectory: true),
+        ].compactMap { $0 }
+
+        return candidateURLs.contains(where: { fileManager.fileExists(atPath: $0.path) })
+    }
+
     /// Invalidates the assembler's cached snapshot, forcing a rebuild on the next request.
     func invalidateContextCache() async {
         await contextAssembler.invalidateCache()
@@ -482,7 +653,7 @@ actor AIAssistantManager {
 
     // MARK: - Usage Tracking
 
-    private nonisolated func logUsage(response: AIProviderResponse, requestType: AIRequestType) {
+    private func logUsage(response: AIProviderResponse, requestType: AIRequestType) async {
         let cost = AIModelCatalog.estimateCost(
             modelID: response.model,
             inputTokens: response.inputTokens,
@@ -496,10 +667,117 @@ actor AIAssistantManager {
             estimatedCostUSD: cost,
             requestType: requestType
         )
-        let database = self.database
-        Task.detached {
-            try? await database.saveAIUsageRecord(record)
+        do {
+            try await database.saveAIUsageRecord(record)
+            lastUsagePersistenceErrorMessage = nil
+        } catch {
+            lastUsagePersistenceErrorMessage = error.localizedDescription
+            Self.logger.error(
+                "Failed to persist AI usage record: \(error.localizedDescription, privacy: .public)"
+            )
         }
+    }
+}
+
+typealias AIHTTPSleep = @Sendable (TimeInterval) async throws -> Void
+
+enum AIHTTPTransport {
+    static let defaultSession: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 60
+        configuration.timeoutIntervalForResource = 120
+        configuration.httpShouldSetCookies = false
+        return URLSession(configuration: configuration)
+    }()
+
+    static let defaultSleep: AIHTTPSleep = { delay in
+        let boundedDelay = max(delay, 0)
+        let nanoseconds = UInt64((boundedDelay * 1_000_000_000).rounded())
+        try await Task.sleep(nanoseconds: nanoseconds)
+    }
+
+    static func perform(
+        _ request: URLRequest,
+        using session: URLSession,
+        maxRateLimitRetries: Int = 1,
+        sleep: AIHTTPSleep = defaultSleep
+    ) async throws -> (Data, HTTPURLResponse) {
+        var attempt = 0
+
+        while true {
+            let (data, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                throw AIError.invalidResponse
+            }
+
+            guard http.statusCode == 429 else {
+                return (data, http)
+            }
+
+            guard attempt < maxRateLimitRetries else {
+                throw AIError.rateLimited
+            }
+
+            attempt += 1
+            try await sleep(retryDelay(from: http, attempt: attempt))
+        }
+    }
+
+    static func retryDelay(from response: HTTPURLResponse, attempt: Int) -> TimeInterval {
+        if let retryAfter = retryAfterInterval(from: response.value(forHTTPHeaderField: "Retry-After")) {
+            return min(max(retryAfter, 0), 30)
+        }
+
+        let backoff = pow(2.0, Double(max(attempt - 1, 0)))
+        return min(max(backoff, 0.25), 8)
+    }
+
+    static func retryAfterInterval(from headerValue: String?) -> TimeInterval? {
+        guard let trimmedHeader = headerValue?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmedHeader.isEmpty else {
+            return nil
+        }
+
+        if let seconds = Double(trimmedHeader) {
+            return seconds
+        }
+
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "EEE',' dd MMM yyyy HH':'mm':'ss zzz"
+        guard let retryDate = formatter.date(from: trimmedHeader) else {
+            return nil
+        }
+
+        return retryDate.timeIntervalSinceNow
+    }
+}
+
+enum AIOllamaEndpointPolicy {
+    static func isAllowedBaseURL(_ baseURL: String) -> Bool {
+        warningMessage(for: baseURL) == nil
+    }
+
+    static func warningMessage(for baseURL: String) -> String? {
+        let trimmed = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        guard let url = URL(string: trimmed), let host = url.host?.lowercased() else {
+            return "Enter a valid Ollama server URL."
+        }
+
+        let scheme = url.scheme?.lowercased() ?? ""
+        guard scheme == "http" else { return nil }
+        guard !isLocalHost(host) else { return nil }
+
+        return "Remote Ollama endpoints must use HTTPS. Plain HTTP is only allowed for localhost and loopback addresses."
+    }
+
+    private static func isLocalHost(_ host: String) -> Bool {
+        host == "localhost"
+            || host == "127.0.0.1"
+            || host == "::1"
+            || host == "[::1]"
     }
 }
 

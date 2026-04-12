@@ -33,9 +33,9 @@ struct SettingsAccessibilityPolicyTests {
     }
 
     @Test
-    func rowHintWithoutWarningIndicatesTapToConfigure() {
+    func rowHintWithoutWarningUsesGenericOpenDetailsCopy() {
         let hint = SettingsAccessibilityPolicy.rowHint(hasWarning: false)
-        #expect(hint == "Tap to configure")
+        #expect(hint == "Opens details for this setting")
     }
 
     // MARK: - Section Label

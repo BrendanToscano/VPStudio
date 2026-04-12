@@ -214,4 +214,47 @@ struct LibraryCSVMultiImportTests {
         let customNames = folders.filter { !$0.isSystem }.map(\.name)
         #expect(customNames.contains("Action"))
     }
+
+    @Test
+    func duplicateRowsRemainIdempotentWithinSingleImport() async throws {
+        let (database, tempDir) = try await makeTemporaryDatabase()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let csvURL = try writeCSV(
+            """
+            Const,Your Rating,Date Rated,Title,URL,Title Type,IMDb Rating,Year
+            tt0133093,9,2026-01-15,The Matrix,https://www.imdb.com/title/tt0133093/,movie,8.7,1999
+            tt0133093,9,2026-01-15,The Matrix,https://www.imdb.com/title/tt0133093/,movie,8.7,1999
+            """,
+            name: "rollback.csv",
+            in: tempDir
+        )
+
+        let service = LibraryCSVImportService(database: database)
+
+        let summary = try await service.importCSV(
+            from: csvURL,
+            options: .init(
+                destination: .favorites,
+                importRatings: true,
+                promoteLikedRatingsToFavorites: true,
+                targetFolderName: "Rollback Folder"
+            )
+        )
+
+        #expect(summary.rowsImported == 2)
+
+        let media = try await database.fetchMediaItem(id: "tt0133093")
+        #expect(media != nil)
+
+        let ratings = try await database.fetchTasteEvents(eventType: .rated, limit: 20)
+        #expect(ratings.count == 1)
+
+        let favorites = try await database.fetchLibraryEntries(listType: .favorites)
+        #expect(favorites.count == 1)
+
+        let folders = try await database.fetchAllLibraryFolders(listType: .favorites)
+        let customFolder = folders.first { !$0.isSystem && $0.name == "Rollback Folder" }
+        #expect(customFolder != nil)
+    }
 }

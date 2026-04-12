@@ -1,5 +1,5 @@
 {
-  "originHash" : "92bcc3222eb61d3c38870e904639f941221996ba71bb8023f6c41bad5fd9b445",
+  "originHash" : "021fb727f6fd0b4372ba709be6a368169214fd61e3e9150d99d788b94b4616df",
   "pins" : [
     {
       "identity" : "ffmpegkit",
@@ -20,39 +20,12 @@
       }
     },
     {
-      "identity" : "gzipswift",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/1024jp/GzipSwift",
-      "state" : {
-        "revision" : "731037f6cc2be2ec01562f6597c1d0aa3fe6fd05",
-        "version" : "6.0.1"
-      }
-    },
-    {
       "identity" : "ksplayer",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/kingslay/KSPlayer",
       "state" : {
         "revision" : "bdfa2da39bb18865b317c4ffd08cdef5f8efc043",
         "version" : "2.3.4"
-      }
-    },
-    {
-      "identity" : "mlx-swift",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/ml-explore/mlx-swift",
-      "state" : {
-        "revision" : "6ba4827fb82c97d012eec9ab4b2de21f85c3b33d",
-        "version" : "0.30.6"
-      }
-    },
-    {
-      "identity" : "mlx-swift-examples",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/ml-explore/mlx-swift-examples",
-      "state" : {
-        "branch" : "main",
-        "revision" : "c6844888f4ace8ffb6029f4fbfa317339e420eab"
       }
     },
     {
@@ -89,15 +62,6 @@
       "state" : {
         "revision" : "0aeefadec459ce8e11a333769950fb86183aca43",
         "version" : "2.3.5"
-      }
-    },
-    {
-      "identity" : "swift-numerics",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/apple/swift-numerics",
-      "state" : {
-        "revision" : "0c0290ff6b24942dadb83a929ffaaa1481df04a2",
-        "version" : "1.1.1"
       }
     },
     {

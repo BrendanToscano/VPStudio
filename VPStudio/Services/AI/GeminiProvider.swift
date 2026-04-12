@@ -6,14 +6,24 @@ struct GeminiProvider: AIProvider, Sendable {
     private let apiKey: String
     private let model: String
     private let session: URLSession
+    private let sleep: AIHTTPSleep
 
-    init(apiKey: String, model: String = "gemini-2.5-flash", session: URLSession = .shared) {
+    init(
+        apiKey: String,
+        model: String = "gemini-2.5-flash",
+        session: URLSession = AIHTTPTransport.defaultSession,
+        sleep: @escaping AIHTTPSleep = AIHTTPTransport.defaultSleep
+    ) {
         self.apiKey = apiKey
         self.model = model
         self.session = session
+        self.sleep = sleep
     }
 
     func complete(system: String, userMessage: String) async throws -> AIProviderResponse {
+        let trimmedAPIKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedAPIKey.isEmpty else { throw AIError.invalidResponse }
+
         let body: [String: Any] = [
             "system_instruction": [
                 "parts": [["text": system]]
@@ -26,22 +36,25 @@ struct GeminiProvider: AIProvider, Sendable {
             ]
         ]
 
-        let urlString = "https://generativelanguage.googleapis.com/v1beta/models/\(model):generateContent?key=\(apiKey)"
-        guard let url = URL(string: urlString) else {
+        let trimmedModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedModel.isEmpty else { throw AIError.invalidResponse }
+
+        var components = URLComponents(string: "https://generativelanguage.googleapis.com")
+        components?.path = "/v1beta/models/\(trimmedModel):generateContent"
+        guard let url = components?.url else {
             throw AIError.invalidResponse
         }
+
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.timeoutInterval = 60
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.httpShouldHandleCookies = false
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(trimmedAPIKey, forHTTPHeaderField: "x-goog-api-key")
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse else { throw AIError.invalidResponse }
-
-        if http.statusCode == 429 {
-            throw AIError.rateLimited
-        }
+        let (data, http) = try await AIHTTPTransport.perform(request, using: session, sleep: sleep)
         guard (200...299).contains(http.statusCode) else {
             let msg = String(data: data, encoding: .utf8) ?? ""
             throw AIError.httpError(http.statusCode, msg)

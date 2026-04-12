@@ -23,6 +23,8 @@ This repo is a Swift / Xcode / visionOS workspace, not a Node app.
 
 - Start codebase orientation from `README.md`, `docs/USER_MANUAL.md`, and `docs/ROADMAP_v1.1.md`
 - Treat `VPStudio.xcodeproj`, `Package.swift`, and `Info.plist` as the core project anchors
+- Do not assume a `references/` directory or repo-map exists unless it is present in the tree; verify cross-linked paths before following them
+- If `references/` is present, read only the specific files that exist. Treat `references/repo-map.md`, `references/domain-rules.md`, and `references/workflows.md` as optional support docs, not required startup files.
 - Do **not** assume `package.json`, `docs/README.md`, or web-app folder conventions exist here
 - Keep durable project notes in `MEMORY.md` and dated work logs in `memory/YYYY-MM-DD.md`
 
@@ -57,6 +59,7 @@ Capture what matters. Decisions, context, things to remember. Skip the secrets u
 ## Red Lines
 
 - Don't exfiltrate private data. Ever.
+- Do not commit simulator/device backup payloads, SQLite snapshots, preference plists, or other secret-bearing artifacts under `device-backups/`; delete or scrub them before release.
 - Don't run destructive commands without asking.
 - `trash` > `rm` (recoverable beats gone forever)
 - When in doubt, ask.

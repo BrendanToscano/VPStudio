@@ -5,7 +5,7 @@ actor PremiumizeService: DebridServiceProtocol {
     private let apiToken: String
     private let baseURL = "https://www.premiumize.me/api"
     private let session: URLSession
-    private var selectedFileIDsByTorrent: [String: Set<Int>] = [:]
+    private var episodeSelectionByTorrent: [String: EpisodeSelectionRequest] = [:]
 
     init(apiToken: String, session: URLSession = .shared) {
         self.apiToken = apiToken
@@ -46,21 +46,55 @@ actor PremiumizeService: DebridServiceProtocol {
     }
 
     func addMagnet(hash: String) async throws -> String {
-        let magnet = "magnet:?xt=urn:btih:\(hash)"
+        let normalizedHash = try DebridHashValidator.validatedInfoHash(hash)
+        let magnet = "magnet:?xt=urn:btih:\(normalizedHash)"
         let body = "src=\(magnet.addingPercentEncoding(withAllowedCharacters: Self.formEncodingAllowed) ?? magnet)"
         let response: PMTransferResponse = try await request(path: "/transfer/create", method: "POST", body: body)
-        return response.id ?? hash
+        return response.id ?? normalizedHash
     }
 
     func selectFiles(torrentId: String, fileIds: [Int]) async throws {
-        if fileIds.isEmpty {
-            selectedFileIDsByTorrent.removeValue(forKey: torrentId)
-            return
+        let _ = torrentId
+        let _ = fileIds
+        episodeSelectionByTorrent.removeValue(forKey: torrentId)
+        // Premiumize does not expose per-file selection in this flow.
+        // Treat selection as a no-op so callers can use the shared debrid path
+        // without special-casing this provider or turning a recoverable path
+        // into a hard failure.
+    }
+
+    func selectMatchingEpisodeFile(
+        torrentId: String,
+        seasonNumber: Int,
+        episodeNumber: Int,
+        resolvedFileNameHint: String?,
+        resolvedFileSizeHint: Int64?
+    ) async throws -> Bool {
+        let selectionRequest = EpisodeSelectionRequest(
+            seasonNumber: seasonNumber,
+            episodeNumber: episodeNumber,
+            resolvedFileNameHint: resolvedFileNameHint,
+            resolvedFileSizeHint: resolvedFileSizeHint
+        )
+        episodeSelectionByTorrent[torrentId] = selectionRequest
+
+        let response: PMTransferInfoResponse = try await request(path: "/transfer/list")
+        guard let transfer = response.transfers?.first(where: { $0.id == torrentId }) else {
+            return true
         }
-        // Premiumize transfer/list does not expose per-file selection in this flow.
-        // Fail fast instead of silently ignoring caller intent.
-        selectedFileIDsByTorrent[torrentId] = Set(fileIds)
-        throw DebridError.networkError("Premiumize file selection is not supported for this transfer")
+
+        if let resolvedFileNameHint,
+           Self.normalizedFileName(transfer.name) == Self.normalizedFileName(resolvedFileNameHint) {
+            return true
+        }
+
+        if let transferName = transfer.name,
+           EpisodeTokenMatcher.matches(title: transferName, season: seasonNumber, episode: episodeNumber) {
+            return true
+        }
+
+        episodeSelectionByTorrent.removeValue(forKey: torrentId)
+        return false
     }
 
     func getStreamURL(torrentId: String) async throws -> StreamInfo {
@@ -69,14 +103,26 @@ actor PremiumizeService: DebridServiceProtocol {
         guard let transfer = response.transfers?.first(where: { $0.id == torrentId }) else {
             throw DebridError.torrentNotFound(torrentId)
         }
+        if let selectionRequest = episodeSelectionByTorrent[torrentId] {
+            if let resolvedFileNameHint = selectionRequest.resolvedFileNameHint {
+                guard Self.normalizedFileName(transfer.name) == Self.normalizedFileName(resolvedFileNameHint) else {
+                    episodeSelectionByTorrent.removeValue(forKey: torrentId)
+                    throw DebridError.networkError("Premiumize could not deterministically select the requested episode file.")
+                }
+            } else if let transferName = transfer.name,
+                      !EpisodeTokenMatcher.matches(title: transferName, season: selectionRequest.seasonNumber, episode: selectionRequest.episodeNumber) {
+                episodeSelectionByTorrent.removeValue(forKey: torrentId)
+                throw DebridError.networkError("Premiumize could not deterministically select the requested episode file.")
+            }
+        }
         guard transfer.status == "finished", let link = transfer.link else {
             throw DebridError.fileNotReady(transfer.status ?? "unknown")
         }
         guard let url = URL(string: link) else {
             throw DebridError.networkError("Invalid URL")
         }
-        selectedFileIDsByTorrent.removeValue(forKey: torrentId)
         let fileName = transfer.name ?? "Unknown"
+        episodeSelectionByTorrent.removeValue(forKey: torrentId)
         return StreamInfo(
             streamURL: url,
             quality: VideoQuality.parse(from: fileName),
@@ -114,11 +160,7 @@ actor PremiumizeService: DebridServiceProtocol {
             request.httpBody = Data(body.utf8)
             request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
         }
-        let (data, response) = try await session.data(for: request)
-
-        guard let http = response as? HTTPURLResponse else {
-            throw DebridError.networkError("Invalid response")
-        }
+        let (data, http) = try await DebridHTTPExecutor.data(for: request, session: session)
 
         switch http.statusCode {
         case 200...299:
@@ -134,6 +176,20 @@ actor PremiumizeService: DebridServiceProtocol {
 
         return try JSONDecoder().decode(T.self, from: data)
     }
+
+    private static func normalizedFileName(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        return URL(fileURLWithPath: trimmed).lastPathComponent.lowercased()
+    }
+}
+
+private struct EpisodeSelectionRequest: Sendable {
+    let seasonNumber: Int
+    let episodeNumber: Int
+    let resolvedFileNameHint: String?
+    let resolvedFileSizeHint: Int64?
 }
 
 private struct PMAccountResponse: Sendable {

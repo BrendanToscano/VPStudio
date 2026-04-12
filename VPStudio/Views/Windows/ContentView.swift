@@ -24,6 +24,18 @@ enum BottomTabRoutingPolicy {
     }
 }
 
+enum RootNavigationBadgePolicy {
+    static func activeDownloadCount(from tasks: [DownloadTask]) -> Int {
+        tasks.filter { !$0.status.isTerminal }.count
+    }
+
+    static func settingsWarningCount(from snapshot: SettingsStatusSnapshot) -> Int {
+        SettingsNavigationCatalog.orderedDestinations.filter {
+            SettingsStatusFormatter.status(for: $0, snapshot: snapshot).kind == .warning
+        }.count
+    }
+}
+
 // MARK: - ContentView
 
 struct ContentView: View {
@@ -36,6 +48,8 @@ struct ContentView: View {
 
     @State private var discoverViewModel = DiscoverViewModel()
     @State private var isShowingQuickStartPrompt = false
+    @State private var activeDownloadCount = 0
+    @State private var settingsWarningCount = 0
 
     #if os(visionOS)
     @Environment(\.openImmersiveSpace) private var openImmersiveSpace
@@ -88,25 +102,23 @@ struct ContentView: View {
             }
         }
         .background(Color.black.opacity(0.6))
-        .onAppear {
-            appState.terminateActivePlayerSession()
-            NotificationCenter.default.post(name: .mainWindowDidActivate, object: nil)
-            #if os(macOS) || os(visionOS)
-            dismissWindow(id: "player")
-            #endif
-        }
         .sheet(isPresented: $state.isShowingSetup) {
             SetupWizardView()
         }
         .overlay(alignment: .top) {
-            if isShowingQuickStartPrompt {
+            if isShowingQuickStartPrompt, state.selectedTab == .discover {
                 QuickStartPromptView(
+                    onExploreNow: {
+                        softSetupPromptDismissed = true
+                        isShowingQuickStartPrompt = false
+                        appState.selectedTab = .search
+                    },
                     onRunSetup: {
                         softSetupPromptDismissed = true
                         isShowingQuickStartPrompt = false
                         appState.isShowingSetup = true
                     },
-                    onSkip: {
+                    onDismiss: {
                         softSetupPromptDismissed = true
                         isShowingQuickStartPrompt = false
                     }
@@ -120,6 +132,7 @@ struct ContentView: View {
         .frame(minWidth: 900, minHeight: 600)
         .animation(.spring(response: 0.45, dampingFraction: 0.85), value: isShowingQuickStartPrompt)
         .task {
+            discoverViewModel.configure(database: appState.database)
             await appState.bootstrap()
             // Restore persisted tab selection after bootstrap (settings DB is now ready)
             if let savedTab = try? await appState.settingsManager.getString(key: SettingsKeys.lastSelectedTab) {
@@ -135,20 +148,51 @@ struct ContentView: View {
                let layout = NavigationLayout(rawValue: savedLayout) {
                 appState.navigationLayout = layout
             }
+            await refreshRootBadgeCounts()
             await appState.runQATraktRefreshIfRequested()
             RuntimeMemoryDiagnostics.capture(
                 event: .appBootstrapCompleted,
                 enabled: appState.runtimeDiagnosticsEnabled
             )
-            if appState.setupRecommendationNeeded, !softSetupPromptDismissed {
+            if appState.setupRecommendationNeeded,
+               !softSetupPromptDismissed,
+               state.selectedTab == .discover {
                 isShowingQuickStartPrompt = true
             }
+        }
+        .task(id: state.selectedTab) {
+            guard !appState.isBootstrapping else { return }
+            if appState.setupRecommendationNeeded, !softSetupPromptDismissed {
+                isShowingQuickStartPrompt = (state.selectedTab == .discover)
+            }
+            await refreshRootBadgeCounts()
         }
         .onChange(of: state.isShowingSetup) { _, isShowingSetup in
             if isShowingSetup {
                 softSetupPromptDismissed = true
                 isShowingQuickStartPrompt = false
             }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .downloadsDidChange)) { _ in
+            Task { await refreshDownloadBadgeCount() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .tmdbApiKeyDidChange)) { _ in
+            Task { await refreshSettingsBadgeCount() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .indexersDidChange)) { _ in
+            Task { await refreshSettingsBadgeCount() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .environmentsDidChange)) { _ in
+            Task { await refreshSettingsBadgeCount() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .localModelsDidChange)) { _ in
+            Task { await refreshSettingsBadgeCount() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .openSubtitlesDidChange)) { _ in
+            Task { await refreshSettingsBadgeCount() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .appDidResetAllData)) { _ in
+            Task { await refreshRootBadgeCounts() }
         }
         #if os(visionOS)
         .ornament(attachmentAnchor: .scene(.bottom), contentAlignment: .top) {
@@ -157,7 +201,9 @@ struct ContentView: View {
                     selectedTab: $state.selectedTab,
                     opensEnvironmentPicker: true,
                     onOpenEnvironmentPicker: { isShowingEnvironmentPicker = true },
-                    onTabSelection: { tab in handleTabSelection(tab, state: state) }
+                    onTabSelection: { tab in handleTabSelection(tab, state: state) },
+                    activeDownloadCount: activeDownloadCount,
+                    settingsWarningCount: settingsWarningCount
                 )
                 .environment(appState)
             }
@@ -168,7 +214,9 @@ struct ContentView: View {
                     selectedTab: $state.selectedTab,
                     opensEnvironmentPicker: true,
                     onOpenEnvironmentPicker: { isShowingEnvironmentPicker = true },
-                    onTabSelection: { tab in handleTabSelection(tab, state: state) }
+                    onTabSelection: { tab in handleTabSelection(tab, state: state) },
+                    activeDownloadCount: activeDownloadCount,
+                    settingsWarningCount: settingsWarningCount
                 )
                 .environment(appState)
             }
@@ -191,7 +239,9 @@ struct ContentView: View {
                     selectedTab: $state.selectedTab,
                     opensEnvironmentPicker: false,
                     onOpenEnvironmentPicker: {},
-                    onTabSelection: { tab in handleTabSelection(tab, state: state) }
+                    onTabSelection: { tab in handleTabSelection(tab, state: state) },
+                    activeDownloadCount: activeDownloadCount,
+                    settingsWarningCount: settingsWarningCount
                 )
                 .padding(.horizontal, 12)
                 .padding(.top, 8)
@@ -204,7 +254,9 @@ struct ContentView: View {
                     selectedTab: $state.selectedTab,
                     opensEnvironmentPicker: false,
                     onOpenEnvironmentPicker: {},
-                    onTabSelection: { tab in handleTabSelection(tab, state: state) }
+                    onTabSelection: { tab in handleTabSelection(tab, state: state) },
+                    activeDownloadCount: activeDownloadCount,
+                    settingsWarningCount: settingsWarningCount
                 )
                 .padding(.vertical, 12)
                 .padding(.leading, 10)
@@ -233,6 +285,21 @@ struct ContentView: View {
         )
     }
 
+    private func refreshRootBadgeCounts() async {
+        await refreshDownloadBadgeCount()
+        await refreshSettingsBadgeCount()
+    }
+
+    private func refreshDownloadBadgeCount() async {
+        guard let tasks = try? await appState.downloadManager.listDownloads() else { return }
+        activeDownloadCount = RootNavigationBadgePolicy.activeDownloadCount(from: tasks)
+    }
+
+    private func refreshSettingsBadgeCount() async {
+        let snapshot = await captureSettingsStatusSnapshot()
+        settingsWarningCount = RootNavigationBadgePolicy.settingsWarningCount(from: snapshot)
+    }
+
     @ViewBuilder
     private func contentView(for tab: SidebarTab) -> some View {
         switch tab {
@@ -249,6 +316,60 @@ struct ContentView: View {
         case .settings:
             SettingsView()
         }
+    }
+
+    private func captureSettingsStatusSnapshot() async -> SettingsStatusSnapshot {
+        var snapshot = SettingsStatusSnapshot()
+
+        if let configs = try? await appState.database.fetchAllDebridConfigs() {
+            snapshot.activeDebridCount = configs.filter(\.isActive).count
+        }
+
+        if let configs = try? await appState.database.fetchAllIndexerConfigs() {
+            snapshot.activeIndexerCount = configs.filter(\.isActive).count
+        }
+
+        snapshot.hasTMDBKey = await hasNonEmptyString(for: SettingsKeys.tmdbApiKey)
+        snapshot.hasOpenSubtitlesKey = await hasNonEmptyString(for: SettingsKeys.openSubtitlesApiKey)
+
+        if let assets = try? await appState.environmentCatalogManager.fetchAssets() {
+            snapshot.environmentAssetCount = assets.count
+        }
+
+        let providerRaw = (try? await appState.settingsManager.getString(key: SettingsKeys.defaultAIProvider))
+            ?? AIProviderKind.anthropic.rawValue
+        snapshot.aiProvider = AIProviderKind(rawValue: providerRaw) ?? .anthropic
+
+        snapshot.hasOpenAIKey = await hasNonEmptyString(for: SettingsKeys.openAIApiKey)
+        snapshot.hasAnthropicKey = await hasNonEmptyString(for: SettingsKeys.anthropicApiKey)
+        snapshot.hasGeminiKey = await hasNonEmptyString(for: SettingsKeys.geminiApiKey)
+        snapshot.hasOllamaEndpoint = await hasNonEmptyString(
+            for: SettingsKeys.ollamaEndpoint,
+            fallback: "http://localhost:11434"
+        )
+        snapshot.hasOpenRouterKey = await hasNonEmptyString(for: SettingsKeys.openRouterApiKey)
+
+        let localConfiguration = await appState.localAIProviderConfiguration()
+        snapshot.isLocalAIEnabled = localConfiguration.isEnabled
+        snapshot.hasUsableLocalModel = localConfiguration.isUsable
+
+        let userTraktClient = try? await appState.settingsManager.getString(key: SettingsKeys.traktClientId)
+        let userTraktSecret = try? await appState.settingsManager.getString(key: SettingsKeys.traktClientSecret)
+        snapshot.hasTraktCredentials = TraktDefaults.resolvedCredentials(
+            userClientId: userTraktClient,
+            userClientSecret: userTraktSecret
+        ) != nil
+
+        let hasSimklClient = await hasNonEmptyString(for: SettingsKeys.simklClientId)
+        let hasSimklToken = await hasNonEmptyString(for: SettingsKeys.simklAccessToken)
+        snapshot.hasSimklCredentials = hasSimklClient && hasSimklToken
+
+        return snapshot
+    }
+
+    private func hasNonEmptyString(for key: String, fallback: String? = nil) async -> Bool {
+        let value = (try? await appState.settingsManager.getString(key: key)) ?? fallback
+        return !(value?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
     }
 
     // MARK: - visionOS Environment Logic
@@ -286,8 +407,9 @@ struct ContentView: View {
 }
 
 private struct QuickStartPromptView: View {
+    let onExploreNow: () -> Void
     let onRunSetup: () -> Void
-    let onSkip: () -> Void
+    let onDismiss: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -297,12 +419,12 @@ private struct QuickStartPromptView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Quick Start")
                         .font(.headline)
-                    Text("Explore now with no setup, or run setup for full streaming features.")
+                    Text("Skip setup for now, or run setup to unlock Discover, Search, and streaming features.")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 0)
-                Button(action: onSkip) {
+                Button(action: onDismiss) {
                     Image(systemName: "xmark.circle.fill")
                         .font(.title3)
                         .foregroundStyle(.secondary)
@@ -312,7 +434,7 @@ private struct QuickStartPromptView: View {
             }
 
             HStack(spacing: 10) {
-                Button(action: onSkip) {
+                Button(action: onExploreNow) {
                     Label("Explore Now", systemImage: "play.fill")
                         .frame(maxWidth: .infinity)
                 }

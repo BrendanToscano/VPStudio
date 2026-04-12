@@ -21,6 +21,7 @@ PROJECT="VPStudio.xcodeproj"
 SCHEME="VPStudio"
 BUNDLE_ID="com.tgk30.VPStudio"
 DEVICE_NAME="${VPSTUDIO_VISION_DEVICE:-Apple Vision Pro}"
+KEYCHAIN_SERVICE="com.vpstudio.credentials"
 
 # Resolve a stable simulator UDID to avoid name ambiguity (Vision Pro simulator)
 SIM_DEVICE_ID="$(xcrun simctl list -j devices available | python3 -c 'import json,sys,os
@@ -49,7 +50,8 @@ OUT_BASE="${VPSTUDIO_SMOKE_OUT:-$ROOT_DIR/.smoke-runs}"
 RUN_DIR="$OUT_BASE/visionpro-$RUN_ID"
 LOG_DIR="$RUN_DIR/logs"
 SHOT_DIR="$RUN_DIR/screenshots"
-mkdir -p "$RUN_DIR" "$LOG_DIR" "$SHOT_DIR"
+DERIVED_DATA_DIR="$RUN_DIR/DerivedData"
+mkdir -p "$RUN_DIR" "$LOG_DIR" "$SHOT_DIR" "$DERIVED_DATA_DIR"
 
 SUMMARY_JSON="$RUN_DIR/summary.json"
 SUMMARY_TXT="$RUN_DIR/summary.txt"
@@ -145,16 +147,140 @@ run_pack() {
   shift
   local bundle_path="$RUN_DIR/${label}.xcresult"
   local log_path="$LOG_DIR/${label}.log"
+  local requested_only_testing_count="$#"
+  local filtered_args=()
   rm -rf "$bundle_path"
 
   echo "== Running $label ==" | tee -a "$SUMMARY_TXT"
 
+  if [ "$requested_only_testing_count" -gt 0 ]; then
+    while IFS= read -r arg; do
+      [ -n "$arg" ] && filtered_args+=("$arg")
+    done < <(filter_only_testing_args "$@")
+
+    local executed_only_testing_count="${#filtered_args[@]}"
+    local skipped_only_testing_count=$((requested_only_testing_count - executed_only_testing_count))
+    echo "$label: requested_only_testing=$requested_only_testing_count executed_only_testing=$executed_only_testing_count skipped_stale=$skipped_only_testing_count" >> "$SUMMARY_TXT"
+
+    if [ "$executed_only_testing_count" -eq 0 ]; then
+      echo "$label: skipped_all_only_testing_targets_missing=1" >> "$SUMMARY_TXT"
+      return 0
+    fi
+  fi
+
   set +e
-  xcodebuild -project "$PROJECT" -scheme "$SCHEME" -destination "$DESTINATION" test -resultBundlePath "$bundle_path" "$@" > "$log_path" 2>&1
+  if [ "$requested_only_testing_count" -gt 0 ]; then
+    xcodebuild -project "$PROJECT" -scheme "$SCHEME" -destination "$DESTINATION" -derivedDataPath "$DERIVED_DATA_DIR" test -resultBundlePath "$bundle_path" "${filtered_args[@]}" > "$log_path" 2>&1
+  else
+    xcodebuild -project "$PROJECT" -scheme "$SCHEME" -destination "$DESTINATION" -derivedDataPath "$DERIVED_DATA_DIR" test -resultBundlePath "$bundle_path" > "$log_path" 2>&1
+  fi
   local code=$?
   set -e
 
   echo "$label: xcodebuild_exit=$code" >> "$SUMMARY_TXT"
+}
+
+filter_only_testing_args() {
+  python3 - "$ROOT_DIR" "$@" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1]) / "VPStudioTests"
+available = set()
+for path in root.rglob("*.swift"):
+    try:
+        text = path.read_text(errors="ignore")
+    except OSError:
+        continue
+    for match in re.finditer(r"\b(?:class|struct)\s+([A-Za-z0-9_]+Tests)\b", text):
+        available.add(match.group(1))
+
+filtered = []
+missing = []
+for arg in sys.argv[2:]:
+    if not arg.startswith("-only-testing:"):
+      filtered.append(arg)
+      continue
+
+    spec = arg.split(":", 1)[1]
+    bundle, _, remainder = spec.partition("/")
+    test_name = remainder.split("/", 1)[0] if remainder else ""
+    if bundle == "VPStudioTests" and test_name and test_name not in available:
+        missing.append(test_name)
+        continue
+    filtered.append(arg)
+
+for test_name in sorted(set(missing)):
+    print(f"[visionpro-deep-smoke] Skipping stale test target: {test_name}", file=sys.stderr)
+
+for arg in filtered:
+    print(arg)
+PY
+}
+
+upsert_app_setting() {
+  local key="$1"
+  local value="$2"
+  python3 - "$DB_PATH" "$key" "$value" <<'PY'
+import sqlite3
+import sys
+
+db_path, key, value = sys.argv[1:4]
+with sqlite3.connect(db_path) as conn:
+    conn.execute(
+        "INSERT OR REPLACE INTO app_settings(key, value) VALUES(?, ?)",
+        (key, value),
+    )
+    conn.commit()
+PY
+}
+
+upsert_debrid_config() {
+  local config_id="$1"
+  local token_ref="$2"
+  python3 - "$DB_PATH" "$config_id" "$token_ref" <<'PY'
+import sqlite3
+import sys
+
+db_path, config_id, token_ref = sys.argv[1:4]
+with sqlite3.connect(db_path) as conn:
+    conn.execute("DELETE FROM debrid_configs WHERE serviceType = ?", ("real_debrid",))
+    conn.execute(
+        """
+        INSERT INTO debrid_configs(
+            id, serviceType, apiTokenRef, isActive, priority, createdAt, updatedAt
+        ) VALUES(?, 'real_debrid', ?, 1, 0, datetime('now'), datetime('now'))
+        """,
+        (config_id, token_ref),
+    )
+    conn.commit()
+PY
+}
+
+seed_simulator_keychain_secret() {
+  local account="$1"
+  local secret="$2"
+  xcrun simctl spawn "$SIM_DEVICE" security delete-generic-password -a "$account" -s "$KEYCHAIN_SERVICE" >/dev/null 2>&1 || true
+  xcrun simctl spawn "$SIM_DEVICE" security add-generic-password -a "$account" -s "$KEYCHAIN_SERVICE" -w "$secret" -U >/dev/null 2>&1
+}
+
+upsert_secret_setting() {
+  local key="$1"
+  local secret="$2"
+  local account="settings.${key}"
+  local secret_ref="keychain:${account}"
+
+  if ! seed_simulator_keychain_secret "$account" "$secret"; then
+    return 1
+  fi
+
+  if upsert_app_setting "$key" "$secret_ref"; then
+    return 0
+  fi
+
+  xcrun simctl spawn "$SIM_DEVICE" security delete-generic-password -a "$account" -s "$KEYCHAIN_SERVICE" >/dev/null 2>&1 || true
+  return 1
 }
 
 echo "Vision Pro Deep Smoke Run: $RUN_ID" > "$SUMMARY_TXT"
@@ -175,12 +301,15 @@ DB_PATH="$APP_DATA/Library/Application Support/VPStudio/vpstudio.sqlite"
 
 echo "DB path: $DB_PATH" >> "$SUMMARY_TXT"
 
-# 2) Optional credential injection for Discover/debrid user-like smoke
+# 2) Optional secure credential injection for Discover/debrid user-like smoke
 # Provide credentials via env vars before running script:
 #   VPSTUDIO_TMDB_API_KEY=... VPSTUDIO_DEBRID_TOKEN=... tools/visionpro-deep-smoke.sh
 if [ -n "${VPSTUDIO_TMDB_API_KEY:-}" ] && [ -f "$DB_PATH" ]; then
-  sqlite3 "$DB_PATH" "INSERT OR REPLACE INTO app_settings(key,value) VALUES('tmdb_api_key','${VPSTUDIO_TMDB_API_KEY}');" || true
-  echo "Configured tmdb_api_key in simulator DB" >> "$SUMMARY_TXT"
+  if upsert_secret_setting "tmdb_api_key" "$VPSTUDIO_TMDB_API_KEY"; then
+    echo "Configured tmdb_api_key via simulator keychain reference" >> "$SUMMARY_TXT"
+  else
+    echo "Unable to seed simulator keychain for tmdb_api_key; skipping secure TMDB injection" >> "$SUMMARY_TXT"
+  fi
 else
   echo "TMDB key not provided; Discover may show API key error" >> "$SUMMARY_TXT"
 fi
@@ -191,10 +320,15 @@ import uuid
 print(uuid.uuid4())
 PY
 )"
-  sqlite3 "$DB_PATH" "DELETE FROM debrid_configs WHERE serviceType='real_debrid';" || true
-  sqlite3 "$DB_PATH" "INSERT INTO debrid_configs(id,serviceType,apiTokenRef,isActive,priority,createdAt,updatedAt) VALUES('${CFG_ID}','real_debrid','${VPSTUDIO_DEBRID_TOKEN}',1,0,datetime('now'),datetime('now'));" || true
-  sqlite3 "$DB_PATH" "INSERT OR REPLACE INTO app_settings(key,value) VALUES('default_debrid_service','real_debrid');" || true
-  echo "Configured active real_debrid token in simulator DB" >> "$SUMMARY_TXT"
+  SECRET_ACCOUNT="debrid.real_debrid.${CFG_ID}"
+  SECRET_REF="keychain:${SECRET_ACCOUNT}"
+  if seed_simulator_keychain_secret "$SECRET_ACCOUNT" "$VPSTUDIO_DEBRID_TOKEN"; then
+    upsert_debrid_config "$CFG_ID" "$SECRET_REF" || true
+    upsert_app_setting "default_debrid_service" "real_debrid" || true
+    echo "Configured active real_debrid token via simulator keychain" >> "$SUMMARY_TXT"
+  else
+    echo "Unable to seed simulator keychain for debrid token; skipping secure debrid injection" >> "$SUMMARY_TXT"
+  fi
 else
   echo "Debrid token not provided; debrid playback path may be limited" >> "$SUMMARY_TXT"
 fi
@@ -217,14 +351,28 @@ run_pack "playback-pack" \
   -only-testing:VPStudioTests/PlayerCinematicChromePolicyTests \
   -only-testing:VPStudioTests/PlayerCinematicVisualPolicyTests \
   -only-testing:VPStudioTests/VPPlayerEngineImmersiveTests \
-  -only-testing:VPStudioTests/VPPlayerEngineSubtitleLoadingTests \
-  -only-testing:VPStudioTests/VPPlayerEngineSubtitleTimingTests \
-  -only-testing:VPStudioTests/ExternalPlayerRoutingTests \
-  -only-testing:VPStudioTests/PlayerResourceTeardownContractTests \
-  -only-testing:VPStudioTests/DownloadManagerTests \
-  -only-testing:VPStudioTests/DownloadDatabaseTests \
-  -only-testing:VPStudioTests/DebridServiceTests \
-  -only-testing:VPStudioTests/OpenSubtitlesServiceTests
+	-only-testing:VPStudioTests/VPPlayerEngineSubtitleLoadingTests \
+	-only-testing:VPStudioTests/VPPlayerEngineSubtitleTimingTests \
+	-only-testing:VPStudioTests/ExternalPlayerRoutingTests \
+	-only-testing:VPStudioTests/PlayerResourceTeardownContractTests \
+	-only-testing:VPStudioTests/DownloadManagerTests \
+	-only-testing:VPStudioTests/DownloadDatabaseTests \
+	-only-testing:VPStudioTests/RealDebridServiceTests \
+	-only-testing:VPStudioTests/DebridAddMagnetHashValidationTests \
+	-only-testing:VPStudioTests/AllDebridServiceTests \
+	-only-testing:VPStudioTests/TorBoxServiceTests \
+	-only-testing:VPStudioTests/PremiumizeServiceTests \
+	-only-testing:VPStudioTests/EasyNewsServiceTests \
+	-only-testing:VPStudioTests/DebridLinkServiceURLEncodingTests \
+	-only-testing:VPStudioTests/PremiumizeServiceURLEncodingTests \
+	-only-testing:VPStudioTests/DebridErrorTests \
+	-only-testing:VPStudioTests/CacheStatusTests \
+	-only-testing:VPStudioTests/OpenSubtitlesSearchTests \
+	-only-testing:VPStudioTests/OpenSubtitlesAuthTests \
+	-only-testing:VPStudioTests/OpenSubtitlesDownloadTests \
+	-only-testing:VPStudioTests/OpenSubtitlesErrorTests \
+	-only-testing:VPStudioTests/SubtitleModelTests \
+	-only-testing:VPStudioTests/SubtitleFormatParseTests
 
 run_pack "library-pack" \
   -only-testing:VPStudioTests/LibraryCSVImportServiceTests \
@@ -299,7 +447,10 @@ run_pack "environment-pack" \
 run_pack "full-suite"
 
 # Ensure app is installed on the named simulator device (xcode tests may run on clones)
-APP_BUNDLE_PATH="$(find "$HOME/Library/Developer/Xcode/DerivedData" -path "*/Build/Products/Debug-iphonesimulator/VPStudio.app" | sort | tail -1 || true)"
+APP_BUNDLE_PATH="$DERIVED_DATA_DIR/Build/Products/Debug-xrsimulator/VPStudio.app"
+if [ ! -d "$APP_BUNDLE_PATH" ]; then
+  APP_BUNDLE_PATH="$(find "$DERIVED_DATA_DIR/Build/Products" -path "*/VPStudio.app" | sort | tail -1 || true)"
+fi
 if [ -n "${APP_BUNDLE_PATH:-}" ] && [ -d "$APP_BUNDLE_PATH" ]; then
   xcrun simctl install "$SIM_DEVICE" "$APP_BUNDLE_PATH" >/dev/null 2>&1 || true
 fi
