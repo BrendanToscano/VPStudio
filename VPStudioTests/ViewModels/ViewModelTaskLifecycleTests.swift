@@ -185,12 +185,24 @@ struct ViewModelTaskLifecycleTests {
     }
 
     @Test
-    func quickStartPromptRoutesExploreNowToExploreAndOnlyShowsOnDiscover() throws {
+    func quickStartPromptRoutesSkipSetupToLibraryAndOnlyShowsOnDiscover() throws {
         let source = try contents(of: "VPStudio/Views/Windows/ContentView.swift")
-        #expect(source.contains("Label(\"Explore Now\", systemImage: \"play.fill\")"))
-        #expect(source.contains("appState.selectedTab = .search"))
+        #expect(source.contains("Label(QuickStartPromptPolicy.skipSetupTitle, systemImage: \"books.vertical.fill\")"))
+        #expect(source.contains("QuickStartPromptPolicy.skipSetupDestination"))
+        #expect(source.contains("appState.selectedTab = QuickStartPromptPolicy.skipSetupDestination"))
         #expect(source.contains("appState.isShowingSetup = true"))
         #expect(source.contains("if isShowingQuickStartPrompt, state.selectedTab == .discover"))
+    }
+
+    @Test
+    func detailViewSupportsResumePlaybackInitialIntent() throws {
+        let source = try contents(of: "VPStudio/Views/Windows/Detail/DetailView.swift")
+        #expect(source.contains("enum DetailInitialAction"))
+        #expect(source.contains("let initialAction: DetailInitialAction"))
+        #expect(source.contains("func runInitialActionIfNeeded(_ vm: DetailViewModel) async"))
+        #expect(source.contains("guard initialAction == .resumePlayback else { return }"))
+        #expect(source.contains("await vm.searchTorrents()"))
+        #expect(source.contains("await openPlayer(for: stream, vm: vm)"))
     }
 
     @Test

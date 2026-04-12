@@ -36,6 +36,12 @@ enum RootNavigationBadgePolicy {
     }
 }
 
+enum QuickStartPromptPolicy {
+    static let skipSetupDestination: SidebarTab = .library
+    static let skipSetupTitle = "Browse Library"
+    static let bodyCopy = "Skip setup for now and browse Library, or run setup to unlock Discover, Search, and streaming features."
+}
+
 // MARK: - ContentView
 
 struct ContentView: View {
@@ -111,7 +117,7 @@ struct ContentView: View {
                     onExploreNow: {
                         softSetupPromptDismissed = true
                         isShowingQuickStartPrompt = false
-                        appState.selectedTab = .search
+                        appState.selectedTab = QuickStartPromptPolicy.skipSetupDestination
                     },
                     onRunSetup: {
                         softSetupPromptDismissed = true
@@ -419,7 +425,7 @@ private struct QuickStartPromptView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Quick Start")
                         .font(.headline)
-                    Text("Skip setup for now, or run setup to unlock Discover, Search, and streaming features.")
+                    Text(QuickStartPromptPolicy.bodyCopy)
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
@@ -435,7 +441,7 @@ private struct QuickStartPromptView: View {
 
             HStack(spacing: 10) {
                 Button(action: onExploreNow) {
-                    Label("Explore Now", systemImage: "play.fill")
+                    Label(QuickStartPromptPolicy.skipSetupTitle, systemImage: "books.vertical.fill")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)

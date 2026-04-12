@@ -1,6 +1,11 @@
 import Combine
 import SwiftUI
 
+enum DetailInitialAction: String, Hashable, Sendable {
+    case none
+    case resumePlayback
+}
+
 enum DetailAutoSearchPolicy {
     static func shouldAutoSearch(
         previewType: MediaType,
@@ -54,6 +59,7 @@ enum DetailRefreshLoadingPresentationPolicy {
 
 struct DetailView: View {
     let preview: MediaPreview
+    let initialAction: DetailInitialAction
     @Environment(AppState.self) private var appState
     @Environment(\.openWindow) private var openWindow
     @Environment(\.openURL) private var openURL
@@ -75,7 +81,13 @@ struct DetailView: View {
     /// Error message to show when player fails to open.
     @State private var playerOpeningError: String?
     @State private var isPreparingInitialPresentation = true
+    @State private var hasHandledInitialAction = false
     private let streamResultsAnchor = "detail-stream-results-anchor"
+
+    init(preview: MediaPreview, initialAction: DetailInitialAction = .none) {
+        self.preview = preview
+        self.initialAction = initialAction
+    }
 
     private var shouldShowDetailContent: Bool {
         return DetailInitialRenderPolicy.shouldShowContent(
@@ -98,6 +110,7 @@ struct DetailView: View {
         .task(id: previewTaskIdentity) {
             isPreparingInitialPresentation = true
             didRunQAActions = false
+            hasHandledInitialAction = false
             await reloadDetailForLatestTMDBKey()
             guard !Task.isCancelled else { return }
             isPreparingInitialPresentation = false
@@ -178,6 +191,10 @@ struct DetailView: View {
             hasExplicitEpisodeContext: preview.episodeId != nil || preview.episodeNumber != nil
         ) {
             await vm.searchTorrents()
+        }
+
+        if !QARuntimeOptions.isEnabled {
+            await runInitialActionIfNeeded(vm)
         }
 
         await runQAActionsIfNeeded(vm)
@@ -376,8 +393,47 @@ private extension DetailView {
             preview.tmdbId.map(String.init) ?? "none",
             preview.episodeId ?? "none",
             preview.seasonNumber.map(String.init) ?? "none",
-            preview.episodeNumber.map(String.init) ?? "none"
+            preview.episodeNumber.map(String.init) ?? "none",
+            initialAction.rawValue
         ].joined(separator: "-")
+    }
+
+    @MainActor
+    func runInitialActionIfNeeded(_ vm: DetailViewModel) async {
+        guard !hasHandledInitialAction else { return }
+        hasHandledInitialAction = true
+
+        guard initialAction == .resumePlayback else { return }
+        guard vm.mediaItem != nil else { return }
+
+        if preview.type == .series, vm.selectedEpisode == nil {
+            playerOpeningError = "Pick an episode to continue watching."
+            return
+        }
+
+        guard appState.activePlayerSession == nil else {
+            showActiveSessionToast(for: appState.activePlayerSession)
+            return
+        }
+
+        isPlayerOpening = true
+        playerOpeningError = nil
+        defer { isPlayerOpening = false }
+
+        if vm.torrentSearch.results.isEmpty {
+            await vm.searchTorrents()
+        }
+
+        guard let torrent = vm.torrentSearch.results.first else {
+            playerOpeningError = "No streams are available to resume right now."
+            return
+        }
+
+        if let stream = await vm.resolveStream(torrent: torrent) {
+            await openPlayer(for: stream, vm: vm)
+        } else {
+            playerOpeningError = "Could not resume playback right now."
+        }
     }
 
     @MainActor

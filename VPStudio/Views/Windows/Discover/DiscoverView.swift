@@ -148,11 +148,34 @@ enum DiscoverLoadingPresentationPolicy {
     }
 }
 
+struct DiscoverDetailRoute: Identifiable, Hashable {
+    let preview: MediaPreview
+    let initialAction: DetailInitialAction
+
+    var id: String {
+        [
+            preview.id,
+            preview.episodeId ?? "none",
+            initialAction.rawValue
+        ].joined(separator: "-")
+    }
+}
+
+enum DiscoverNavigationPolicy {
+    static func browseRoute(for preview: MediaPreview) -> DiscoverDetailRoute {
+        DiscoverDetailRoute(preview: preview, initialAction: .none)
+    }
+
+    static func continueWatchingRoute(for preview: MediaPreview) -> DiscoverDetailRoute {
+        DiscoverDetailRoute(preview: preview, initialAction: .resumePlayback)
+    }
+}
+
 struct DiscoverView: View {
     @Environment(AppState.self) private var appState
     @Environment(\.accessibilityVoiceOverEnabled) private var accessibilityVoiceOverEnabled
     @Bindable var viewModel: DiscoverViewModel
-    @State private var selectedItem: MediaPreview?
+    @State private var selectedRoute: DiscoverDetailRoute?
     @State private var currentHeroIndex = 0
     @State private var tmdbReloadTask: Task<Void, Never>?
     @State private var userRatingsReloadTask: Task<Void, Never>?
@@ -222,7 +245,7 @@ struct DiscoverView: View {
                         TabView(selection: $currentHeroIndex) {
                             ForEach(Array(heroItems.enumerated()), id: \.element.id) { index, featured in
                                 FeaturedHeroView(item: featured) {
-                                    selectedItem = featured
+                                    selectedRoute = DiscoverNavigationPolicy.browseRoute(for: featured)
                                 }
                                 .tag(index)
                             }
@@ -242,7 +265,7 @@ struct DiscoverView: View {
                             userRatings: userRatings,
                             animationDelay: DiscoverHierarchyPolicy.continueWatchingDelay
                         ) { item in
-                            selectedItem = item
+                            selectedRoute = DiscoverNavigationPolicy.continueWatchingRoute(for: item)
                         }
                     }
 
@@ -256,7 +279,7 @@ struct DiscoverView: View {
                             userRatings: userRatings,
                             animationDelay: row.animationDelay
                         ) { item in
-                            selectedItem = item
+                            selectedRoute = DiscoverNavigationPolicy.browseRoute(for: item)
                         }
                     }
                 }
@@ -273,8 +296,8 @@ struct DiscoverView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.hidden, for: .navigationBar)
         #endif
-        .navigationDestination(item: $selectedItem) { item in
-            DetailView(preview: item)
+        .navigationDestination(item: $selectedRoute) { route in
+            DetailView(preview: route.preview, initialAction: route.initialAction)
         }
         .refreshable {
             await viewModel.refresh()
@@ -507,14 +530,14 @@ struct DiscoverView: View {
                             preview: primaryPreview,
                             recommendation: primaryRecommendation
                         ) {
-                            selectedItem = primaryPreview
+                            selectedRoute = DiscoverNavigationPolicy.browseRoute(for: primaryPreview)
                         }
 
                         if !state.supportingRecommendations.isEmpty {
                             VStack(spacing: 10) {
                                 ForEach(state.supportingRecommendations) { recommendation in
                                     AICuratedSupportingRow(recommendation: recommendation) {
-                                        selectedItem = recommendation.toMediaPreview()
+                                        selectedRoute = DiscoverNavigationPolicy.browseRoute(for: recommendation.toMediaPreview())
                                     }
                                 }
                             }

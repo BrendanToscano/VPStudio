@@ -163,4 +163,43 @@ struct DiscoverContinueWatchingTests {
         #expect(vm.continueWatching.count == 1)
         #expect(vm.continueWatching.first?.preview.title == "Configured Late")
     }
+
+    @Test func continueWatchingNavigationUsesResumePlaybackIntent() {
+        let preview = MediaPreview(
+            id: "ttyoungpope",
+            type: .series,
+            title: "The Young Pope",
+            year: 2016,
+            posterPath: "/poster.jpg",
+            backdropPath: nil,
+            imdbRating: 8.0,
+            tmdbId: 123,
+            episodeId: "123-s2e5",
+            seasonNumber: 2,
+            episodeNumber: 5
+        )
+
+        let route = DiscoverNavigationPolicy.continueWatchingRoute(for: preview)
+
+        #expect(route.preview == preview)
+        #expect(route.initialAction == .resumePlayback)
+    }
+
+    @Test func browseNavigationDoesNotAutoResumePlayback() {
+        let preview = MediaPreview(
+            id: "tt1234567",
+            type: .movie,
+            title: "Test Movie",
+            year: 2025,
+            posterPath: "/poster.jpg",
+            backdropPath: nil,
+            imdbRating: 7.0,
+            tmdbId: 100
+        )
+
+        let route = DiscoverNavigationPolicy.browseRoute(for: preview)
+
+        #expect(route.preview == preview)
+        #expect(route.initialAction == .none)
+    }
 }
