@@ -5,6 +5,7 @@ import RealityKit
 #if os(macOS)
 import AppKit
 #endif
+import os
 
 import AVFoundation
 
@@ -24,6 +25,8 @@ final class VPStudioAppDelegate: NSObject, NSApplicationDelegate {
 
 @main
 struct VPStudioApp: App {
+    private static let logger = Logger(subsystem: "com.vpstudio", category: "app")
+
     #if os(macOS)
     @NSApplicationDelegateAdaptor(VPStudioAppDelegate.self) private var appDelegate
     #endif
@@ -39,7 +42,7 @@ struct VPStudioApp: App {
             }
             try session.setActive(true)
         } catch {
-            print("Failed to configure AVAudioSession: \(error)")
+            Self.logger.error("Failed to configure AVAudioSession: \(error.localizedDescription, privacy: .public)")
         }
         #endif
     }

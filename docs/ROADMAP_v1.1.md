@@ -55,24 +55,22 @@ Goal: pull ratings from multiple services into one taste profile, with Trakt as 
 
 ## 2) Gemini AI Provider
 
-Add Google Gemini as a fourth provider (alongside Anthropic, OpenAI, and Ollama).
+Status: shipped in the current tree.
 
-### Build Tasks
+Gemini is already implemented alongside Anthropic, OpenAI, and Ollama, with settings, model presets, dynamic model fetch, default-provider selection, app-state registration, and tests wired in.
 
-- [ ] Add `.gemini` to `AIProviderKind` (`Models/AIAssistantModels.swift`)
-- [ ] Add `GeminiProvider` (`Services/AI/GeminiProvider.swift`)
-- [ ] Add Gemini model presets to `AIModelCatalog`
-- [ ] Add dynamic model fetch for Gemini models (`AIModelFetcher`)
-- [ ] Wire `.gemini` in `AIAssistantManager.configure()`
-- [ ] Add Gemini settings UI (`AISettingsView`): API key + model picker
-- [ ] Add Gemini to default provider picker
-- [ ] Register Gemini in `AppState.configureAIProviders()`
-- [ ] Add `GeminiProviderTests`
+### Current Implementation Notes
 
-### API Notes
+- Provider: `Services/AI/GeminiProvider.swift`
+- Model catalog: `Services/AI/AIModelCatalog.swift`
+- Settings UI: `Views/Windows/Settings/Destinations/AISettingsView.swift`
+- Registration: `AppState.configureAIProviders()`
+- Tests: `VPStudioTests/AIProviderTests.swift`
+
+### Runtime Notes
 
 - Endpoint pattern: `https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent`
-- Auth: API key via `?key=` query parameter
+- Auth: API key via `x-goog-api-key`
 - Parse: `candidates[0].content.parts[0].text`
 - Usage: `usageMetadata.promptTokenCount` + `usageMetadata.candidatesTokenCount`
 - Handle 429 `RESOURCE_EXHAUSTED` as `AIError.rateLimited`

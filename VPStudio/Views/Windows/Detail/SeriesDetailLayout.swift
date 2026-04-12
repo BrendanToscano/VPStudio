@@ -1,25 +1,19 @@
 import SwiftUI
-import Combine
+import os
 
 private enum SeriesDetailQAScrollDebug {
-    static let coordinateSpace = "series-detail-scroll-space"
+    private static let logger = Logger(subsystem: "com.vpstudio", category: "series-detail-scroll")
 
     static func log(_ message: @autoclosure () -> String) {
         guard QARuntimeOptions.scrollDebug else { return }
-        print("[VPStudio QA Scroll] \(message())")
-    }
-}
-
-private struct SeriesDetailTopOffsetPreferenceKey: PreferenceKey {
-    static let defaultValue: CGFloat = 0
-
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = nextValue()
+        let renderedMessage = message()
+        logger.debug("\(renderedMessage, privacy: .public)")
     }
 }
 
 enum SeriesPrimaryPlayPolicy {
     static let noStreamsMessage = "No streams found for this episode. Try another episode or result."
+    static let selectEpisodeLabel = "Select Episode"
 
     static func isBusy(
         isLocalPlayLoading: Bool,
@@ -27,6 +21,32 @@ enum SeriesPrimaryPlayPolicy {
         isLoadingSeasonEpisodes: Bool
     ) -> Bool {
         isLocalPlayLoading || isPlayerOpening || isLoadingSeasonEpisodes
+    }
+
+    static func isEnabled(
+        mediaType: MediaType,
+        hasSelectedEpisode: Bool,
+        isBusy: Bool
+    ) -> Bool {
+        guard !isBusy else { return false }
+        return mediaType != .series || hasSelectedEpisode
+    }
+
+    static func title(
+        mediaType: MediaType,
+        hasSelectedEpisode: Bool
+    ) -> String {
+        mediaType == .series && !hasSelectedEpisode ? selectEpisodeLabel : "Play"
+    }
+
+    static func accessibilityHint(
+        mediaType: MediaType,
+        hasSelectedEpisode: Bool
+    ) -> String {
+        if mediaType == .series && !hasSelectedEpisode {
+            return "Choose an episode before loading streams."
+        }
+        return "Searches for streams if needed and opens the first available result."
     }
 }
 
@@ -102,13 +122,20 @@ struct SeriesDetailLayout: View {
     
     @Environment(\.dismiss) private var dismiss
     @State private var isPlayButtonLoading = false
-    @State private var lastLoggedTopOffset: CGFloat?
 
     private var isPrimaryPlayBusy: Bool {
         SeriesPrimaryPlayPolicy.isBusy(
             isLocalPlayLoading: isPlayButtonLoading,
             isPlayerOpening: isPlayerOpening,
             isLoadingSeasonEpisodes: viewModel.isLoading(.seasonEpisodes)
+        )
+    }
+
+    private var isPrimaryPlayEnabled: Bool {
+        SeriesPrimaryPlayPolicy.isEnabled(
+            mediaType: mediaType,
+            hasSelectedEpisode: viewModel.selectedEpisode != nil,
+            isBusy: isPrimaryPlayBusy
         )
     }
 
@@ -133,7 +160,6 @@ struct SeriesDetailLayout: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
-                qaScrollTopMarker
                 // MARK: - Hero Image
                 heroImage
                     .frame(height: 380)
@@ -151,8 +177,16 @@ struct SeriesDetailLayout: View {
                     // Play button
                     playButtonRow
 
+                    if mediaType != .series {
+                        watchStateRow
+                    }
+
                     // Current episode info
                     currentEpisodeRow
+
+                    if mediaType == .series {
+                        seriesTrackingRow
+                    }
 
                     // Synopsis
                     if let overview = viewModel.mediaItem?.overview, !overview.isEmpty {
@@ -198,7 +232,6 @@ struct SeriesDetailLayout: View {
                 .padding(.top, 20)
             }
         }
-        .coordinateSpace(name: SeriesDetailQAScrollDebug.coordinateSpace)
         .background(Color.black)
         .foregroundStyle(.white)
         #if !os(macOS)
@@ -221,29 +254,9 @@ struct SeriesDetailLayout: View {
         .onChange(of: viewModel.loadingPhase?.rawValue ?? "none") { _, newValue in
             SeriesDetailQAScrollDebug.log("loadingPhase=\(newValue)")
         }
-        .onPreferenceChange(SeriesDetailTopOffsetPreferenceKey.self) { topOffset in
-            guard QARuntimeOptions.scrollDebug else { return }
-            let rounded = (topOffset * 10).rounded() / 10
-            if let lastLoggedTopOffset, abs(lastLoggedTopOffset - rounded) < 4 {
-                return
-            }
-            lastLoggedTopOffset = rounded
-            SeriesDetailQAScrollDebug.log("topOffset=\(rounded)")
-        }
     }
     
     // MARK: - Subviews
-
-    private var qaScrollTopMarker: some View {
-        GeometryReader { proxy in
-            Color.clear
-                .preference(
-                    key: SeriesDetailTopOffsetPreferenceKey.self,
-                    value: proxy.frame(in: .named(SeriesDetailQAScrollDebug.coordinateSpace)).minY
-                )
-        }
-        .frame(height: 0)
-    }
     
     private var heroImage: some View {
         Group {
@@ -301,6 +314,8 @@ struct SeriesDetailLayout: View {
                         .background(.ultraThinMaterial, in: Circle())
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("Back")
+                .accessibilityHint("Returns to the previous screen.")
                 
                 Spacer()
                 
@@ -310,6 +325,8 @@ struct SeriesDetailLayout: View {
                         utilityGlyph(name: "square.and.arrow.up")
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel("Share title")
+                    .accessibilityHint("Opens the share sheet for this title.")
 
                     Button {
                         Task { await viewModel.toggleWatchlist() }
@@ -317,16 +334,22 @@ struct SeriesDetailLayout: View {
                         utilityGlyph(name: viewModel.isInWatchlist ? "bookmark.fill" : "bookmark")
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel(viewModel.isInWatchlist ? "Remove from Watchlist" : "Add to Watchlist")
+                    .accessibilityHint("Toggles this title in your watchlist.")
 
                     Button(action: onCast) {
                         utilityGlyph(name: "airplayvideo")
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel("Cast")
+                    .accessibilityHint("Opens playback destination options.")
 
                     Button(action: onShowRatingSheet) {
                         utilityGlyph(name: viewModel.currentFeedbackValue != nil ? "star.fill" : "star")
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel(viewModel.currentFeedbackValue != nil ? "Edit rating" : "Rate title")
+                    .accessibilityHint("Opens rating controls for this title.")
                     
                     // AI button
                     Button {
@@ -338,6 +361,8 @@ struct SeriesDetailLayout: View {
                             .background(Color.purple.opacity(0.8), in: Circle())
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel("Analyze with AI")
+                    .accessibilityHint("Requests an AI summary for this title.")
                 }
             }
             .padding(.horizontal, 20)
@@ -396,12 +421,14 @@ struct SeriesDetailLayout: View {
                     .foregroundStyle(viewModel.mediaLibrary.isInFavorites ? .red : .white.opacity(0.85))
             }
             .buttonStyle(.plain)
+            .accessibilityLabel(viewModel.mediaLibrary.isInFavorites ? "Remove from Favorites" : "Add to Favorites")
+            .accessibilityHint("Toggles this title in your Favorites list.")
         }
     }
     
     private var playButtonRow: some View {
         Button {
-            guard !isPrimaryPlayBusy else { return }
+            guard isPrimaryPlayEnabled else { return }
             playerOpeningError = nil
             isPlayButtonLoading = true
             Task {
@@ -427,7 +454,12 @@ struct SeriesDetailLayout: View {
                 } else {
                     Image(systemName: "play.fill")
                         .font(.system(size: 22))
-                    Text("Play")
+                    Text(
+                        SeriesPrimaryPlayPolicy.title(
+                            mediaType: mediaType,
+                            hasSelectedEpisode: viewModel.selectedEpisode != nil
+                        )
+                    )
                         .font(.headline)
                 }
             }
@@ -438,37 +470,168 @@ struct SeriesDetailLayout: View {
         }
         .buttonStyle(.plain)
         .padding(.top, 8)
-        .disabled(isPrimaryPlayBusy)
+        .disabled(!isPrimaryPlayEnabled)
+        .accessibilityHint(
+            SeriesPrimaryPlayPolicy.accessibilityHint(
+                mediaType: mediaType,
+                hasSelectedEpisode: viewModel.selectedEpisode != nil
+            )
+        )
+    }
+
+    private var watchStateRow: some View {
+        let state = viewModel.currentWatchStatusState
+        let actionTitle = state.isWatched ? "Mark Unwatched" : "Mark Watched"
+
+        return Button {
+            Task { await viewModel.toggleCurrentWatchState() }
+        } label: {
+            HStack(alignment: .center, spacing: 12) {
+                HStack(spacing: 8) {
+                    Image(systemName: watchStatusIcon(for: state))
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(watchStatusColor(for: state))
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Watch Status")
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(.white.opacity(0.6))
+
+                        Text(state.label)
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.white.opacity(0.92))
+                    }
+                }
+
+                Spacer()
+
+                Text(actionTitle)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.white.opacity(0.92))
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(Color.white.opacity(0.10), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(actionTitle)
+        .accessibilityHint("Updates the watched state for this title.")
+        .padding(.top, 4)
     }
     
     @ViewBuilder
     private var currentEpisodeRow: some View {
-        if let episode = viewModel.selectedEpisode ?? viewModel.episodes.first {
-            HStack(spacing: 8) {
-                Text("S\(viewModel.selectedSeason):E\(episode.episodeNumber)")
-                    .font(.caption)
-                    .fontWeight(.semibold)
-                    .foregroundStyle(.white.opacity(0.9))
-                
-                if let episodeTitle = episode.title, !episodeTitle.isEmpty {
-                    Text(episodeTitle)
+        if let episode = viewModel.selectedEpisode {
+            HStack(alignment: .center, spacing: 10) {
+                HStack(spacing: 8) {
+                    Text("S\(viewModel.selectedSeason):E\(episode.episodeNumber)")
                         .font(.caption)
-                        .foregroundStyle(.white.opacity(0.7))
+                        .fontWeight(.semibold)
+                        .foregroundStyle(.white.opacity(0.9))
+
+                    if let episodeTitle = episode.title, !episodeTitle.isEmpty {
+                        Text(episodeTitle)
+                            .font(.caption)
+                            .foregroundStyle(.white.opacity(0.7))
+                    }
+
+                    if let runtime = episode.runtime, runtime > 0 {
+                        Text("• \(runtime)m")
+                            .font(.caption)
+                            .foregroundStyle(.white.opacity(0.6))
+                    }
                 }
-                
-                if let runtime = episode.runtime, runtime > 0 {
-                    Text("• \(runtime)m")
-                        .font(.caption)
-                        .foregroundStyle(.white.opacity(0.6))
+
+                if mediaType == .series {
+                    watchStatusBadge(for: selectedEpisodeWatchState)
                 }
             }
             .padding(.top, 8)
+        } else if mediaType == .series, !viewModel.episodes.isEmpty {
+            Text("Select an episode to load streams and update watched state.")
+                .font(.caption)
+                .foregroundStyle(.white.opacity(0.72))
+                .padding(.top, 8)
         } else if mediaType == .series, viewModel.isLoading(.seasonEpisodes) {
             Text(SeriesSeasonLoadingPresentationPolicy.loadingTitle(for: viewModel.selectedSeason))
                 .font(.caption)
                 .foregroundStyle(.white.opacity(0.72))
                 .padding(.top, 8)
+            }
+    }
+
+    private var seriesTrackingRow: some View {
+        HStack(alignment: .center, spacing: 12) {
+            if viewModel.selectedEpisode != nil {
+                Label("Press and hold an episode for watch options.", systemImage: "hand.point.up.left.fill")
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.72))
+            } else {
+                Label("Select an episode, then press and hold it for watched options.", systemImage: "hand.point.up.left.fill")
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.72))
+            }
+
+            Spacer()
+
+            Menu {
+                if viewModel.selectedEpisode != nil {
+                    Section("Episode") {
+                        Button {
+                            Task { await viewModel.toggleCurrentWatchState() }
+                        } label: {
+                            Label(
+                                selectedEpisodeWatchState.isWatched ? "Mark Episode as Unwatched" : "Mark Episode as Watched",
+                                systemImage: selectedEpisodeWatchState.isWatched ? "xmark.circle" : "checkmark.circle"
+                            )
+                        }
+                    }
+                }
+
+                Section("Series") {
+                    Button {
+                        Task { await viewModel.markSeriesWatched() }
+                    } label: {
+                        Label("Mark Series as Watched", systemImage: "checkmark.circle.fill")
+                    }
+
+                    Button(role: .destructive) {
+                        Task { await viewModel.markSeriesUnwatched() }
+                    } label: {
+                        Label("Mark Series as Unwatched", systemImage: "xmark.circle")
+                    }
+                }
+
+                Section("Season") {
+                    Button {
+                        Task { await viewModel.markSeasonWatched() }
+                    } label: {
+                        Label("Mark Season as Watched", systemImage: "checkmark.circle")
+                    }
+
+                    Button(role: .destructive) {
+                        Task { await viewModel.markSeasonUnwatched() }
+                    } label: {
+                        Label("Mark Season as Unwatched", systemImage: "xmark.circle")
+                    }
+                }
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "ellipsis.circle")
+                        .font(.subheadline.weight(.semibold))
+                    Text(seriesWatchProgressLabel)
+                        .font(.caption.weight(.semibold))
+                }
+                .foregroundStyle(.white.opacity(0.92))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(Color.white.opacity(0.10), in: Capsule())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Series watch actions")
+            .accessibilityHint("Opens episode, season, and series watched options.")
         }
+        .padding(.top, 4)
     }
     
     private var seasonsSection: some View {
@@ -560,93 +723,116 @@ struct SeriesDetailLayout: View {
         let isWatched = watchState?.isCompleted == true
         let progress = watchState?.progress ?? 0
         
-        return VStack(alignment: .leading, spacing: 8) {
-            // Thumbnail container
-            ZStack(alignment: .bottomLeading) {
-                // Thumbnail
-                if let stillURL = episode.stillURL {
-                    AsyncImage(url: stillURL) { phase in
-                        switch phase {
-                        case .success(let image):
-                            image
-                                .resizable()
-                                .aspectRatio(16/9, contentMode: .fill)
-                        default:
-                            Rectangle()
-                                .fill(.gray.opacity(0.3))
-                        }
-                    }
-                    .frame(width: 240, height: 135)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-                } else {
-                    Rectangle()
-                        .fill(.gray.opacity(0.3))
-                        .frame(width: 240, height: 135)
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
-                }
-                
-                // Progress bar (uses scaleEffect instead of GeometryReader to avoid layout thrashing)
-                if progress > 0 && progress < 1 {
-                    ZStack(alignment: .leading) {
-                        Rectangle()
-                            .fill(.tint.opacity(0.3))
-                            .frame(height: 3)
-                        Rectangle()
-                            .fill(.tint)
-                            .frame(maxWidth: .infinity)
-                            .scaleEffect(x: progress, y: 1, anchor: .leading)
-                            .frame(height: 3)
-                    }
-                    .frame(height: 3)
-                }
-                
-                // Watched badge (checkmark)
-                if isWatched {
-                    Image(systemName: "checkmark.circle.fill")
-                        .font(.system(size: 22))
-                        .foregroundStyle(.white)
-                        .padding(8)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
-                }
-                
-                // Episode number badge
-                Text("\(episode.episodeNumber)")
-                    .font(.caption)
-                    .fontWeight(.bold)
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(.black.opacity(0.6), in: Capsule())
-                    .padding(8)
-            }
-            .frame(width: 240, height: 135)
-            .overlay(
-                RoundedRectangle(cornerRadius: 8)
-                    .stroke(isSelected ? Color.purple : Color.clear, lineWidth: 2)
-            )
-            
-            // Episode info
-            VStack(alignment: .leading, spacing: 4) {
-                Text(episode.title ?? "Episode \(episode.episodeNumber)")
-                    .font(.subheadline)
-                    .fontWeight(.medium)
-                    .foregroundStyle(.white)
-                    .lineLimit(1)
-                
-                if let runtime = episode.runtime, runtime > 0 {
-                    Text("\(runtime)m")
-                        .font(.caption)
-                        .foregroundStyle(.white.opacity(0.6))
-                }
-            }
-            .frame(width: 240, alignment: .leading)
-        }
-        .onTapGesture {
+        return Button {
             viewModel.selectEpisode(episode)
             Task {
                 await viewModel.searchTorrents()
             }
+        } label: {
+            VStack(alignment: .leading, spacing: 8) {
+            // Thumbnail container
+                ZStack(alignment: .bottomLeading) {
+                // Thumbnail
+                    if let stillURL = episode.stillURL {
+                        AsyncImage(url: stillURL) { phase in
+                            switch phase {
+                            case .success(let image):
+                                image
+                                    .resizable()
+                                    .aspectRatio(16/9, contentMode: .fill)
+                            default:
+                                Rectangle()
+                                    .fill(.gray.opacity(0.3))
+                            }
+                        }
+                        .frame(width: 240, height: 135)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                    } else {
+                        Rectangle()
+                            .fill(.gray.opacity(0.3))
+                            .frame(width: 240, height: 135)
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                    }
+                
+                    // Progress bar (uses scaleEffect instead of GeometryReader to avoid layout thrashing)
+                    if progress > 0 && progress < 1 {
+                        ZStack(alignment: .leading) {
+                            Rectangle()
+                                .fill(.tint.opacity(0.3))
+                                .frame(height: 3)
+                            Rectangle()
+                                .fill(.tint)
+                                .frame(maxWidth: .infinity)
+                                .scaleEffect(x: progress, y: 1, anchor: .leading)
+                                .frame(height: 3)
+                        }
+                        .frame(height: 3)
+                    }
+                
+                    // Watched badge (checkmark)
+                    if isWatched {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 22))
+                            .foregroundStyle(.white)
+                            .padding(8)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                    }
+                
+                    // Episode number badge
+                    Text("\(episode.episodeNumber)")
+                        .font(.caption)
+                        .fontWeight(.bold)
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(.black.opacity(0.6), in: Capsule())
+                        .padding(8)
+                }
+                .frame(width: 240, height: 135)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(isSelected ? Color.purple : Color.clear, lineWidth: 2)
+                )
+            
+                // Episode info
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(episode.title ?? "Episode \(episode.episodeNumber)")
+                        .font(.subheadline)
+                        .fontWeight(.medium)
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                
+                    if let runtime = episode.runtime, runtime > 0 {
+                        Text("\(runtime)m")
+                            .font(.caption)
+                            .foregroundStyle(.white.opacity(0.6))
+                    }
+
+                    HStack(spacing: 6) {
+                        Image(systemName: isWatched ? "checkmark.circle.fill" : "circle")
+                            .font(.caption2.weight(.semibold))
+                        Text(isWatched ? "Watched" : "Not watched")
+                            .font(.caption2.weight(.semibold))
+                    }
+                    .foregroundStyle(isWatched ? .green : .white.opacity(0.62))
+                }
+                .frame(width: 240, alignment: .leading)
+            }
         }
+        .buttonStyle(.plain)
+        .contextMenu {
+            Button {
+                Task { await viewModel.toggleEpisodeWatched(episode) }
+            } label: {
+                Label(
+                    isWatched ? "Mark Episode as Unwatched" : "Mark Episode as Watched",
+                    systemImage: isWatched ? "xmark.circle" : "checkmark.circle"
+                )
+            }
+        }
+        .accessibilityLabel("Episode \(episode.episodeNumber), \(episode.title ?? "Untitled")")
+        .accessibilityValue(isWatched ? (isSelected ? "Watched, selected" : "Watched") : (isSelected ? "Selected" : "Not watched"))
+        .accessibilityHint("Opens this episode and refreshes available streams. Press and hold for watched options.")
     }
     
     private var seasonLoadingEpisodePlaceholders: some View {
@@ -669,6 +855,59 @@ struct SeriesDetailLayout: View {
             .font(.system(size: 18))
             .frame(width: 44, height: 44)
             .background(.ultraThinMaterial, in: Circle())
+    }
+
+    private func watchStatusIcon(for state: DetailWatchStatusState) -> String {
+        switch state {
+        case .watched:
+            return "checkmark.circle.fill"
+        case .inProgress:
+            return "play.circle.fill"
+        case .notWatched:
+            return "circle"
+        case .selectionRequired:
+            return "rectangle.and.hand.point.up.left.fill"
+        }
+    }
+
+    private func watchStatusColor(for state: DetailWatchStatusState) -> Color {
+        switch state {
+        case .watched:
+            return .green
+        case .inProgress:
+            return .yellow
+        case .notWatched:
+            return .white.opacity(0.65)
+        case .selectionRequired:
+            return .white.opacity(0.75)
+        }
+    }
+
+    private var selectedEpisodeWatchState: DetailWatchStatusState {
+        guard let selectedEpisode = viewModel.selectedEpisode else {
+            return .selectionRequired
+        }
+        return viewModel.episodeWatchStates[selectedEpisode.id]?.isCompleted == true ? .watched : .notWatched
+    }
+
+    private var seriesWatchProgressLabel: String {
+        let watchedCount = viewModel.episodeWatchStates.count
+        let totalCount = max(viewModel.seasons.reduce(0) { $0 + $1.episodeCount }, watchedCount)
+        guard totalCount > 0 else { return "Series Actions" }
+        return "\(watchedCount)/\(totalCount) watched"
+    }
+
+    private func watchStatusBadge(for state: DetailWatchStatusState) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: watchStatusIcon(for: state))
+                .font(.caption.weight(.semibold))
+            Text(state.label)
+                .font(.caption.weight(.semibold))
+        }
+        .foregroundStyle(watchStatusColor(for: state))
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(Color.white.opacity(0.10), in: Capsule())
     }
 
     @ViewBuilder

@@ -6,64 +6,47 @@ enum EpisodeTokenMatcher {
         let episode: Int
     }
 
+    private struct Pattern {
+        let regex: NSRegularExpression
+
+        init(_ pattern: String) {
+            regex = try! NSRegularExpression(pattern: pattern, options: [.caseInsensitive])
+        }
+    }
+
+    private static let seasonEpisodePattern = Pattern(#"s\s*(\d{1,2})\s*e\s*(\d{1,3})"#)
+    private static let seasonByEpisodePattern = Pattern(#"(?<!\d)(\d{1,2})\s*x\s*(\d{1,3})(?!\d)"#)
+    private static let seasonEpisodeWordsPattern = Pattern(#"season\D*(\d{1,2}).{0,20}episode\D*(\d{1,3})"#)
+    private static let allPatterns = [
+        seasonEpisodePattern,
+        seasonByEpisodePattern,
+        seasonEpisodeWordsPattern,
+    ]
+
     nonisolated static func context(fromQuery query: String) -> Context? {
-        let normalized = query.lowercased()
-
-        if let match = firstMatch(
-            pattern: #"s\s*(\d{1,2})\s*e\s*(\d{1,3})"#,
-            in: normalized
-        ) {
-            return Context(season: match.0, episode: match.1)
-        }
-
-        if let match = firstMatch(
-            pattern: #"(\d{1,2})\s*x\s*(\d{1,3})"#,
-            in: normalized
-        ) {
-            return Context(season: match.0, episode: match.1)
-        }
-
-        if let match = firstMatch(
-            pattern: #"season\D*(\d{1,2}).{0,20}episode\D*(\d{1,3})"#,
-            in: normalized
-        ) {
-            return Context(season: match.0, episode: match.1)
-        }
-
-        return nil
+        context(in: query.lowercased())
     }
 
     nonisolated static func matches(title: String, season: Int, episode: Int) -> Bool {
-        let normalized = title.lowercased()
-
-        if let match = firstMatch(
-            pattern: #"s\s*(\d{1,2})\s*e\s*(\d{1,3})"#,
-            in: normalized
-        ) {
-            return match.0 == season && match.1 == episode
-        }
-
-        if let match = firstMatch(
-            pattern: #"(\d{1,2})\s*x\s*(\d{1,3})"#,
-            in: normalized
-        ) {
-            return match.0 == season && match.1 == episode
-        }
-
-        if let match = firstMatch(
-            pattern: #"season\D*(\d{1,2}).{0,20}episode\D*(\d{1,3})"#,
-            in: normalized
-        ) {
-            return match.0 == season && match.1 == episode
-        }
-
-        return false
+        guard let context = context(in: title.lowercased()) else { return false }
+        return context.season == season && context.episode == episode
     }
 
-    nonisolated private static func firstMatch(pattern: String, in value: String) -> (Int, Int)? {
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
-            return nil
+    nonisolated static func matchesIfPresent(title: String, season: Int, episode: Int) -> Bool {
+        guard let context = context(in: title.lowercased()) else { return true }
+        return context.season == season && context.episode == episode
+    }
+
+    nonisolated private static func context(in normalizedValue: String) -> Context? {
+        for pattern in allPatterns {
+            if let match = firstMatch(using: pattern.regex, in: normalizedValue) {
+                return Context(season: match.0, episode: match.1)
+            }
         }
+        return nil
+    }
+
+    nonisolated private static func firstMatch(using regex: NSRegularExpression, in value: String) -> (Int, Int)? {
         let range = NSRange(value.startIndex..<value.endIndex, in: value)
         guard let match = regex.firstMatch(in: value, options: [], range: range),
               match.numberOfRanges >= 3,

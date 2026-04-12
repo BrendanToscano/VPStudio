@@ -11,6 +11,12 @@ struct IndexerSettingsView: View {
     @State private var surfaceError: AppError?
     @State private var notice: SettingsInlineNotice?
     @State private var testingConfigID: String?
+    @State private var pendingDeletion: PendingDeletion?
+
+    private struct PendingDeletion: Identifiable {
+        let id: String
+        let name: String
+    }
 
     var body: some View {
         indexerList
@@ -23,6 +29,22 @@ struct IndexerSettingsView: View {
             }
             .sheet(isPresented: $isShowingEditor) {
                 editorSheet
+            }
+            .confirmationDialog(
+                "Delete Indexer?",
+                isPresented: Binding(
+                    get: { pendingDeletion != nil },
+                    set: { if !$0 { pendingDeletion = nil } }
+                ),
+                titleVisibility: .visible,
+                presenting: pendingDeletion
+            ) { deletion in
+                Button("Delete", role: .destructive) {
+                    Task { await delete(configID: deletion.id) }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: { deletion in
+                Text("Delete \(deletion.name)? This removes the indexer and stored API key.")
             }
     }
 
@@ -188,6 +210,9 @@ struct IndexerSettingsView: View {
                         Task { await setActive(newValue, for: config.id) }
                     }
                 ))
+                .accessibilityLabel("\(config.name) enabled")
+                .accessibilityValue(config.isActive ? "On" : "Off")
+                .accessibilityHint("Turns this indexer on or off.")
                 .labelsHidden()
                 .toggleStyle(.switch)
             }
@@ -200,6 +225,8 @@ struct IndexerSettingsView: View {
                 }
                 .buttonStyle(.bordered)
                 .disabled(configs.first?.id == config.id)
+                .accessibilityLabel("Move indexer up")
+                .accessibilityHint("Raises this indexer's priority in the list.")
 
                 Button {
                     Task { await move(configID: config.id, direction: .down) }
@@ -208,6 +235,8 @@ struct IndexerSettingsView: View {
                 }
                 .buttonStyle(.bordered)
                 .disabled(configs.last?.id == config.id)
+                .accessibilityLabel("Move indexer down")
+                .accessibilityHint("Lowers this indexer's priority in the list.")
 
                 Button("Edit") {
                     draft = .from(config)
@@ -222,11 +251,13 @@ struct IndexerSettingsView: View {
                 .disabled(testingConfigID == config.id)
 
                 Button(role: .destructive) {
-                    Task { await delete(configID: config.id) }
+                    pendingDeletion = PendingDeletion(id: config.id, name: config.name)
                 } label: {
                     Image(systemName: "trash")
                 }
                 .buttonStyle(.bordered)
+                .accessibilityLabel("Delete indexer")
+                .accessibilityHint("Removes this indexer from the list.")
 
                 Spacer()
 
@@ -241,7 +272,8 @@ struct IndexerSettingsView: View {
     private func loadConfigs() async {
         do {
             let fetched = try await appState.database.fetchAllIndexerConfigs()
-            configs = fetched.sorted { $0.priority < $1.priority }
+            let hydrated = try await hydrateConfigsForDisplay(fetched)
+            configs = hydrated.sorted { $0.priority < $1.priority }
             surfaceError = nil
         } catch {
             surfaceError = AppError(error)
@@ -290,7 +322,9 @@ struct IndexerSettingsView: View {
 
         do {
             try await saveConfigs(updated)
-            configs = try await appState.database.fetchAllIndexerConfigs()
+            let fetched = try await appState.database.fetchAllIndexerConfigs()
+            configs = try await hydrateConfigsForDisplay(fetched)
+            try await appState.indexerManager.initialize()
             notice = .success("Indexer settings saved.")
             surfaceError = nil
             isShowingEditor = false
@@ -306,7 +340,9 @@ struct IndexerSettingsView: View {
         updated[index].isActive = active
         do {
             try await saveConfigs(updated)
-            configs = try await appState.database.fetchAllIndexerConfigs()
+            let fetched = try await appState.database.fetchAllIndexerConfigs()
+            configs = try await hydrateConfigsForDisplay(fetched)
+            try await appState.indexerManager.initialize()
             surfaceError = nil
         } catch {
             surfaceError = AppError(error)
@@ -315,9 +351,14 @@ struct IndexerSettingsView: View {
 
     private func delete(configID: String) async {
         do {
+            try await appState.database.setSetting(key: IndexerManager.bootstrapSettingKey, value: "true")
+            if let config = configs.first(where: { $0.id == configID }) {
+                try await config.deleteStoredSecret(using: appState.secretStore)
+            }
             try await appState.database.deleteIndexerConfig(id: configID)
-            await appState.reloadIndexers()
-            configs = try await appState.database.fetchAllIndexerConfigs()
+            let fetched = try await appState.database.fetchAllIndexerConfigs()
+            configs = try await hydrateConfigsForDisplay(fetched)
+            try await appState.indexerManager.initialize()
             notice = .success("Indexer removed.")
             surfaceError = nil
         } catch {
@@ -349,7 +390,9 @@ struct IndexerSettingsView: View {
 
         do {
             try await saveConfigs(reordered)
-            configs = reordered
+            let fetched = try await appState.database.fetchAllIndexerConfigs()
+            configs = try await hydrateConfigsForDisplay(fetched)
+            try await appState.indexerManager.initialize()
             notice = .success("Indexer order updated.")
             surfaceError = nil
         } catch {
@@ -374,8 +417,8 @@ struct IndexerSettingsView: View {
 
     private func saveConfigs(_ input: [IndexerConfig]) async throws {
         let normalized = reindexed(input)
-        try await appState.database.saveIndexerConfigs(normalized)
-        await appState.reloadIndexers()
+        let persisted = try await persistIndexerConfigs(normalized)
+        try await appState.database.saveIndexerConfigs(persisted)
     }
 
     nonisolated static func normalizePrioritiesPreservingOrder(_ input: [IndexerConfig]) -> [IndexerConfig] {
@@ -387,8 +430,10 @@ struct IndexerSettingsView: View {
         updated.append(definition.makeConfig(priority: updated.count, isActive: false))
         do {
             try await saveConfigs(updated)
-            configs = try await appState.database.fetchAllIndexerConfigs()
+            let fetched = try await appState.database.fetchAllIndexerConfigs()
+            configs = try await hydrateConfigsForDisplay(fetched)
                 .sorted { $0.priority < $1.priority }
+            try await appState.indexerManager.initialize()
             notice = .success("Built-in indexer added.")
             surfaceError = nil
         } catch {
@@ -399,6 +444,29 @@ struct IndexerSettingsView: View {
 
     private func reindexed(_ input: [IndexerConfig]) -> [IndexerConfig] {
         Self.normalizePrioritiesPreservingOrder(input)
+    }
+
+    private func hydrateConfigsForDisplay(_ fetched: [IndexerConfig]) async throws -> [IndexerConfig] {
+        let persisted = try await persistIndexerConfigs(fetched)
+        if persisted != fetched {
+            try await appState.database.saveIndexerConfigs(persisted)
+        }
+
+        var display: [IndexerConfig] = []
+        display.reserveCapacity(persisted.count)
+        for config in persisted {
+            display.append(try await config.resolvedCopy(using: appState.secretStore))
+        }
+        return display
+    }
+
+    private func persistIndexerConfigs(_ input: [IndexerConfig]) async throws -> [IndexerConfig] {
+        var persisted: [IndexerConfig] = []
+        persisted.reserveCapacity(input.count)
+        for config in input {
+            persisted.append(try await config.persistedCopy(using: appState.secretStore).config)
+        }
+        return persisted
     }
 
     private struct IndexerDraft {
@@ -528,9 +596,9 @@ struct IndexerSettingsView: View {
             }
             guard let components = URLComponents(string: urlString),
                   let scheme = components.scheme?.lowercased(),
-                  (scheme == "http" || scheme == "https"),
+                  scheme == "https",
                   components.host?.isEmpty == false else {
-                return "Enter a valid HTTP/HTTPS base URL."
+                return "Enter a valid HTTPS base URL."
             }
 
             if showsAPIKeyField, (normalizedAPIKey?.isEmpty ?? true) {

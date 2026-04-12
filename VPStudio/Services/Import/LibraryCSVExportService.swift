@@ -24,6 +24,7 @@ actor LibraryCSVExportService {
         try FileManager.default.createDirectory(at: outputDir, withIntermediateDirectories: true)
 
         var summary = LibraryCSVExportSummary()
+        var reservedFileNames: Set<String> = []
 
         // Export each list type
         for listType in UserLibraryEntry.ListType.allCases {
@@ -33,10 +34,10 @@ actor LibraryCSVExportService {
                 // History has no folders — export as a single file
                 let entries = try await fetchAllWatchHistory()
                 if !entries.isEmpty {
-                    let mediaItems = await fetchMediaItems(for: entries.map(\.mediaId))
-                    let ratings = await fetchRatings(for: entries.map(\.mediaId))
+                    let mediaItems = try await fetchMediaItems(for: entries.map(\.mediaId))
+                    let ratings = try await fetchRatings(for: entries.map(\.mediaId))
                     let csv = buildHistoryCSV(entries: entries, mediaItems: mediaItems, ratings: ratings)
-                    let fileName = sanitizeFileName("History") + ".csv"
+                    let fileName = uniqueFileName(baseName: "History", reserved: &reservedFileNames)
                     let fileURL = outputDir.appendingPathComponent(fileName)
                     try csv.write(to: fileURL, atomically: true, encoding: .utf8)
                     summary.filesWritten += 1
@@ -55,8 +56,8 @@ actor LibraryCSVExportService {
                 guard !entries.isEmpty else { continue }
 
                 let mediaIds = entries.map(\.mediaId)
-                let mediaItems = await fetchMediaItems(for: mediaIds)
-                let ratings = await fetchRatings(for: mediaIds)
+                let mediaItems = try await fetchMediaItems(for: mediaIds)
+                let ratings = try await fetchRatings(for: mediaIds)
 
                 let csv = buildLibraryCSV(
                     entries: entries,
@@ -66,7 +67,8 @@ actor LibraryCSVExportService {
                 )
 
                 let displayName = folder.isSystem ? listType.displayName : folder.name
-                let fileName = sanitizeFileName(displayName) + ".csv"
+                let baseName = folder.isSystem ? displayName : "\(listType.displayName) - \(displayName)"
+                let fileName = uniqueFileName(baseName: baseName, reserved: &reservedFileNames)
                 let fileURL = outputDir.appendingPathComponent(fileName)
                 try csv.write(to: fileURL, atomically: true, encoding: .utf8)
                 summary.filesWritten += 1
@@ -85,8 +87,8 @@ actor LibraryCSVExportService {
     ) async throws -> (csv: String, itemCount: Int) {
         if listType == .history {
             let entries = try await fetchAllWatchHistory()
-            let mediaItems = await fetchMediaItems(for: entries.map(\.mediaId))
-            let ratings = await fetchRatings(for: entries.map(\.mediaId))
+            let mediaItems = try await fetchMediaItems(for: entries.map(\.mediaId))
+            let ratings = try await fetchRatings(for: entries.map(\.mediaId))
             let csv = buildHistoryCSV(entries: entries, mediaItems: mediaItems, ratings: ratings)
             return (csv, entries.count)
         }
@@ -96,8 +98,8 @@ actor LibraryCSVExportService {
             folderId: folderId
         )
         let mediaIds = entries.map(\.mediaId)
-        let mediaItems = await fetchMediaItems(for: mediaIds)
-        let ratings = await fetchRatings(for: mediaIds)
+        let mediaItems = try await fetchMediaItems(for: mediaIds)
+        let ratings = try await fetchRatings(for: mediaIds)
         let csv = buildLibraryCSV(
             entries: entries,
             mediaItems: mediaItems,
@@ -217,7 +219,7 @@ actor LibraryCSVExportService {
         var allEntries: [WatchHistory] = []
 
         while true {
-            let page = try await database.fetchWatchHistory(limit: pageSize, offset: offset)
+            let page = try await database.fetchCompletedWatchHistory(limit: pageSize, offset: offset)
             if page.isEmpty { break }
             allEntries.append(contentsOf: page)
             if page.count < pageSize { break }
@@ -227,18 +229,18 @@ actor LibraryCSVExportService {
         return allEntries
     }
 
-    private func fetchMediaItems(for mediaIds: [String]) async -> [String: MediaItem] {
+    private func fetchMediaItems(for mediaIds: [String]) async throws -> [String: MediaItem] {
         var result: [String: MediaItem] = [:]
         let unique = Set(mediaIds)
         for id in unique {
-            if let item = try? await database.fetchMediaItem(id: id) {
+            if let item = try await database.fetchMediaItem(id: id) {
                 result[id] = item
             }
         }
         return result
     }
 
-    private func fetchRatings(for mediaIds: [String]) async -> [String: TasteEvent] {
+    private func fetchRatings(for mediaIds: [String]) async throws -> [String: TasteEvent] {
         let relevant = Set(mediaIds)
         guard !relevant.isEmpty else { return [:] }
 
@@ -247,11 +249,11 @@ actor LibraryCSVExportService {
         var offset = 0
 
         while true {
-            let events = (try? await database.fetchTasteEvents(
+            let events = try await database.fetchTasteEvents(
                 eventType: .rated,
                 limit: pageSize,
                 offset: offset
-            )) ?? []
+            )
             if events.isEmpty { break }
 
             for event in events {
@@ -296,10 +298,24 @@ actor LibraryCSVExportService {
 
     /// Escapes a field for CSV: wraps in quotes if it contains commas, quotes, or newlines.
     static func escapeCSV(_ value: String) -> String {
-        if value.contains(",") || value.contains("\"") || value.contains("\n") || value.contains("\r") {
-            return "\"" + value.replacingOccurrences(of: "\"", with: "\"\"") + "\""
+        let sanitized = neutralizeSpreadsheetFormula(in: value)
+        if sanitized.contains(",") || sanitized.contains("\"") || sanitized.contains("\n") || sanitized.contains("\r") {
+            return "\"" + sanitized.replacingOccurrences(of: "\"", with: "\"\"") + "\""
         }
-        return value
+        return sanitized
+    }
+
+    /// Prefixes text-like cells that spreadsheet apps may evaluate as formulas.
+    static func neutralizeSpreadsheetFormula(in value: String) -> String {
+        guard !value.isEmpty else { return value }
+        guard !value.hasPrefix("'") else { return value }
+
+        let trimmedLeading = value.trimmingCharacters(in: .whitespaces)
+        guard let first = trimmedLeading.first else { return value }
+        let dangerousPrefixes: Set<Character> = ["=", "+", "-", "@", "\t"]
+        guard dangerousPrefixes.contains(first) else { return value }
+
+        return "'" + value
     }
 
     private func escapeCSV(_ value: String) -> String {
@@ -310,5 +326,17 @@ actor LibraryCSVExportService {
         let cleaned = name.replacingOccurrences(of: "[/\\\\:*?\"<>|]", with: "-", options: .regularExpression)
         let trimmed = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? "Export" : String(trimmed.prefix(100))
+    }
+
+    private func uniqueFileName(baseName: String, reserved: inout Set<String>) -> String {
+        let sanitizedBase = sanitizeFileName(baseName)
+        var candidate = sanitizedBase
+        var index = 1
+        while reserved.contains(candidate.lowercased()) {
+            candidate = "\(sanitizedBase) (\(index))"
+            index += 1
+        }
+        reserved.insert(candidate.lowercased())
+        return candidate + ".csv"
     }
 }

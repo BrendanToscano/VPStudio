@@ -20,6 +20,19 @@ struct AIAssistantManagerPromptConstructionTests {
         func prompt() async -> String? { lastSystemPrompt }
     }
 
+    private struct TestError: LocalizedError, Sendable {
+        var errorDescription: String? { "unexpected provider invocation" }
+    }
+
+    private actor StaleLocalProvider: AIProvider {
+        let providerKind: AIProviderKind = .local
+        let modelID: String = "nonexistent-local-model"
+
+        func complete(system: String, userMessage: String) async throws -> AIProviderResponse {
+            throw TestError()
+        }
+    }
+
     @Test(arguments: ExhaustiveMode.choose(fast: Array(0..<8), full: Array(0..<20)))
     func promptIncludesContextFields(index: Int) async throws {
         let manager = try await makeManager()
@@ -169,6 +182,51 @@ struct AIAssistantManagerPromptConstructionTests {
         #expect(prompt.contains("Liked titles: Dune"))
         #expect(prompt.contains("Disliked titles: Arrival"))
         #expect(prompt.contains("Recent ratings:"))
+    }
+
+    @Test
+    func promptBudgetTracksConfiguredModels() async throws {
+        let manager = try await makeManager()
+        defer { try? FileManager.default.removeItem(at: manager.tempDir) }
+
+        await manager.instance.configure(provider: .openAI, apiKey: "test-key", model: AIModelCatalog.gpt4oMini.id)
+
+        #expect(await manager.instance.promptBudgetTokens(for: .openAI) == AIModelCatalog.gpt4oMini.maxContextTokens / 2)
+        #expect(await manager.instance.promptBudgetTokens(for: .local) == AIModelCatalog.localSmolLM2.maxContextTokens / 2)
+    }
+
+    @Test
+    func promptBudgetTrimsOverflowingParts() {
+        let budget = 120
+        let parts = [
+            "You are VPStudio AI.",
+            String(repeating: "long-context ", count: 50),
+            "This tail should be trimmed.",
+        ]
+
+        let prompt = AssistantPromptBudgetPolicy.composePrompt(from: parts, budgetTokens: budget)
+
+        #expect(AssistantPromptBudgetPolicy.estimatedTokenCount(for: prompt) <= budget)
+        #expect(prompt.contains("You are VPStudio AI."))
+        #expect(!prompt.contains("This tail should be trimmed."))
+    }
+
+    @Test
+    func staleLocalProviderFallsBackToAvailableProvider() async throws {
+        let manager = try await makeManager()
+        defer { try? FileManager.default.removeItem(at: manager.tempDir) }
+
+        let openAIProvider = CapturingProvider(providerKind: .openAI)
+        let staleLocalProvider = StaleLocalProvider()
+
+        await manager.instance.registerProvider(kind: .openAI, provider: openAIProvider)
+        await manager.instance.registerProvider(kind: .local, provider: staleLocalProvider)
+
+        let response = try await manager.instance.ask(prompt: "recommend", provider: .local, context: nil)
+        let prompt = await openAIProvider.prompt() ?? ""
+
+        #expect(response.provider == .openAI)
+        #expect(prompt.contains("You are VPStudio AI"))
     }
 
     private func makeManager() async throws -> (instance: AIAssistantManager, database: DatabaseManager, tempDir: URL) {

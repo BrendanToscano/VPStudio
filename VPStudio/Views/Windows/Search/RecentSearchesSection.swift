@@ -31,6 +31,8 @@ struct RecentSearchesSection: View {
                         }
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("Clear recent searches")
+                .accessibilityHint("Removes every saved recent search from this list.")
                 #if os(visionOS)
                 .hoverEffect(.highlight)
                 #endif
@@ -66,6 +68,8 @@ private struct RecentSearchChip: View {
                     .lineLimit(1)
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("Search for \(term) again")
+            .accessibilityHint("Runs this recent search again.")
 
             Button(action: onRemove) {
                 Image(systemName: "xmark.circle.fill")
@@ -73,6 +77,8 @@ private struct RecentSearchChip: View {
                     .foregroundStyle(.white.opacity(0.26))
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("Remove \(term) from recent searches")
+            .accessibilityHint("Removes this search term from your recent searches.")
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 5)

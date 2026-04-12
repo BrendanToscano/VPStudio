@@ -62,6 +62,32 @@ struct TorznabIndexerRequestRoutingTests {
                 == "{ImdbId:tt0944947} {Season:1} {Episode:2}"
         )
     }
+
+    @Test func torznabIndexerRejectsHttpBaseURLs() async {
+        let session = makeStubSession { request in
+            Issue.record("Unexpected network request: \(request.url?.absoluteString ?? "nil")")
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (response, Data("[]".utf8))
+        }
+
+        let indexer = TorznabIndexer(
+            name: "HTTP Torznab",
+            baseURL: "http://torznab.example",
+            endpointPath: "/api",
+            apiKey: "api-key",
+            apiKeyTransport: .header,
+            session: session
+        )
+
+        do {
+            _ = try await indexer.searchByQuery(query: "Dune", type: .movie)
+            Issue.record("Expected URLError.unsupportedURL")
+        } catch let error as URLError {
+            #expect(error.code == .unsupportedURL || error.code == .badURL)
+        } catch {
+            Issue.record("Unexpected error type: \(error)")
+        }
+    }
 }
 
 private enum TorznabRequestStubError: Error {

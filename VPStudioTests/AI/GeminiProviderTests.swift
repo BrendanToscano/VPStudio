@@ -6,6 +6,22 @@ import Foundation
 
 @Suite("GeminiProvider")
 struct GeminiProviderTests {
+    private final class SleepRecorder: @unchecked Sendable {
+        private let lock = NSLock()
+        private var recordedDelays: [TimeInterval] = []
+
+        func record(_ delay: TimeInterval) {
+            lock.lock()
+            recordedDelays.append(delay)
+            lock.unlock()
+        }
+
+        func values() -> [TimeInterval] {
+            lock.lock()
+            defer { lock.unlock() }
+            return recordedDelays
+        }
+    }
 
     private func makeProvider(session: URLSession, model: String = "gemini-2.5-flash") -> GeminiProvider {
         GeminiProvider(apiKey: "test-key", model: model, session: session)
@@ -91,6 +107,69 @@ struct GeminiProviderTests {
             if case .rateLimited = error { /* OK */ }
             else { Issue.record("Expected rateLimited, got \(error)") }
         }
+    }
+
+    @Test func retriesRateLimitUsingRetryAfterHeader() async throws {
+        final class Sequence: @unchecked Sendable {
+            private let lock = NSLock()
+            private var count = 0
+
+            func makeSession() -> URLSession {
+                URLProtocolHarness.makeSession { request in
+                    self.lock.lock()
+                    defer { self.lock.unlock() }
+                    self.count += 1
+
+                    if self.count == 1 {
+                        let response = HTTPURLResponse(
+                            url: request.url!,
+                            statusCode: 429,
+                            httpVersion: nil,
+                            headerFields: ["Retry-After": "0"]
+                        )!
+                        return (response, Data("{\"error\":\"slow down\"}".utf8))
+                    }
+
+                    let data = try JSONSerialization.data(withJSONObject: [
+                        "candidates": [
+                            [
+                                "content": [
+                                    "parts": [["text": "Retried Gemini!"]]
+                                ]
+                            ]
+                        ]
+                    ])
+                    let response = HTTPURLResponse(
+                        url: request.url!,
+                        statusCode: 200,
+                        httpVersion: nil,
+                        headerFields: nil
+                    )!
+                    return (response, data)
+                }
+            }
+
+            func requestCount() -> Int {
+                lock.lock()
+                defer { lock.unlock() }
+                return count
+            }
+        }
+
+        let sequence = Sequence()
+        let sleepRecorder = SleepRecorder()
+        let provider = GeminiProvider(
+            apiKey: "test-key",
+            model: "gemini-2.5-flash",
+            session: sequence.makeSession(),
+            sleep: { delay in sleepRecorder.record(delay) }
+        )
+
+        let result = try await provider.complete(system: "s", userMessage: "u")
+
+        #expect(result.content == "Retried Gemini!")
+        #expect(sequence.requestCount() == 2)
+        #expect(sleepRecorder.values() == [0])
     }
 
     // MARK: - Invalid Response

@@ -5,16 +5,33 @@ struct OpenRouterProvider: AIProvider, Sendable {
     let providerKind: AIProviderKind = .openRouter
     private let apiKey: String
     private let model: String
-    private let baseURL = "https://openrouter.ai/api/v1/chat/completions"
+    private let baseURL: String
+    private let session: URLSession
+    private let sleep: AIHTTPSleep
 
-    init(apiKey: String, model: String = "openrouter/google/gemini-2.5-flash-lite-preview") {
+    init(
+        apiKey: String,
+        model: String = "openrouter/google/gemini-2.5-flash-lite-preview",
+        baseURL: String = "https://openrouter.ai/api/v1/chat/completions",
+        session: URLSession = AIHTTPTransport.defaultSession,
+        sleep: @escaping AIHTTPSleep = AIHTTPTransport.defaultSleep
+    ) {
         self.apiKey = apiKey
         self.model = model
+        self.baseURL = baseURL
+        self.session = session
+        self.sleep = sleep
     }
 
     func complete(system: String, userMessage: String) async throws -> AIProviderResponse {
+        let trimmedAPIKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedAPIKey.isEmpty, !trimmedModel.isEmpty else {
+            throw AIError.invalidResponse
+        }
+
         let body: [String: Any] = [
-            "model": model,
+            "model": trimmedModel,
             "max_completion_tokens": 4096,
             "messages": [
                 ["role": "system", "content": system],
@@ -29,11 +46,10 @@ struct OpenRouterProvider: AIProvider, Sendable {
         request.httpMethod = "POST"
         request.timeoutInterval = 60
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("Bearer \(trimmedAPIKey)", forHTTPHeaderField: "Authorization")
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse else { throw AIError.invalidResponse }
+        let (data, http) = try await AIHTTPTransport.perform(request, using: session, sleep: sleep)
 
         guard (200...299).contains(http.statusCode) else {
             let msg = String(data: data, encoding: .utf8) ?? ""
@@ -52,7 +68,7 @@ struct OpenRouterProvider: AIProvider, Sendable {
         return AIProviderResponse(
             provider: .openRouter,
             content: content,
-            model: model,
+            model: trimmedModel,
             inputTokens: inputTokens,
             outputTokens: outputTokens
         )

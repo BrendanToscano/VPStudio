@@ -4,22 +4,63 @@ import os
 
 /// Actor managing HuggingFace model downloads with resume, integrity checks, and stall detection.
 actor LocalDownloadService {
+    typealias SnapshotDownloader = @Sendable (
+        _ repo: String,
+        _ progressHandler: @escaping @Sendable (Progress) -> Void
+    ) async throws -> URL
 
     private let catalogStore: LocalModelCatalogStore
+    private let snapshotDownloader: SnapshotDownloader
     private let logger = Logger(subsystem: "com.vpstudio", category: "local-download")
 
     private var activeTask: Task<Void, Never>?
     private var activeModelID: String?
+    private var activeTaskToken: UUID?
 
     init(catalogStore: LocalModelCatalogStore) {
         self.catalogStore = catalogStore
+        self.snapshotDownloader = Self.defaultSnapshotDownloader
+    }
+
+    init(
+        catalogStore: LocalModelCatalogStore,
+        snapshotDownloader: @escaping SnapshotDownloader
+    ) {
+        self.catalogStore = catalogStore
+        self.snapshotDownloader = snapshotDownloader
     }
 
     // MARK: - Models Directory
 
     static var modelsDirectory: URL {
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        modelsDirectoryURL()
+    }
+
+    static func modelsDirectoryURL(
+        fileManager: FileManager = .default,
+        appSupportDirectory: URL? = nil
+    ) -> URL {
+        let appSupport = appSupportDirectory
+            ?? fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? fileManager.temporaryDirectory
         return appSupport.appendingPathComponent("VPStudio/Models", isDirectory: true)
+    }
+
+    static func hubCacheRootDirectoryURL(
+        fileManager: FileManager = .default,
+        cachesDirectory: URL? = nil
+    ) -> URL? {
+        (cachesDirectory ?? fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first)?
+            .appendingPathComponent("huggingface/hub", isDirectory: true)
+    }
+
+    static func hubCacheDirectoryURL(
+        for repo: String,
+        fileManager: FileManager = .default,
+        cachesDirectory: URL? = nil
+    ) -> URL? {
+        hubCacheRootDirectoryURL(fileManager: fileManager, cachesDirectory: cachesDirectory)?
+            .appendingPathComponent("models--\(repo.replacingOccurrences(of: "/", with: "--"))")
     }
 
     // MARK: - Download
@@ -44,6 +85,8 @@ actor LocalDownloadService {
         }
 
         activeModelID = id
+        let taskToken = UUID()
+        activeTaskToken = taskToken
         try? await catalogStore.updateStatus(id: id, to: .downloading)
         await postDidChange() // Notify UI immediately so status shows "downloading"
 
@@ -51,16 +94,14 @@ actor LocalDownloadService {
         let catalogStore = self.catalogStore
         let throttle = await ProgressNotifyThrottle()
 
-        activeTask = Task {
+        let task = Task {
             do {
                 try Task.checkCancellation()
 
                 // Download model snapshot from HuggingFace Hub
-                let hubRepo = Hub.Repo(id: repo)
-                let localDir = try await HubApi.shared.snapshot(
-                    from: hubRepo,
-                    matching: ["*.mlmodelc/*", "*.mlpackage/*", "*.json", "*.jinja", "tokenizer*", "*.safetensors"],
-                    progressHandler: { progress in
+                let localDir = try await self.snapshotDownloader(
+                    repo,
+                    { progress in
                         Task { @MainActor in
                             try? await catalogStore.updateProgress(
                                 id: id,
@@ -91,11 +132,11 @@ actor LocalDownloadService {
                 }
             }
         }
+        activeTask = task
         // Capture completion to clean up actor state
         Task {
-            _ = await activeTask?.value
-            activeTask = nil
-            activeModelID = nil
+            _ = await task.value
+            await clearActiveTaskIfCurrent(token: taskToken, modelID: id)
         }
     }
 
@@ -106,6 +147,7 @@ actor LocalDownloadService {
         activeTask?.cancel()
         activeTask = nil
         activeModelID = nil
+        activeTaskToken = nil
         try? await catalogStore.resetToAvailable(id: id)
         await postDidChange()
     }
@@ -118,6 +160,8 @@ actor LocalDownloadService {
             await cancelDownload(id: id)
         }
 
+        let model = try? await catalogStore.model(id: id)
+
         // Remove files
         let modelDir = Self.modelsDirectory.appendingPathComponent(
             id.replacingOccurrences(of: "/", with: "_"),
@@ -126,10 +170,8 @@ actor LocalDownloadService {
         try? FileManager.default.removeItem(at: modelDir)
 
         // Also clean up MLXLLM's default cache location
-        let hubCache = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first?
-            .appendingPathComponent("huggingface/hub", isDirectory: true)
-        if let hubCache {
-            let repoDir = hubCache.appendingPathComponent("models--\(id.replacingOccurrences(of: "/", with: "--"))")
+        let repo = model?.huggingFaceRepo ?? id
+        if let repoDir = Self.hubCacheDirectoryURL(for: repo) {
             try? FileManager.default.removeItem(at: repoDir)
         }
 
@@ -147,10 +189,7 @@ actor LocalDownloadService {
     }
 
     private static func hubCacheDirectory(for repo: String) -> URL? {
-        let cacheDir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first?
-            .appendingPathComponent("huggingface/hub", isDirectory: true)
-            .appendingPathComponent("models--\(repo.replacingOccurrences(of: "/", with: "--"))")
-        return cacheDir
+        hubCacheDirectoryURL(for: repo)
     }
 
     private func postDidChange() async {
@@ -158,6 +197,35 @@ actor LocalDownloadService {
             NotificationCenter.default.post(name: .localModelsDidChange, object: nil)
         }
     }
+
+    private func clearActiveTaskIfCurrent(token: UUID, modelID: String) {
+        guard activeTaskToken == token, activeModelID == modelID else { return }
+        activeTask = nil
+        activeModelID = nil
+        activeTaskToken = nil
+    }
+
+    private static func defaultSnapshotDownloader(
+        repo: String,
+        progressHandler: @escaping @Sendable (Progress) -> Void
+    ) async throws -> URL {
+        let hubRepo = Hub.Repo(id: repo)
+        return try await HubApi.shared.snapshot(
+            from: hubRepo,
+            matching: ["*.mlmodelc/*", "*.mlpackage/*", "*.json", "*.jinja", "tokenizer*", "*.safetensors"],
+            progressHandler: progressHandler
+        )
+    }
+
+#if DEBUG
+    func activeDownloadStateForTesting() -> (modelID: String?, token: UUID?) {
+        (activeModelID, activeTaskToken)
+    }
+
+    func clearActiveTaskIfCurrentForTesting(token: UUID, modelID: String) {
+        clearActiveTaskIfCurrent(token: token, modelID: modelID)
+    }
+#endif
 }
 
 // MARK: - Thread-safe Progress Throttle

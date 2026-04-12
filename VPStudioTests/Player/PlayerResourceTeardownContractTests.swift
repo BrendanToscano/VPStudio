@@ -42,10 +42,28 @@ struct PlayerResourceTeardownContractTests {
         #expect(source.contains("let prepared = try await ksPlayerEngine.prepare(stream: stream)\n                    try Task.checkCancellation()"))
         #expect(source.contains("let prepared = try await avPlayerEngine.prepare(stream: stream)\n                    try Task.checkCancellation()"))
         #expect(source.contains("catch is CancellationError"))
-        #expect(source.contains("catch is CancellationError {\n                cleanupPlayback(clearSession: false)\n                return"))
+        #expect(source.contains("guard Self.preparePlaybackShouldRun("))
+        #expect(source.contains("cleanupPlayback(clearSession: false)"))
         #expect(source.contains("@State private var preparePlaybackTask: Task<Void, Never>?"))
+        #expect(source.contains("@State private var activePreparePlaybackID: UUID?"))
+        #expect(source.contains("activePreparePlaybackID = preparationID"))
         #expect(source.contains("preparePlaybackTask?.cancel()"))
-        #expect(source.contains("preparePlaybackTask = Task { await preparePlayback(for: currentStream) }"))
+        #expect(source.contains("preparePlaybackTask = Task { await preparePlayback(for: currentStream, preparationID: preparationID) }"))
+        #expect(source.contains("preparePlaybackTask = Task { await preparePlayback(for: stream, preparationID: preparationID) }"))
+        #expect(source.contains("static func preparePlaybackShouldRun(requestedPreparationID: UUID, activePreparationID: UUID?) -> Bool"))
+    }
+
+    @Test
+    func playerViewAssignsNewPreparationIDBeforeCancellingPreviousTask() throws {
+        let source = try contents(of: "VPStudio/Views/Windows/Player/PlayerView.swift")
+        let taskBody = try section(
+            from: ".task(id: currentStream.id) {",
+            to: ".onAppear {",
+            in: source
+        )
+        let assignRange = try requiredRange(of: "activePreparePlaybackID = preparationID", in: taskBody)
+        let cancelRange = try requiredRange(of: "preparePlaybackTask?.cancel()", in: taskBody)
+        #expect(assignRange.lowerBound < cancelRange.lowerBound)
     }
 
     @Test
@@ -65,6 +83,25 @@ struct PlayerResourceTeardownContractTests {
         #expect(source.contains("subtitleDownloadTask?.cancel()"))
         #expect(source.contains("subtitleDownloadTask = nil"))
         #expect(source.contains("guard stream.id == currentStream.id else { return }"))
+    }
+
+    @Test
+    func playerViewResetsSubtitleModeAcrossStreamTransitionsAndRefreshesKeyedSubtitleServices() throws {
+        let source = try contents(of: "VPStudio/Views/Windows/Player/PlayerView.swift")
+        #expect(source.contains("subtitleSelectionMode = .automaticPreferred"))
+        #expect(source.contains("if let existing = subtitleService, subtitleServiceAPIKey == apiKey"))
+        #expect(source.contains("subtitleServiceAPIKey = apiKey"))
+        #expect(source.contains("preferredLanguageCodes("))
+        #expect(source.contains("matchesPreferredLanguage("))
+    }
+
+    @Test
+    func playerViewAppliesEngineAudioSelectionsInsteadOfOnlyMutatingState() throws {
+        let source = try contents(of: "VPStudio/Views/Windows/Player/PlayerView.swift")
+        #expect(source.contains("refreshKSAudioTracks(from: coordinator)"))
+        #expect(source.contains("private func selectEngineAudio("))
+        #expect(source.contains("coordinator.playerLayer?.player.select(track: mediaTrack)"))
+        #expect(source.contains("selectEngineAudio(track)"))
     }
 
     @Test
@@ -174,6 +211,22 @@ struct PlayerResourceTeardownContractTests {
     }
 
     @Test
+    func playerViewSeedsAndResetsSessionTitleState() throws {
+        let source = try contents(of: "VPStudio/Views/Windows/Player/PlayerView.swift")
+        #expect(source.contains("engine.currentTitle = mediaTitle ?? currentStream.fileName"))
+        #expect(source.contains("engine.currentTitle = mediaTitle ?? stream.fileName"))
+        #expect(source.contains("engine.resetSessionState()"))
+    }
+
+    @Test
+    func playerViewEnvironmentSwitchOpensThePicker() throws {
+        let source = try contents(of: "VPStudio/Views/Windows/Player/PlayerView.swift")
+        #expect(source.contains("onRequestEnvironmentSwitch: { requestEnvironmentPicker() }"))
+        #expect(source.contains("private func requestEnvironmentPicker()"))
+        #expect(source.contains("isShowingEnvironmentPicker = true"))
+    }
+
+    @Test
     func playerViewCoalescesNotificationDrivenRefreshTasks() throws {
         let source = try contents(of: "VPStudio/Views/Windows/Player/PlayerView.swift")
         #expect(source.contains("@State private var environmentAssetsTask: Task<Void, Never>?"))
@@ -245,6 +298,169 @@ struct PlayerResourceTeardownContractTests {
             let clearRange = try requiredRange(of: "\(taskName) = nil", in: visionTaskCancelBody)
             #expect(cancelRange.lowerBound < clearRange.lowerBound)
         }
+    }
+
+    @Test
+    func playerViewUsesHigherCadenceAVPlayerObserverForSubtitleUpdates() throws {
+        let source = try contents(of: "VPStudio/Views/Windows/Player/PlayerView.swift")
+        #expect(source.contains("static let avPlayerPeriodicObserverIntervalSeconds: TimeInterval = 0.25"))
+        #expect(source.contains("engine.updateSubtitleText(at: newTime)"))
+    }
+
+    @Test
+    func playerViewChecksPreparationCancellationBeforeTearingDownCurrentSession() throws {
+        let source = try contents(of: "VPStudio/Views/Windows/Player/PlayerView.swift")
+        let prepareBody = try section(
+            from: "private func preparePlayback(for stream: StreamInfo, preparationID: UUID) async {",
+            to: "static func audioTrackRefreshShouldRun",
+            in: source
+        )
+
+        #expect(containsIgnoringWhitespace(
+            prepareBody,
+            """
+            hasPlayedOnce = false
+            guard Self.preparePlaybackShouldRun(
+                requestedPreparationID: preparationID,
+                activePreparationID: activePreparePlaybackID
+            ), !Task.isCancelled else {
+                return
+            }
+            cleanupPlayback(clearSession: true)
+            """
+        ))
+    }
+
+    @Test
+    func playerViewGuardsAsyncPlaybackCallbacksAgainstStaleSessions() throws {
+        let source = try contents(of: "VPStudio/Views/Windows/Player/PlayerView.swift")
+        #expect(source.contains("private func isCurrentAVPlayer(_ player: AVPlayer) -> Bool"))
+        #expect(source.contains("private func isCurrentKSPlayerCoordinator(_ coordinator: KSVideoPlayer.Coordinator) -> Bool"))
+        #expect(source.contains("guard self.isCurrentKSPlayerCoordinator(coordinator) else { return }"))
+        #expect(source.contains("guard self.isCurrentAVPlayer(player) else { return }"))
+        #expect(source.contains("Task { await detectVideoRatio(from: asset, player: player) }"))
+        #expect(source.contains("guard isCurrentAVPlayer(player) else { return }"))
+        #expect(source.contains("guard isCurrentKSPlayerCoordinator(coordinator) else { return }"))
+    }
+
+    @Test
+    func playerViewRebuildsSubtitleServiceWhenApiKeyChangesAndClearsSessionCacheOnCleanup() throws {
+        let source = try contents(of: "VPStudio/Views/Windows/Player/PlayerView.swift")
+        #expect(source.contains("@State private var subtitleServiceAPIKey: String?"))
+        #expect(source.contains("if let existing = subtitleService, subtitleServiceAPIKey == apiKey"))
+        #expect(source.contains("subtitleServiceAPIKey = apiKey"))
+        #expect(source.contains("subtitleService = nil"))
+        #expect(source.contains("subtitleServiceAPIKey = nil"))
+    }
+
+    @Test
+    func playerViewManualSubtitleDownloadDoesNotRequireAutomaticSelectionMode() throws {
+        let source = try contents(of: "VPStudio/Views/Windows/Player/PlayerView.swift")
+        let downloadBody = try section(
+            from: "private func downloadAndSelectSubtitle(_ subtitle: Subtitle, streamID: String) async {",
+            to: "private func writeExternalSubtitle(content: String, source: Subtitle) throws -> URL {",
+            in: source
+        )
+
+        #expect(!downloadBody.contains("subtitleSelectionMode == .automaticPreferred"))
+        #expect(downloadBody.contains("Self.subtitleMutationShouldRun("))
+    }
+
+    @Test
+    func playerViewRoutesEngineAudioSelectionThroughActiveKSPlayerTracks() throws {
+        let source = try contents(of: "VPStudio/Views/Windows/Player/PlayerView.swift")
+        #expect(source.contains("selectEngineAudio(track)"))
+
+        let selectEngineAudioBody = try section(
+            from: "private func selectEngineAudio(_ track: VPPlayerEngine.TrackInfo) {",
+            to: "private func scheduleSubtitleCatalogRefresh(for stream: StreamInfo) {",
+            in: source
+        )
+
+        #expect(selectEngineAudioBody.contains("engine.selectAudioTrack(track.id)"))
+        #expect(selectEngineAudioBody.contains("tracks(mediaType: .audio)"))
+        #expect(selectEngineAudioBody.contains("player.select(track: mediaTrack)"))
+        #expect(selectEngineAudioBody.contains("refreshKSAudioTracks(from: coordinator)"))
+    }
+
+    @Test
+    func customEnvironmentViewUsesSharedImmersiveFallbacksAndErrorSurface() throws {
+        let source = try contents(of: "VPStudio/Views/Immersive/CustomEnvironmentView.swift")
+        #expect(source.contains("ImmersiveControlsPolicy.smoothedPosition("))
+        #expect(source.contains("ImmersiveControlsPolicy.fallbackControlsPosition"))
+        #expect(source.contains("Attachment(id: \"loadingIndicator\")"))
+        #expect(source.contains("makeFallbackScreen()"))
+        #expect(source.contains("loadingState = .failed"))
+    }
+
+    @Test
+    func playerAccessibilityHelpersHonorReduceMotionAndSystemCaptionFallbacks() {
+        #expect(!PlayerView.shouldAnimateForAccessibility(reduceMotion: true))
+        #expect(PlayerView.shouldAnimateForAccessibility(reduceMotion: false))
+
+        #expect(
+            PlayerView.automaticSubtitleLanguageCodes(
+                configuredLanguageSetting: "es, fr",
+                systemPreferredLanguages: ["de-DE"],
+                closedCaptioningEnabled: true
+            ) == ["de", "es", "fr"]
+        )
+
+        #expect(
+            PlayerView.automaticSubtitleLanguageCodes(
+                configuredLanguageSetting: nil,
+                systemPreferredLanguages: ["fr-CA", "en-US"],
+                closedCaptioningEnabled: true
+            ) == ["fr", "en"]
+        )
+
+        #expect(
+            PlayerView.automaticSubtitleLanguageCodes(
+                configuredLanguageSetting: nil,
+                systemPreferredLanguages: ["fr-CA"],
+                closedCaptioningEnabled: false
+            ) == ["fr"]
+        )
+    }
+
+    @Test
+    func playerAndImmersiveSourcesGateAnimationsBehindReduceMotion() throws {
+        let playerSource = try contents(of: "VPStudio/Views/Windows/Player/PlayerView.swift")
+        let immersiveControlsSource = try contents(of: "VPStudio/Views/Immersive/ImmersivePlayerControlsView.swift")
+        let customEnvironmentSource = try contents(of: "VPStudio/Views/Immersive/CustomEnvironmentView.swift")
+        let hdriSource = try contents(of: "VPStudio/Views/Immersive/HDRISkyboxEnvironment.swift")
+
+        #expect(playerSource.contains("@Environment(\\.accessibilityReduceMotion)"))
+        #expect(playerSource.contains("motionAnimationsEnabled"))
+        #expect(playerSource.contains("performOptionalAnimation(.easeInOut(duration: 0.22))"))
+        #expect(playerSource.contains("performOptionalAnimation(.easeInOut(duration: 0.25))"))
+        #expect(playerSource.contains("UIAccessibility.isClosedCaptioningEnabled"))
+
+        #expect(immersiveControlsSource.contains("@Environment(\\.accessibilityReduceMotion)"))
+        #expect(immersiveControlsSource.contains(".animation(accessibilityReduceMotion ? nil : .easeOut(duration: 0.15), value: isDraggingScrubber)"))
+
+        #expect(customEnvironmentSource.contains("@Environment(\\.accessibilityReduceMotion)"))
+        #expect(customEnvironmentSource.contains("performOptionalAnimation(.easeInOut(duration: 0.25))"))
+        #expect(customEnvironmentSource.contains(".animation(accessibilityReduceMotion ? nil : .easeInOut(duration: 0.15), value: subtitleText)"))
+
+        #expect(hdriSource.contains("@Environment(\\.accessibilityReduceMotion)"))
+        #expect(hdriSource.contains("screen.move(to: temp.transform, relativeTo: nil, duration: accessibilityReduceMotion ? 0 : 0.4)"))
+        #expect(hdriSource.contains("performOptionalAnimation(.easeInOut(duration: 0.25))"))
+    }
+
+    @Test
+    func playerSubtitleCatalogAndWarningsStayAccessibilityAligned() throws {
+        let source = try contents(of: "VPStudio/Views/Windows/Player/PlayerView.swift")
+
+        #expect(source.contains("let languages = Self.automaticSubtitleLanguageCodes("))
+        #expect(!source.contains("MACaptionAppearanceAddSelectedLanguage"))
+        #expect(source.contains(
+            """
+            warningsOverlay
+                                .padding(.top, 6)
+                                .compositingGroup()
+            """
+        ))
     }
 
     private func functionBody(named functionName: String, in source: String) throws -> String {

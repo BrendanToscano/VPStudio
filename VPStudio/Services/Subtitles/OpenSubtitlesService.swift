@@ -2,14 +2,24 @@ import Foundation
 
 /// OpenSubtitles.com REST API client
 actor OpenSubtitlesService {
+    private static let defaultSession: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 30
+        configuration.timeoutIntervalForResource = 90
+        return URLSession(configuration: configuration)
+    }()
+
     private let apiKey: String
     private let baseURL = "https://api.opensubtitles.com/api/v1"
     private let session: URLSession
     private var authToken: String?
+    private var lastRequestDate: Date?
+    private var nextAllowedRequestDate: Date?
+    private let minimumRequestInterval: TimeInterval = 0.15
 
-    init(apiKey: String, session: URLSession = .shared) {
+    init(apiKey: String, session: URLSession? = nil) {
         self.apiKey = apiKey
-        self.session = session
+        self.session = session ?? Self.defaultSession
     }
 
     // MARK: - Authentication
@@ -35,22 +45,7 @@ actor OpenSubtitlesService {
         if let episode { params["episode_number"] = String(episode) }
 
         let response: SubtitleSearchResponse = try await get(path: "/subtitles", params: params)
-        return response.data.map { item in
-            let attr = item.attributes
-            let file = attr.files.first
-            let fileName = file?.fileName ?? attr.release ?? "Unknown"
-            return Subtitle(
-                id: String(item.id),
-                language: attr.language,
-                fileName: fileName,
-                url: "", // Need to call download endpoint
-                format: SubtitleFormat.parse(from: fileName),
-                fileId: file?.fileId,
-                rating: attr.ratings,
-                downloadCount: attr.downloadCount,
-                isHearingImpaired: attr.hearingImpaired
-            )
-        }
+        return response.data.compactMap { usableSubtitle(from: $0) }
     }
 
     func searchByHash(movieHash: String, movieSize: Int64) async throws -> [Subtitle] {
@@ -59,22 +54,7 @@ actor OpenSubtitlesService {
             "moviebytesize": String(movieSize),
         ]
         let response: SubtitleSearchResponse = try await get(path: "/subtitles", params: params)
-        return response.data.map { item in
-            let attr = item.attributes
-            let file = attr.files.first
-            let fileName = file?.fileName ?? attr.release ?? "Unknown"
-            return Subtitle(
-                id: String(item.id),
-                language: attr.language,
-                fileName: fileName,
-                url: "",
-                format: SubtitleFormat.parse(from: fileName),
-                fileId: file?.fileId,
-                rating: attr.ratings,
-                downloadCount: attr.downloadCount,
-                isHearingImpaired: attr.hearingImpaired
-            )
-        }
+        return response.data.compactMap { usableSubtitle(from: $0) }
     }
 
     // MARK: - Download
@@ -90,11 +70,9 @@ actor OpenSubtitlesService {
 
     func downloadSubtitle(fileId: Int) async throws -> String {
         let url = try await getDownloadURL(fileId: fileId)
-        let (data, response) = try await session.data(from: url)
-        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
-            throw SubtitleError.httpError((response as? HTTPURLResponse)?.statusCode ?? 0)
-        }
-        guard let content = String(data: data, encoding: .utf8) else {
+        let request = URLRequest(url: url)
+        let (data, _) = try await sendRequest(request)
+        guard let content = decodeSubtitleContent(from: data) else {
             throw SubtitleError.decodingFailed
         }
         return content
@@ -105,7 +83,7 @@ actor OpenSubtitlesService {
         languages: [String] = ["en"]
     ) async throws -> Subtitle {
         let candidates = try await search(query: query, languages: languages)
-        guard let selected = candidates.first(where: { $0.fileId != nil }),
+        guard let selected = candidates.first(where: { $0.fileId != nil && $0.isSupportedSubtitle }),
               let fileId = selected.fileId else {
             throw SubtitleError.noSubtitlesFound
         }
@@ -139,18 +117,7 @@ actor OpenSubtitlesService {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
 
-        let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse else {
-            throw SubtitleError.httpError(0)
-        }
-
-        if http.statusCode == 401 {
-            authToken = nil
-            throw SubtitleError.unauthorized
-        }
-        guard (200...299).contains(http.statusCode) else {
-            throw SubtitleError.httpError(http.statusCode)
-        }
+        let (data, _) = try await sendRequest(request)
         return try JSONDecoder().decode(T.self, from: data)
     }
 
@@ -166,19 +133,105 @@ actor OpenSubtitlesService {
         }
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse else {
-            throw SubtitleError.httpError(0)
-        }
-
-        if http.statusCode == 401 {
-            authToken = nil
-            throw SubtitleError.unauthorized
-        }
-        guard (200...299).contains(http.statusCode) else {
-            throw SubtitleError.httpError(http.statusCode)
-        }
+        let (data, _) = try await sendRequest(request)
         return try JSONDecoder().decode(T.self, from: data)
+    }
+
+    private func sendRequest(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        var attempt = 0
+        while true {
+            attempt += 1
+            try await waitForRequestSlot()
+
+            let (data, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                throw SubtitleError.httpError(0)
+            }
+
+            switch http.statusCode {
+            case 200...299:
+                lastRequestDate = Date()
+                return (data, http)
+            case 401:
+                authToken = nil
+                throw SubtitleError.unauthorized
+            case 429:
+                let delay = retryAfterDelay(from: http) ?? minimumRequestInterval
+                nextAllowedRequestDate = Date().addingTimeInterval(max(delay, minimumRequestInterval))
+                if attempt < 2 {
+                    continue
+                }
+                throw SubtitleError.httpError(429)
+            default:
+                throw SubtitleError.httpError(http.statusCode)
+            }
+        }
+    }
+
+    private func waitForRequestSlot() async throws {
+        let now = Date()
+        let earliestAllowed = max(
+            nextAllowedRequestDate ?? now,
+            lastRequestDate?.addingTimeInterval(minimumRequestInterval) ?? now
+        )
+        let delay = earliestAllowed.timeIntervalSince(now)
+        if delay > 0 {
+            try await Task.sleep(nanoseconds: Self.nanoseconds(for: delay))
+        }
+    }
+
+    private func retryAfterDelay(from response: HTTPURLResponse) -> TimeInterval? {
+        guard let value = response.value(forHTTPHeaderField: "Retry-After")?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty else {
+            return nil
+        }
+        return Double(value).map { max($0, 0) }
+    }
+
+    private func usableSubtitle(from item: SubtitleItem) -> Subtitle? {
+        let attr = item.attributes
+        let supportedFile = attr.files.first(where: { SubtitleFormat.parse(from: $0.fileName).isSupportedSubtitle })
+        let file = supportedFile ?? attr.files.first
+        let fileName = file?.fileName ?? attr.release ?? "Unknown"
+        let format = file.map { SubtitleFormat.parse(from: $0.fileName) } ?? SubtitleFormat.parse(from: fileName)
+        guard format.isSupportedSubtitle else { return nil }
+
+        return Subtitle(
+            id: String(item.id),
+            language: attr.language,
+            fileName: fileName,
+            url: "",
+            format: format,
+            fileId: file?.fileId,
+            rating: attr.ratings,
+            downloadCount: attr.downloadCount,
+            isHearingImpaired: attr.hearingImpaired
+        )
+    }
+
+    private func decodeSubtitleContent(from data: Data) -> String? {
+        let encodings: [String.Encoding] = [.utf8, .utf16, .utf16LittleEndian, .utf16BigEndian, .isoLatin1]
+        for encoding in encodings {
+            if encoding == .isoLatin1 && !isLikelyTextSubtitleData(data) {
+                continue
+            }
+            if let content = String(data: data, encoding: encoding) {
+                return content.trimmingLeadingBOM()
+            }
+        }
+        return nil
+    }
+
+    private func isLikelyTextSubtitleData(_ data: Data) -> Bool {
+        guard !data.isEmpty else { return true }
+        var controlCount = 0
+        for byte in data {
+            if byte == 0 { return false }
+            if byte < 0x20, byte != 0x09, byte != 0x0A, byte != 0x0D {
+                controlCount += 1
+            }
+        }
+        return Double(controlCount) / Double(data.count) < 0.05
     }
 
     private func writeTemporarySubtitleFile(
@@ -192,7 +245,7 @@ actor OpenSubtitlesService {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)
             .appendingPathExtension(extensionForFile)
-        try content.write(to: url, atomically: true, encoding: .utf8)
+        try content.trimmingLeadingBOM().write(to: url, atomically: true, encoding: .utf8)
         return url
     }
 }
@@ -266,5 +319,21 @@ enum SubtitleError: LocalizedError {
         case .invalidDownloadURL: return "Invalid subtitle download URL"
         case .noSubtitlesFound: return "No subtitles found"
         }
+    }
+}
+
+private extension String {
+    func trimmingLeadingBOM() -> String {
+        guard let first = unicodeScalars.first,
+              first == UnicodeScalar(0xFEFF) else {
+            return self
+        }
+        return String(dropFirst())
+    }
+}
+
+private extension OpenSubtitlesService {
+    static func nanoseconds(for interval: TimeInterval) -> UInt64 {
+        UInt64(max(interval, 0) * 1_000_000_000)
     }
 }

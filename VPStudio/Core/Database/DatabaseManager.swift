@@ -1,13 +1,69 @@
 import Foundation
 import GRDB
+import os
 
 actor DatabaseManager {
-    private let dbPool: DatabasePool
+    private static let logger = Logger(subsystem: "com.vpstudio", category: "database")
+    private let databaseWriter: AnyDatabaseWriter?
+    private let unavailableMessage: String?
     private static let watchHistoryRetentionCap = 2_000
     private static let watchHistoryRetentionTTL: TimeInterval = 365 * 24 * 60 * 60
     private static let tasteEventsRetentionCap = 4_000
     private static let tasteEventsRetentionTTL: TimeInterval = 365 * 24 * 60 * 60
     private var lastRetentionSweepDate: Date?
+
+    private var dbPool: AnyDatabaseWriter {
+        get throws {
+            guard let databaseWriter else {
+                throw DatabaseError(message: unavailableMessage ?? "Database unavailable")
+            }
+            return databaseWriter
+        }
+    }
+
+    private static func resumeCheckpointID(mediaId: String, episodeId: String?) -> String {
+        let episodeComponent = episodeId ?? "movie"
+        return "resume::\(mediaId)::\(episodeComponent)"
+    }
+
+    private static func legacyProgressID(mediaId: String, episodeId: String?) -> String {
+        episodeId.map { "\(mediaId)-\($0)-progress" } ?? "\(mediaId)-progress"
+    }
+
+    private static func legacyWatchedID(mediaId: String, episodeId: String?) -> String {
+        guard let episodeId else { return "\(mediaId)-watched" }
+        return "\(mediaId)-\(episodeId)-watched"
+    }
+
+    private static func completionEntryID(mediaId: String, episodeId: String?, watchedAt: Date) -> String {
+        let episodeComponent = episodeId ?? "movie"
+        let timestamp = Int(watchedAt.timeIntervalSince1970.rounded())
+        return "watch::\(mediaId)::\(episodeComponent)::\(timestamp)::\(UUID().uuidString)"
+    }
+
+    private static func databaseConfiguration() -> Configuration {
+        var config = Configuration()
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["VPSTUDIO_SQL_TRACE"] != nil {
+            config.prepareDatabase { db in
+                db.trace { statement in
+                    Self.logger.debug("SQL: \(statement, privacy: .public)")
+                }
+            }
+        }
+        #endif
+        return config
+    }
+
+    private init(writer: any DatabaseWriter) {
+        databaseWriter = AnyDatabaseWriter(writer)
+        unavailableMessage = nil
+    }
+
+    private init(unavailableMessage: String) {
+        databaseWriter = nil
+        self.unavailableMessage = unavailableMessage
+    }
 
     init(path: String? = nil) throws {
         let dbPath: String
@@ -22,16 +78,15 @@ actor DatabaseManager {
             dbPath = dbDir.appendingPathComponent("vpstudio.sqlite").path
         }
 
-        var config = Configuration()
-        #if DEBUG
-        if ProcessInfo.processInfo.environment["VPSTUDIO_SQL_TRACE"] != nil {
-            config.prepareDatabase { db in
-                db.trace { print("SQL: \($0)") }
-            }
-        }
-        #endif
+        self.init(writer: try DatabasePool(path: dbPath, configuration: Self.databaseConfiguration()))
+    }
 
-        dbPool = try DatabasePool(path: dbPath, configuration: config)
+    init(inMemoryNamed name: String) throws {
+        self.init(writer: try DatabaseQueue(named: name, configuration: Self.databaseConfiguration()))
+    }
+
+    nonisolated static func unavailable(message: String) -> DatabaseManager {
+        DatabaseManager(unavailableMessage: message)
     }
 
     func migrate() throws {
@@ -375,7 +430,167 @@ actor DatabaseManager {
             }
         }
 
+        migrator.registerMigration("v12_history_and_query_indices") { db in
+            try db.create(
+                index: "idx_watch_history_media_episode_watched_at",
+                on: "watch_history",
+                columns: ["mediaId", "episodeId", "watchedAt"],
+                ifNotExists: true
+            )
+            try db.create(
+                index: "idx_watch_history_completed_watched_at",
+                on: "watch_history",
+                columns: ["isCompleted", "watchedAt"],
+                ifNotExists: true
+            )
+            try db.create(
+                index: "idx_user_library_list_folder_added_at",
+                on: "user_library",
+                columns: ["listType", "folderId", "addedAt"],
+                ifNotExists: true
+            )
+            try db.create(
+                index: "idx_taste_events_user_created_at",
+                on: "taste_events",
+                columns: ["userId", "createdAt"],
+                ifNotExists: true
+            )
+            try db.create(
+                index: "idx_taste_events_user_media_event_created_at",
+                on: "taste_events",
+                columns: ["userId", "mediaId", "eventType", "createdAt"],
+                ifNotExists: true
+            )
+        }
+
+        migrator.registerMigration("v13_download_task_storage_hardening") { db in
+            try db.create(table: "download_tasks_v13") { t in
+                t.primaryKey("id", .text)
+                t.column("mediaId", .text).notNull()
+                t.column("episodeId", .text)
+                t.column("streamURL", .text)
+                t.column("fileName", .text).notNull()
+                t.column("status", .text).notNull().defaults(to: DownloadStatus.queued.rawValue)
+                t.column("progress", .double).notNull().defaults(to: 0)
+                t.column("bytesWritten", .integer).notNull().defaults(to: 0)
+                t.column("totalBytes", .integer)
+                t.column("destinationPath", .text)
+                t.column("errorMessage", .text)
+                t.column("mediaTitle", .text).notNull().defaults(to: "")
+                t.column("mediaType", .text).notNull().defaults(to: "movie")
+                t.column("posterPath", .text)
+                t.column("seasonNumber", .integer)
+                t.column("episodeNumber", .integer)
+                t.column("episodeTitle", .text)
+                t.column("recoveryContextJSON", .text)
+                t.column("expectedBytes", .integer)
+                t.column("resumeDataBase64", .text)
+                t.column("createdAt", .datetime).notNull()
+                t.column("updatedAt", .datetime).notNull()
+            }
+
+            try db.execute(sql: """
+                INSERT INTO download_tasks_v13 (
+                    id,
+                    mediaId,
+                    episodeId,
+                    streamURL,
+                    fileName,
+                    status,
+                    progress,
+                    bytesWritten,
+                    totalBytes,
+                    destinationPath,
+                    errorMessage,
+                    mediaTitle,
+                    mediaType,
+                    posterPath,
+                    seasonNumber,
+                    episodeNumber,
+                    episodeTitle,
+                    recoveryContextJSON,
+                    expectedBytes,
+                    resumeDataBase64,
+                    createdAt,
+                    updatedAt
+                )
+                SELECT
+                    id,
+                    mediaId,
+                    episodeId,
+                    NULLIF(TRIM(streamURL), ''),
+                    fileName,
+                    status,
+                    progress,
+                    bytesWritten,
+                    totalBytes,
+                    destinationPath,
+                    errorMessage,
+                    COALESCE(mediaTitle, ''),
+                    COALESCE(mediaType, 'movie'),
+                    posterPath,
+                    seasonNumber,
+                    episodeNumber,
+                    episodeTitle,
+                    recoveryContextJSON,
+                    CASE
+                        WHEN totalBytes IS NOT NULL AND totalBytes > 0 THEN totalBytes
+                        ELSE NULL
+                    END,
+                    NULL,
+                    createdAt,
+                    updatedAt
+                FROM download_tasks
+                """)
+
+            try db.drop(table: "download_tasks")
+            try db.rename(table: "download_tasks_v13", to: "download_tasks")
+            try db.create(
+                index: "idx_download_tasks_media_id",
+                on: "download_tasks",
+                columns: ["mediaId"],
+                ifNotExists: true
+            )
+            try db.create(
+                index: "idx_download_tasks_updated_at",
+                on: "download_tasks",
+                columns: ["updatedAt"],
+                ifNotExists: true
+            )
+        }
+
+        migrator.registerMigration("v14_recovery_download_transport_redaction") { db in
+            try db.execute(
+                sql: """
+                UPDATE download_tasks
+                SET streamURL = NULL,
+                    resumeDataBase64 = NULL
+                WHERE recoveryContextJSON IS NOT NULL
+                """
+            )
+        }
+
         try migrator.migrate(dbPool)
+    }
+
+    func writeInTransaction<T: Sendable>(
+        _ updates: @escaping @Sendable (Database) throws -> T
+    ) async throws -> T {
+        return try await dbPool.writeWithoutTransaction { db in
+            var result: Result<T, Error>?
+            try db.inTransaction {
+                result = .success(try updates(db))
+                return .commit
+            }
+            guard let result else {
+                throw DatabaseError(message: "Database transaction completed without producing a result.")
+            }
+            return try result.get()
+        }
+    }
+
+    static func ensureSystemLibraryFoldersForImport(in db: Database) throws {
+        try Self.ensureSystemLibraryFolders(in: db)
     }
 
     // MARK: - Media Cache
@@ -458,7 +673,36 @@ actor DatabaseManager {
     // MARK: - Watch History
 
     func saveWatchHistory(_ history: WatchHistory) async throws {
-        try await dbPool.write { db in try history.save(db) }
+        try await dbPool.write { db in
+            var sanitized = history.normalizedForPersistence
+            let existingWithSameID = try WatchHistory.fetchOne(db, key: sanitized.id)
+
+            sanitized.streamURL = nil
+
+            let resumeCheckpointID = Self.resumeCheckpointID(mediaId: sanitized.mediaId, episodeId: sanitized.episodeId)
+            let legacyProgressID = Self.legacyProgressID(mediaId: sanitized.mediaId, episodeId: sanitized.episodeId)
+            let legacyWatchedID = Self.legacyWatchedID(mediaId: sanitized.mediaId, episodeId: sanitized.episodeId)
+
+            if sanitized.isCompleted {
+                if sanitized.id == resumeCheckpointID
+                    || sanitized.id == legacyProgressID
+                    || sanitized.id == legacyWatchedID
+                {
+                    sanitized.id = Self.completionEntryID(
+                        mediaId: sanitized.mediaId,
+                        episodeId: sanitized.episodeId,
+                        watchedAt: sanitized.watchedAt
+                    )
+                }
+            } else if sanitized.id == legacyProgressID
+                        || sanitized.id == legacyWatchedID
+                        || existingWithSameID?.isCompleted == true
+            {
+                sanitized.id = resumeCheckpointID
+            }
+
+            try sanitized.save(db)
+        }
     }
 
     func fetchWatchHistory(limit: Int = 50, offset: Int = 0) async throws -> [WatchHistory] {
@@ -497,12 +741,39 @@ actor DatabaseManager {
         }
     }
 
+    func hasCompletedWatchHistoryEntry(
+        mediaId: String,
+        episodeId: String? = nil,
+        watchedAt: Date,
+        tolerance: TimeInterval = 1
+    ) async throws -> Bool {
+        try await dbPool.read { db in
+            var request = WatchHistory
+                .filter(WatchHistory.Columns.mediaId == mediaId)
+                .filter(WatchHistory.Columns.isCompleted == true)
+
+            if let episodeId {
+                request = request.filter(WatchHistory.Columns.episodeId == episodeId)
+            } else {
+                request = request.filter(WatchHistory.Columns.episodeId == nil)
+            }
+
+            let lowerBound = watchedAt.addingTimeInterval(-tolerance)
+            let upperBound = watchedAt.addingTimeInterval(tolerance)
+            return try request
+                .filter(WatchHistory.Columns.watchedAt >= lowerBound)
+                .filter(WatchHistory.Columns.watchedAt <= upperBound)
+                .fetchCount(db) > 0
+        }
+    }
+
     /// Fetches all watch history entries for a given media (series), returning a dictionary keyed by episodeId.
     func fetchEpisodeWatchStates(mediaId: String) async throws -> [String: WatchHistory] {
         try await dbPool.read { db in
             let entries = try WatchHistory
                 .filter(WatchHistory.Columns.mediaId == mediaId)
                 .filter(WatchHistory.Columns.episodeId != nil)
+                .filter(WatchHistory.Columns.isCompleted == true)
                 .order(WatchHistory.Columns.watchedAt.desc)
                 .fetchAll(db)
             var dict: [String: WatchHistory] = [:]
@@ -533,14 +804,31 @@ actor DatabaseManager {
 
     /// Marks an episode as watched (creates a completed WatchHistory entry).
     func markEpisodeWatched(mediaId: String, episodeId: String, title: String) async throws {
+        let watchedAt = Date()
         let history = WatchHistory(
-            id: "\(mediaId)-\(episodeId)-watched",
+            id: Self.completionEntryID(mediaId: mediaId, episodeId: episodeId, watchedAt: watchedAt),
             mediaId: mediaId,
             episodeId: episodeId,
             title: title,
             progress: 1.0,
             duration: 1.0,
-            watchedAt: Date(),
+            watchedAt: watchedAt,
+            isCompleted: true
+        )
+        try await saveWatchHistory(history)
+    }
+
+    /// Marks a movie as watched (creates a completed WatchHistory entry).
+    func markMovieWatched(mediaId: String, title: String) async throws {
+        let watchedAt = Date()
+        let history = WatchHistory(
+            id: Self.completionEntryID(mediaId: mediaId, episodeId: nil, watchedAt: watchedAt),
+            mediaId: mediaId,
+            episodeId: nil,
+            title: title,
+            progress: 1.0,
+            duration: 1.0,
+            watchedAt: watchedAt,
             isCompleted: true
         )
         try await saveWatchHistory(history)
@@ -556,6 +844,26 @@ actor DatabaseManager {
         }
     }
 
+    /// Marks a movie as unwatched by deleting all movie-level watch history entries.
+    func markMovieUnwatched(mediaId: String) async throws {
+        _ = try await dbPool.write { db in
+            try WatchHistory
+                .filter(WatchHistory.Columns.mediaId == mediaId)
+                .filter(WatchHistory.Columns.episodeId == nil)
+                .deleteAll(db)
+        }
+    }
+
+    /// Clears all episode-level watch history entries for a series.
+    func markSeriesUnwatched(mediaId: String) async throws {
+        _ = try await dbPool.write { db in
+            try WatchHistory
+                .filter(WatchHistory.Columns.mediaId == mediaId)
+                .filter(WatchHistory.Columns.episodeId != nil)
+                .deleteAll(db)
+        }
+    }
+
     @discardableResult
     public func applyWatchHistoryRetentionPolicy(
         maxEntries: Int = DatabaseManager.watchHistoryRetentionCap,
@@ -567,12 +875,16 @@ actor DatabaseManager {
             let effectiveTTL = max(ttl, 0)
             let cutoffDate = now.addingTimeInterval(-effectiveTTL)
 
-            let beforeCount = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM watch_history") ?? 0
+            let beforeCount = try Int.fetchOne(
+                db,
+                sql: "SELECT COUNT(*) FROM watch_history WHERE isCompleted = 1"
+            ) ?? 0
 
             try db.execute(
                 sql: """
                 DELETE FROM watch_history
-                WHERE watchedAt < ?
+                WHERE isCompleted = 1
+                  AND watchedAt < ?
                 """,
                 arguments: [cutoffDate]
             )
@@ -583,9 +895,11 @@ actor DatabaseManager {
                 WHERE id IN (
                     SELECT stale.id
                     FROM watch_history AS stale
-                    WHERE stale.id NOT IN (
+                    WHERE stale.isCompleted = 1
+                      AND stale.id NOT IN (
                         SELECT retained.id
                         FROM watch_history AS retained
+                        WHERE retained.isCompleted = 1
                         ORDER BY retained.watchedAt DESC, retained.id DESC
                         LIMIT ?
                     )
@@ -594,7 +908,10 @@ actor DatabaseManager {
                 arguments: [effectiveMaxEntries]
             )
 
-            let afterCount = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM watch_history") ?? 0
+            let afterCount = try Int.fetchOne(
+                db,
+                sql: "SELECT COUNT(*) FROM watch_history WHERE isCompleted = 1"
+            ) ?? 0
             return max(beforeCount - afterCount, 0)
         }
     }
@@ -1087,7 +1404,8 @@ actor DatabaseManager {
     // MARK: - Downloads
 
     func saveDownloadTask(_ task: DownloadTask) async throws {
-        try await dbPool.write { db in try task.save(db) }
+        let sanitized = task.sanitizedForPersistence
+        try await dbPool.write { db in try sanitized.save(db) }
     }
 
     func fetchDownloadTask(id: String) async throws -> DownloadTask? {
@@ -1102,13 +1420,73 @@ actor DatabaseManager {
         }
     }
 
-    func updateDownloadTaskStreamURL(id: String, streamURL: String) async throws {
+    func updateDownloadTaskStreamURL(id: String, streamURL: String?) async throws {
+        let normalizedURL = streamURL?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .nonEmpty
         try await dbPool.write { db in
             try db.execute(
-                sql: "UPDATE download_tasks SET streamURL = ?, updatedAt = ? WHERE id = ?",
-                arguments: [streamURL, Date(), id]
+                sql: """
+                UPDATE download_tasks
+                SET streamURL = CASE
+                        WHEN status = ? THEN NULL
+                        ELSE ?
+                    END,
+                    updatedAt = ?
+                WHERE id = ?
+                """,
+                arguments: [DownloadStatus.completed.rawValue, normalizedURL, Date(), id]
             )
         }
+    }
+
+    func clearDownloadTaskStreamURL(id: String) async throws {
+        try await updateDownloadTaskStreamURL(id: id, streamURL: nil)
+    }
+
+    func clearDownloadTaskReplayableTransportState(id: String) async throws {
+        try await dbPool.write { db in
+            try db.execute(
+                sql: """
+                UPDATE download_tasks
+                SET streamURL = NULL,
+                    resumeDataBase64 = NULL,
+                    updatedAt = ?
+                WHERE id = ?
+                """,
+                arguments: [Date(), id]
+            )
+        }
+    }
+
+    func updateDownloadTaskResumeData(id: String, resumeDataBase64: String?) async throws {
+        let normalizedResumeData = resumeDataBase64?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .nonEmpty
+        let validatedResumeData: String?
+        if let normalizedResumeData, Data(base64Encoded: normalizedResumeData) != nil {
+            validatedResumeData = normalizedResumeData
+        } else {
+            validatedResumeData = nil
+        }
+        try await dbPool.write { db in
+            try db.execute(
+                sql: """
+                UPDATE download_tasks
+                SET resumeDataBase64 = CASE
+                        WHEN status = ? THEN NULL
+                        ELSE ?
+                    END,
+                    updatedAt = ?
+                WHERE id = ?
+                """,
+                arguments: [DownloadStatus.completed.rawValue, validatedResumeData, Date(), id]
+            )
+        }
+    }
+
+    func clearDownloadTaskResumeData(id: String) async throws {
+        try await updateDownloadTaskResumeData(id: id, resumeDataBase64: nil)
     }
 
     func updateDownloadTaskStatus(id: String, status: DownloadStatus, errorMessage: String? = nil) async throws {
@@ -1117,10 +1495,32 @@ actor DatabaseManager {
             try db.execute(
                 sql: """
                 UPDATE download_tasks
-                SET status = ?, errorMessage = ?, updatedAt = ?
+                SET status = ?,
+                    errorMessage = ?,
+                    progress = CASE
+                        WHEN ? = ? THEN 1
+                        ELSE progress
+                    END,
+                    streamURL = CASE
+                        WHEN ? = ? THEN NULL
+                        ELSE streamURL
+                    END,
+                    resumeDataBase64 = CASE
+                        WHEN ? = ? THEN NULL
+                        ELSE resumeDataBase64
+                    END,
+                    updatedAt = ?
                 WHERE id = ?
                 """,
-                arguments: [status.rawValue, errorMessage, now, id]
+                arguments: [
+                    status.rawValue,
+                    errorMessage,
+                    status.rawValue, DownloadStatus.completed.rawValue,
+                    status.rawValue, DownloadStatus.completed.rawValue,
+                    status.rawValue, DownloadStatus.completed.rawValue,
+                    now,
+                    id,
+                ]
             )
         }
     }
@@ -1139,8 +1539,19 @@ actor DatabaseManager {
                 UPDATE download_tasks
                 SET progress = ?, bytesWritten = ?, totalBytes = ?, destinationPath = COALESCE(?, destinationPath), updatedAt = ?
                 WHERE id = ?
+                  AND status NOT IN (?, ?, ?)
                 """,
-                arguments: [progress, bytesWritten, totalBytes, destinationPath, now, id]
+                arguments: [
+                    progress,
+                    bytesWritten,
+                    totalBytes,
+                    destinationPath,
+                    now,
+                    id,
+                    DownloadStatus.completed.rawValue,
+                    DownloadStatus.failed.rawValue,
+                    DownloadStatus.cancelled.rawValue,
+                ]
             )
         }
     }
@@ -1250,46 +1661,63 @@ actor DatabaseManager {
         now: Date = Date()
     ) async throws -> Int {
         try await dbPool.write { db in
-            let effectiveMaxEntries = max(maxEntries, 0)
-            let effectiveTTL = max(ttl, 0)
-            let cutoffDate = now.addingTimeInterval(-effectiveTTL)
-
-            let beforeCount = try Int.fetchOne(
-                db,
-                sql: "SELECT COUNT(*) FROM taste_events WHERE userId = ?",
-                arguments: [userId]
-            ) ?? 0
-
-            try db.execute(
-                sql: """
-                DELETE FROM taste_events
-                WHERE userId = ? AND createdAt < ?
-                """,
-                arguments: [userId, cutoffDate]
+            try Self.applyTasteEventsRetentionPolicy(
+                in: db,
+                userId: userId,
+                maxEntries: maxEntries,
+                ttl: ttl,
+                now: now
             )
-
-            try db.execute(
-                sql: """
-                DELETE FROM taste_events
-                WHERE userId = ?
-                  AND id IN (
-                    SELECT id
-                    FROM taste_events
-                    WHERE userId = ?
-                    ORDER BY createdAt DESC, id DESC
-                    LIMIT -1 OFFSET ?
-                  )
-                """,
-                arguments: [userId, userId, effectiveMaxEntries]
-            )
-
-            let afterCount = try Int.fetchOne(
-                db,
-                sql: "SELECT COUNT(*) FROM taste_events WHERE userId = ?",
-                arguments: [userId]
-            ) ?? 0
-            return max(beforeCount - afterCount, 0)
         }
+    }
+
+    @discardableResult
+    static func applyTasteEventsRetentionPolicy(
+        in db: Database,
+        userId: String = "default",
+        maxEntries: Int = DatabaseManager.tasteEventsRetentionCap,
+        ttl: TimeInterval = DatabaseManager.tasteEventsRetentionTTL,
+        now: Date = Date()
+    ) throws -> Int {
+        let effectiveMaxEntries = max(maxEntries, 0)
+        let effectiveTTL = max(ttl, 0)
+        let cutoffDate = now.addingTimeInterval(-effectiveTTL)
+
+        let beforeCount = try Int.fetchOne(
+            db,
+            sql: "SELECT COUNT(*) FROM taste_events WHERE userId = ?",
+            arguments: [userId]
+        ) ?? 0
+
+        try db.execute(
+            sql: """
+            DELETE FROM taste_events
+            WHERE userId = ? AND createdAt < ?
+            """,
+            arguments: [userId, cutoffDate]
+        )
+
+        try db.execute(
+            sql: """
+            DELETE FROM taste_events
+            WHERE userId = ?
+              AND id IN (
+                SELECT id
+                FROM taste_events
+                WHERE userId = ?
+                ORDER BY createdAt DESC, id DESC
+                LIMIT -1 OFFSET ?
+              )
+            """,
+            arguments: [userId, userId, effectiveMaxEntries]
+        )
+
+        let afterCount = try Int.fetchOne(
+            db,
+            sql: "SELECT COUNT(*) FROM taste_events WHERE userId = ?",
+            arguments: [userId]
+        ) ?? 0
+        return max(beforeCount - afterCount, 0)
     }
 
     func fetchTasteEvents(
@@ -1537,6 +1965,11 @@ actor DatabaseManager {
                 try db.execute(sql: "DELETE FROM \(table)")
             }
         }
+        try await dbPool.barrierWriteWithoutTransaction { db in
+            try db.execute(sql: "PRAGMA wal_checkpoint(TRUNCATE)")
+            try db.execute(sql: "VACUUM")
+        }
+        lastRetentionSweepDate = nil
     }
 
     private static func ensureSystemLibraryFolders(in db: Database) throws {
@@ -1581,6 +2014,12 @@ actor DatabaseManager {
         }
 
         return normalized.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+private extension String {
+    var nonEmpty: String? {
+        isEmpty ? nil : self
     }
 }
 

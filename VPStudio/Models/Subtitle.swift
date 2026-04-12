@@ -26,6 +26,10 @@ struct Subtitle: Codable, Sendable, Identifiable, Equatable {
         if let hi = isHearingImpaired, hi { name += " (HI)" }
         return name
     }
+
+    var isSupportedSubtitle: Bool {
+        format.isSupportedSubtitle || SubtitleFormat.parse(from: fileName).isSupportedSubtitle
+    }
 }
 
 enum SubtitleFormat: String, Codable, Sendable {
@@ -44,6 +48,10 @@ enum SubtitleFormat: String, Codable, Sendable {
         case "ssa": return .ssa
         default: return .unknown
         }
+    }
+
+    var isSupportedSubtitle: Bool {
+        self != .unknown
     }
 
     /// File extension used when writing a subtitle to disk.

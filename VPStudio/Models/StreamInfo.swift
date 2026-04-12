@@ -5,12 +5,20 @@ struct StreamRecoveryContext: Codable, Sendable, Equatable, Hashable {
     var preferredService: DebridServiceType?
     var seasonNumber: Int?
     var episodeNumber: Int?
+    var torrentId: String?
+    var resolvedDebridService: String?
+    var resolvedFileName: String?
+    var resolvedFileSizeBytes: Int64?
 
     init?(
         infoHash: String,
         preferredService: DebridServiceType? = nil,
         seasonNumber: Int? = nil,
-        episodeNumber: Int? = nil
+        episodeNumber: Int? = nil,
+        torrentId: String? = nil,
+        resolvedDebridService: String? = nil,
+        resolvedFileName: String? = nil,
+        resolvedFileSizeBytes: Int64? = nil
     ) {
         let normalizedHash = infoHash
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -21,6 +29,23 @@ struct StreamRecoveryContext: Codable, Sendable, Equatable, Hashable {
         self.preferredService = preferredService
         self.seasonNumber = seasonNumber
         self.episodeNumber = episodeNumber
+        self.torrentId = Self.normalizedOptionalString(torrentId)
+        self.resolvedDebridService = Self.normalizedOptionalString(resolvedDebridService)
+        self.resolvedFileName = Self.normalizedOptionalString(resolvedFileName)
+        self.resolvedFileSizeBytes = Self.normalizedByteCount(resolvedFileSizeBytes)
+    }
+
+    private static func normalizedOptionalString(_ value: String?) -> String? {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty else {
+            return nil
+        }
+        return trimmed
+    }
+
+    private static func normalizedByteCount(_ value: Int64?) -> Int64? {
+        guard let value, value > 0 else { return nil }
+        return value
     }
 }
 
@@ -39,6 +64,9 @@ struct StreamInfo: Codable, Sendable, Identifiable, Equatable, Hashable {
     var sizeBytes: Int64?
     var debridService: String
     var recoveryContext: StreamRecoveryContext?
+    var remoteTransferID: String? {
+        recoveryContext?.torrentId
+    }
 
     init(
         streamURL: URL,
@@ -109,5 +137,24 @@ struct StreamInfo: Codable, Sendable, Identifiable, Equatable, Hashable {
         if codec != .unknown { parts.append(codec.rawValue) }
         if audio != .unknown { parts.append(audio.rawValue) }
         return parts.joined(separator: " / ")
+    }
+}
+
+extension StreamRecoveryContext {
+    func enrichedForDownloadPersistence(
+        fileName: String,
+        sizeBytes: Int64?,
+        debridService: String
+    ) -> StreamRecoveryContext {
+        StreamRecoveryContext(
+            infoHash: infoHash,
+            preferredService: preferredService,
+            seasonNumber: seasonNumber,
+            episodeNumber: episodeNumber,
+            torrentId: torrentId,
+            resolvedDebridService: debridService,
+            resolvedFileName: fileName,
+            resolvedFileSizeBytes: sizeBytes
+        ) ?? self
     }
 }

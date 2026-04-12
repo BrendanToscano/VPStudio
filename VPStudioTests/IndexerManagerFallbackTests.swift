@@ -16,6 +16,21 @@ struct IndexerManagerFallbackTests {
         #expect(names == ["Stremio Torrentio", "YTS", "APiBay"])
     }
 
+    @Test func emptyConfigsStayEmptyOnceBootstrapFlagIsSet() async throws {
+        let (database, rootDir) = try await makeDatabase(named: "indexer-fallback-empty-persisted.sqlite")
+        defer { try? FileManager.default.removeItem(at: rootDir) }
+
+        try await database.setSetting(key: IndexerManager.bootstrapSettingKey, value: "true")
+
+        let manager = IndexerManager(database: database)
+        try await manager.initialize()
+        let names = await manager.configuredIndexerNames()
+
+        #expect(names.isEmpty)
+        let stored = try await database.fetchAllIndexerConfigs()
+        #expect(stored.isEmpty)
+    }
+
     @Test func legacyBuiltInSubsetDoesNotAutoAddMissingDefaults() async throws {
         let (database, rootDir) = try await makeDatabase(named: "indexer-fallback-legacy-subset.sqlite")
         defer { try? FileManager.default.removeItem(at: rootDir) }
@@ -109,6 +124,36 @@ struct IndexerManagerFallbackTests {
         let names = await manager.configuredIndexerNames()
 
         #expect(names.isEmpty)
+    }
+
+    @Test func ensureInitializedOnlyBootstrapsOnceUntilForcedReload() async throws {
+        let (database, rootDir) = try await makeDatabase(named: "indexer-fallback-ensure-initialized.sqlite")
+        defer { try? FileManager.default.removeItem(at: rootDir) }
+
+        let manager = IndexerManager(database: database)
+        try await manager.ensureInitialized()
+        let initialNames = await manager.configuredIndexerNames()
+
+        try await database.saveIndexerConfig(
+            IndexerConfig(
+                id: "custom-jackett",
+                name: "Jackett",
+                indexerType: .jackett,
+                baseURL: "https://jackett.example.com",
+                apiKey: "key",
+                isActive: true,
+                priority: 10
+            )
+        )
+
+        try await manager.ensureInitialized()
+        let reusedNames = await manager.configuredIndexerNames()
+        #expect(reusedNames == initialNames)
+
+        try await manager.initialize()
+        let reloadedNames = await manager.configuredIndexerNames()
+        #expect(reloadedNames.count == initialNames.count + 1)
+        #expect(reloadedNames.contains("Jackett"))
     }
 
     private func makeDatabase(named fileName: String) async throws -> (DatabaseManager, URL) {

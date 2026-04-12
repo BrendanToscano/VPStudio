@@ -13,7 +13,9 @@ actor SettingsManager {
         SettingsKeys.traktClientSecret,
         SettingsKeys.traktAccessToken,
         SettingsKeys.traktRefreshToken,
+        SettingsKeys.simklClientId,
         SettingsKeys.simklAccessToken,
+        SettingsKeys.simklRefreshToken,
         SettingsKeys.geminiApiKey,
     ]
 
@@ -136,6 +138,7 @@ enum SettingsKeys {
     nonisolated static let openRouterApiKey = "openrouter_api_key"
     nonisolated static let openAIModelPreset = "openai_model_preset"
     nonisolated static let anthropicModelPreset = "anthropic_model_preset"
+    nonisolated static let openRouterModelPreset = "openrouter_model_preset"
     nonisolated static let geminiApiKey = "gemini_api_key"
     nonisolated static let geminiModelPreset = "gemini_model_preset"
     nonisolated static let ollamaEndpoint = "ollama_endpoint"
@@ -157,6 +160,7 @@ enum SettingsKeys {
     nonisolated static let traktSyncFolders = "trakt_sync_folders"
     nonisolated static let simklClientId = "simkl_client_id"
     nonisolated static let simklAccessToken = "simkl_access_token"
+    nonisolated static let simklRefreshToken = "simkl_refresh_token"
 
     nonisolated static let lastSelectedTab = "last_selected_tab"
     nonisolated static let personalizationEnabled = "personalization_enabled"

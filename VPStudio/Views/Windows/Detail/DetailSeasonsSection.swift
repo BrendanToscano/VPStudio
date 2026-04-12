@@ -124,7 +124,7 @@ struct DetailSeasonsSection: View {
                             }
                             Divider()
                             Button {
-                                Task { await viewModel.markSeasonWatched() }
+                                Task { await markRemainingEpisodesWatched(from: episode) }
                             } label: {
                                 Label("Mark Rest as Watched", systemImage: "checkmark")
                             }
@@ -145,6 +145,18 @@ struct DetailSeasonsSection: View {
                 }
                 .padding(.vertical, 24)
             }
+        }
+    }
+
+    @MainActor
+    private func markRemainingEpisodesWatched(from episode: Episode) async {
+        guard let startIndex = viewModel.episodes.firstIndex(where: { $0.id == episode.id }) else {
+            return
+        }
+
+        for remainingEpisode in viewModel.episodes[startIndex...] {
+            guard viewModel.episodeWatchStates[remainingEpisode.id]?.isCompleted != true else { continue }
+            await viewModel.toggleEpisodeWatched(remainingEpisode)
         }
     }
 }

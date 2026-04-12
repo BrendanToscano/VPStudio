@@ -78,6 +78,12 @@ struct PlayerLoadingTipsTests {
         #expect(allIds.contains(rotator.currentTip.id))
     }
 
+    @Test @MainActor func emptyCustomCatalogFallsBackToDefaultTips() {
+        let rotator = PlayerLoadingTipRotator(tips: [])
+        let allIds = Set(PlayerLoadingTipCatalog.allTips.map(\.id))
+        #expect(allIds.contains(rotator.currentTip.id))
+    }
+
     // MARK: - Rotation Behavior
 
     @Test @MainActor func advanceChangesTip() {

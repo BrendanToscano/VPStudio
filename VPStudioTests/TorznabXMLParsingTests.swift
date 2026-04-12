@@ -76,6 +76,85 @@ struct TorznabXMLParsingTests {
         #expect(results.first?.seeders == 120)
         #expect(results.first?.leechers == 10)
     }
+
+    @Test func decodesCommonXMLEntitiesInTitles() async throws {
+        let xml = """
+        <?xml version="1.0"?>
+        <rss><channel>
+        <item>
+        <title>Tom &amp; Jerry&#39;s Special</title>
+        <torznab:attr name="infohash" value="hash-entity"/>
+        <torznab:attr name="seeders" value="5"/>
+        </item>
+        </channel></rss>
+        """
+
+        let session = makeStubSession(xml: xml)
+        let indexer = makeIndexer(session: session)
+        let results = try await indexer.searchByQuery(query: "Tom", type: .movie)
+
+        #expect(results.count == 1)
+        #expect(results.first?.title == "Tom & Jerry's Special")
+    }
+
+    @Test func parsesEnclosureMagnetWhenInfoHashAttrIsMissing() async throws {
+        let xml = """
+        <?xml version="1.0"?>
+        <rss><channel>
+        <item>
+        <title>Movie.2025.1080p</title>
+        <enclosure url="magnet:?xt=urn:btih:0123456789ABCDEF0123456789ABCDEF01234567"/>
+        <torznab:attr name="seeders" value="22"/>
+        </item>
+        </channel></rss>
+        """
+
+        let session = makeStubSession(xml: xml)
+        let indexer = makeIndexer(session: session)
+        let results = try await indexer.searchByQuery(query: "Movie", type: .movie)
+
+        #expect(results.count == 1)
+        #expect(results.first?.infoHash == "0123456789abcdef0123456789abcdef01234567")
+        #expect(results.first?.magnetURI == "magnet:?xt=urn:btih:0123456789ABCDEF0123456789ABCDEF01234567")
+    }
+
+    @Test func parsesGuidURLWhenInfoHashAttrIsMissing() async throws {
+        let xml = """
+        <?xml version="1.0"?>
+        <rss><channel>
+        <item>
+        <title>Movie.2025.1080p</title>
+        <guid>https://downloads.example/torrent/89ABCDEF0123456789ABCDEF0123456789ABCDEF/file.torrent</guid>
+        <torznab:attr name="seeders" value="22"/>
+        </item>
+        </channel></rss>
+        """
+
+        let session = makeStubSession(xml: xml)
+        let indexer = makeIndexer(session: session)
+        let results = try await indexer.searchByQuery(query: "Movie", type: .movie)
+
+        #expect(results.count == 1)
+        #expect(results.first?.infoHash == "89abcdef0123456789abcdef0123456789abcdef")
+    }
+
+    @Test func malformedJSONPayloadThrowsParseError() async {
+        let session = makeStubSession(xml: #"{not-json}"#)
+        let indexer = makeIndexer(session: session)
+
+        do {
+            _ = try await indexer.searchByQuery(query: "Movie", type: .movie)
+            Issue.record("Expected invalid payload error")
+        } catch let error as IndexerParseError {
+            switch error {
+            case .invalidPayload(let indexer, let reason):
+                #expect(indexer == "TestIndexer")
+                #expect(reason.localizedCaseInsensitiveContains("json"))
+            }
+        } catch {
+            Issue.record("Unexpected error type: \(error)")
+        }
+    }
 }
 
 // MARK: - Helper

@@ -5,6 +5,13 @@ actor RealDebridService: DebridServiceProtocol {
     private let apiToken: String
     private let baseURL = "https://api.real-debrid.com/rest/1.0"
     private let session: URLSession
+    private var cacheEndpointAvailability: CacheEndpointAvailability = .unknown
+
+    private enum CacheEndpointAvailability {
+        case unknown
+        case available
+        case disabled
+    }
 
     init(apiToken: String, session: URLSession = .shared) {
         self.apiToken = apiToken
@@ -28,21 +35,16 @@ actor RealDebridService: DebridServiceProtocol {
         )
     }
 
-    /// Validates that a string looks like a hex info-hash (40 or 64 hex chars).
-    /// Prevents path-traversal or URL corruption when hashes are embedded in URL paths.
-    private static let hexHashPattern = try! NSRegularExpression(pattern: "^[0-9a-fA-F]{40,64}$")
-
-    private static func isValidHexHash(_ hash: String) -> Bool {
-        let range = NSRange(hash.startIndex..<hash.endIndex, in: hash)
-        return hexHashPattern.firstMatch(in: hash, range: range) != nil
-    }
-
     func checkCache(hashes: [String]) async throws -> [String: CacheStatus] {
         guard !hashes.isEmpty else { return [:] }
 
-        // Filter to valid hex hashes to prevent path injection via crafted hash values.
-        let validHashes = hashes.filter { Self.isValidHexHash($0) }
+        let validHashes = hashes.compactMap(DebridHashValidator.normalizedInfoHash)
         guard !validHashes.isEmpty else { return [:] }
+        if case .disabled = cacheEndpointAvailability {
+            return validHashes.reduce(into: [String: CacheStatus]()) { result, hash in
+                result[hash] = .unknown
+            }
+        }
 
         // Batch hashes to keep URL under ~2000 chars. Each hash is 40 chars + 1 separator.
         // Path prefix "/torrents/instantAvailability/" = 30 chars, so ~48 hashes per batch.
@@ -52,10 +54,21 @@ actor RealDebridService: DebridServiceProtocol {
         for batchStart in stride(from: 0, to: validHashes.count, by: batchSize) {
             let batch = Array(validHashes[batchStart ..< min(batchStart + batchSize, validHashes.count)])
             let hashStr = batch.joined(separator: "/")
-            let response: [String: [RDCacheVariant]] = try await request(
-                method: "GET",
-                path: "/torrents/instantAvailability/\(hashStr)"
-            )
+            let response: [String: [RDCacheVariant]]
+            do {
+                response = try await request(
+                    method: "GET",
+                    path: "/torrents/instantAvailability/\(hashStr)"
+                )
+                cacheEndpointAvailability = .available
+            } catch let error as DebridError where Self.isDisabledCacheEndpoint(error) {
+                cacheEndpointAvailability = .disabled
+                let remainingHashes = validHashes[batchStart...]
+                for hash in remainingHashes {
+                    result[hash] = .unknown
+                }
+                break
+            }
 
             for hash in batch {
                 let lowered = hash.lowercased()
@@ -70,7 +83,8 @@ actor RealDebridService: DebridServiceProtocol {
     }
 
     func addMagnet(hash: String) async throws -> String {
-        let magnet = "magnet:?xt=urn:btih:\(hash)"
+        let normalizedHash = try DebridHashValidator.validatedInfoHash(hash)
+        let magnet = "magnet:?xt=urn:btih:\(normalizedHash)"
         let body = "magnet=\(magnet.addingPercentEncoding(withAllowedCharacters: Self.formEncodingAllowed) ?? magnet)"
         let response: RDAddMagnetResponse = try await request(method: "POST", path: "/torrents/addMagnet", body: body)
         return response.id
@@ -88,11 +102,46 @@ actor RealDebridService: DebridServiceProtocol {
 
     func selectMatchingEpisodeFile(torrentId: String, seasonNumber: Int, episodeNumber: Int) async throws -> Bool {
         let info: RDTorrentInfo = try await request(method: "GET", path: "/torrents/info/\(torrentId)")
-        guard let matchedFile = preferredEpisodeFile(in: info.files, seasonNumber: seasonNumber, episodeNumber: episodeNumber) else {
+        guard let matchedFile = preferredEpisodeFile(
+            in: info.files,
+            seasonNumber: seasonNumber,
+            episodeNumber: episodeNumber,
+            resolvedFileNameHint: nil,
+            resolvedFileSizeHint: nil
+        ) else {
             return false
         }
         try await selectFiles(torrentId: torrentId, fileIds: [matchedFile.id])
         return true
+    }
+
+    func selectMatchingEpisodeFile(
+        torrentId: String,
+        seasonNumber: Int,
+        episodeNumber: Int,
+        resolvedFileNameHint: String?,
+        resolvedFileSizeHint: Int64?
+    ) async throws -> Bool {
+        let info: RDTorrentInfo = try await request(method: "GET", path: "/torrents/info/\(torrentId)")
+        guard let matchedFile = preferredEpisodeFile(
+            in: info.files,
+            seasonNumber: seasonNumber,
+            episodeNumber: episodeNumber,
+            resolvedFileNameHint: resolvedFileNameHint,
+            resolvedFileSizeHint: resolvedFileSizeHint
+        ) else {
+            return false
+        }
+        try await selectFiles(torrentId: torrentId, fileIds: [matchedFile.id])
+        return true
+    }
+
+    func cleanupRemoteTransfer(torrentId: String) async throws {
+        do {
+            let _: EmptyResponse = try await request(method: "DELETE", path: "/torrents/delete/\(torrentId)")
+        } catch is DecodingError {
+            // Real-Debrid returns 204 No Content for successful deletes.
+        }
     }
 
     func getStreamURL(torrentId: String) async throws -> StreamInfo {
@@ -134,17 +183,57 @@ actor RealDebridService: DebridServiceProtocol {
     private func preferredEpisodeFile(
         in files: [RDFile]?,
         seasonNumber: Int,
-        episodeNumber: Int
+        episodeNumber: Int,
+        resolvedFileNameHint: String?,
+        resolvedFileSizeHint: Int64?
     ) -> RDFile? {
         guard let files else { return nil }
+        let videoFiles = files.filter { file in
+            guard let path = file.path?.lowercased() else { return false }
+            return Self.isProbablyVideoFile(path)
+        }
+
+        if let exactMatch = bestExactMatch(
+            in: videoFiles,
+            resolvedFileNameHint: resolvedFileNameHint,
+            resolvedFileSizeHint: resolvedFileSizeHint
+        ) {
+            return exactMatch
+        }
 
         let tokens = episodeMatchTokens(seasonNumber: seasonNumber, episodeNumber: episodeNumber)
-        let matchedVideoFiles = files.filter { file in
-            guard let path = file.path?.lowercased(), Self.isProbablyVideoFile(path) else { return false }
+        let matchedVideoFiles = videoFiles.filter { file in
+            guard let path = file.path?.lowercased() else { return false }
             return tokens.contains { path.contains($0) }
         }
 
+        if matchedVideoFiles.isEmpty, videoFiles.count == 1 {
+            return videoFiles.first
+        }
         return matchedVideoFiles.max(by: { ($0.bytes ?? 0) < ($1.bytes ?? 0) })
+    }
+
+    private func bestExactMatch(
+        in files: [RDFile],
+        resolvedFileNameHint: String?,
+        resolvedFileSizeHint: Int64?
+    ) -> RDFile? {
+        guard let normalizedHint = Self.normalizedFileName(resolvedFileNameHint) else {
+            return nil
+        }
+
+        let candidates = files.filter { file in
+            Self.normalizedFileName(file.path) == normalizedHint
+        }
+        guard !candidates.isEmpty else { return nil }
+
+        if let resolvedFileSizeHint {
+            if let exactSize = candidates.first(where: { $0.bytes == resolvedFileSizeHint }) {
+                return exactSize
+            }
+        }
+
+        return candidates.max(by: { ($0.bytes ?? 0) < ($1.bytes ?? 0) })
     }
 
     private func episodeMatchTokens(seasonNumber: Int, episodeNumber: Int) -> [String] {
@@ -161,6 +250,13 @@ actor RealDebridService: DebridServiceProtocol {
 
     private static func isProbablyVideoFile(_ path: String) -> Bool {
         [".mkv", ".mp4", ".avi", ".mov", ".m4v", ".ts"].contains { path.hasSuffix($0) }
+    }
+
+    private static func normalizedFileName(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        return URL(fileURLWithPath: trimmed).lastPathComponent.lowercased()
     }
 
     private static let formEncodingAllowed: CharacterSet = {
@@ -185,11 +281,7 @@ actor RealDebridService: DebridServiceProtocol {
             urlRequest.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
         }
 
-        let (data, response) = try await session.data(for: urlRequest)
-
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw DebridError.networkError("Invalid response")
-        }
+        let (data, httpResponse) = try await DebridHTTPExecutor.data(for: urlRequest, session: session)
 
         switch httpResponse.statusCode {
         case 200...299:
@@ -206,6 +298,13 @@ actor RealDebridService: DebridServiceProtocol {
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
         return try decoder.decode(T.self, from: data)
+    }
+
+    private static func isDisabledCacheEndpoint(_ error: DebridError) -> Bool {
+        guard case .httpError(403, let message) = error else {
+            return false
+        }
+        return message.localizedCaseInsensitiveContains("disabled_endpoint")
     }
 }
 

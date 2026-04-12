@@ -1,4 +1,5 @@
 import SwiftUI
+import os
 
 enum LibraryLayoutPolicy {
     static let rootPinsContentToTop = true
@@ -14,6 +15,8 @@ enum LibraryLayoutPolicy {
         }
     }
 }
+
+private let libraryImportLogger = Logger(subsystem: "com.vpstudio", category: "library-import")
 
 enum LibraryFolderCreationPolicy {
     static let keyboardDismissDelayMilliseconds: UInt64 = 80
@@ -421,7 +424,8 @@ struct LibraryView: View {
                 }
                 selectedFolderID = nil
                 statusMessage = importStatusMessage(from: summary)
-                print("[VPStudio Import] visible-list=\(selectedList.rawValue) status=\"\(statusMessage ?? "")\"")
+                let importStatus = statusMessage ?? ""
+                libraryImportLogger.debug("visible-list=\(selectedList.rawValue, privacy: .public) status=\(importStatus, privacy: .public)")
                 scheduleReload()
             }
         }
@@ -490,6 +494,9 @@ struct LibraryView: View {
             scheduleReload()
         }
         .onReceive(NotificationCenter.default.publisher(for: .libraryDidChange)) { _ in
+            scheduleReload()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .watchHistoryDidChange)) { _ in
             scheduleReload()
         }
         .task {
@@ -793,24 +800,29 @@ struct LibraryView: View {
         }
 
         if selectedList == .history {
-            await loadHistoryEntries()
+            await loadHistoryEntries(loadToken: resolvedLoadToken)
+            guard selectionLoadToken == resolvedLoadToken else { return }
             scheduleMetadataHydration(for: displayedHistoryMediaIDs)
             return
         }
 
-        await loadFolders()
-        await loadLibraryEntries()
+        await loadFolders(loadToken: resolvedLoadToken)
+        guard selectionLoadToken == resolvedLoadToken else { return }
+        await loadLibraryEntries(loadToken: resolvedLoadToken)
+        guard selectionLoadToken == resolvedLoadToken else { return }
         scheduleMetadataHydration(for: entries.map(\.mediaId))
     }
 
-    private func loadFolders() async {
+    private func loadFolders(loadToken: Int) async {
         guard selectedList.supportsFolders else {
+            guard selectionLoadToken == loadToken else { return }
             folders = []
             manualFolderOrderIDs = []
             return
         }
 
         let loadedFolders = (try? await appState.database.fetchAllLibraryFolders(listType: selectedList)) ?? []
+        guard selectionLoadToken == loadToken else { return }
         folders = loadedFolders
         draggedFolderID = nil
         manualFolderOrderIDs = loadedFolders.filter { !$0.isSystem }.map(\.id)
@@ -821,29 +833,32 @@ struct LibraryView: View {
         }
     }
 
-    private func loadLibraryEntries() async {
-        entries = (try? await appState.database.fetchLibraryEntries(
+    private func loadLibraryEntries(loadToken: Int) async {
+        let loadedEntries = (try? await appState.database.fetchLibraryEntries(
             listType: selectedList,
             folderId: selectedFolderID,
             sortOption: sortOption
         )) ?? []
+        await loadMediaItemsIfMissing(ids: loadedEntries.map(\.mediaId), loadToken: loadToken)
+        guard selectionLoadToken == loadToken else { return }
+        entries = loadedEntries
         historyEntries = []
-        await loadMediaItemsIfMissing(ids: entries.map(\.mediaId))
     }
 
-    private func loadHistoryEntries() async {
+    private func loadHistoryEntries(loadToken: Int) async {
         guard selectedList == .history else { return }
-
+        let loadedHistory = (try? await appState.database.fetchWatchHistory(limit: 200)) ?? []
+        await loadMediaItemsIfMissing(ids: loadedHistory.map(\.mediaId), loadToken: loadToken)
+        guard selectionLoadToken == loadToken else { return }
         selectedFolderID = nil
         draggedFolderID = nil
         manualFolderOrderIDs = []
         folders = []
         entries = []
-        historyEntries = (try? await appState.database.fetchWatchHistory(limit: 200)) ?? []
-        await loadMediaItemsIfMissing(ids: displayedHistoryMediaIDs)
+        historyEntries = loadedHistory
     }
 
-    private func loadMediaItemsIfMissing(ids: [String]) async {
+    private func loadMediaItemsIfMissing(ids: [String], loadToken: Int) async {
         var seen = Set<String>()
         let uniqueIDs = ids.filter { seen.insert($0).inserted }
 
@@ -851,6 +866,7 @@ struct LibraryView: View {
         guard !missingIDs.isEmpty else { return }
 
         let fetchedItems = (try? await appState.database.fetchMediaItemsResolvingAliases(ids: missingIDs)) ?? [:]
+        guard selectionLoadToken == loadToken else { return }
         for requestedID in missingIDs {
             guard let item = fetchedItems[requestedID] else { continue }
             mediaItems[requestedID] = item
@@ -882,16 +898,7 @@ struct LibraryView: View {
                 tmdbId: item.tmdbId
             )
         }
-        // Fallback for entries without a cached MediaItem (e.g. Trakt sync stubs)
-        return MediaPreview(
-            id: mediaID,
-            type: .movie,
-            title: mediaID.hasPrefix("tt") ? "IMDb: \(mediaID)" : mediaID,
-            year: nil,
-            posterPath: nil,
-            imdbRating: nil,
-            tmdbId: nil
-        )
+        return nil
     }
 
     private func historyPreview(for mediaID: String) -> MediaPreview? {
@@ -905,7 +912,7 @@ struct LibraryView: View {
 
         return MediaPreview(
             id: historyEntry.mediaId,
-            type: .movie,
+            type: historyEntry.episodeId == nil ? .movie : .series,
             title: historyEntry.title,
             year: nil,
             posterPath: nil,
@@ -1126,7 +1133,7 @@ struct LibraryView: View {
                 )
                 actionError = nil
                 statusMessage = "Folder order updated."
-                await loadFolders()
+                await loadFolders(loadToken: selectionLoadToken)
             } catch {
                 statusMessage = nil
                 actionError = LibraryActionFailurePolicy.appError(for: error, action: .reorderFolders)

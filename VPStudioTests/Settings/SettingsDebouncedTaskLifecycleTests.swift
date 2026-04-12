@@ -8,6 +8,7 @@ struct SettingsDebouncedTaskLifecycleTests {
     func aiSettingsCancelsDebouncedSaveTasksOnDisappear() throws {
         let source = try contents(of: "VPStudio/Views/Windows/Settings/Destinations/AISettingsView.swift")
         #expect(source.contains(".onDisappear"))
+        #expect(source.contains("flushPendingCloudKeySaves()"))
         #expect(source.contains("anthropicSaveTask?.cancel()"))
         #expect(source.contains("openAISaveTask?.cancel()"))
         #expect(source.contains("feedbackReloadTask?.cancel()"))
@@ -26,22 +27,47 @@ struct SettingsDebouncedTaskLifecycleTests {
     func traktSettingsCancelsDebouncedSaveTasksOnDisappear() throws {
         let source = try contents(of: "VPStudio/Views/Windows/Settings/Destinations/TraktSettingsView.swift")
         #expect(source.contains(".onDisappear"))
+        #expect(source.contains("flushPendingClientCredentialSaves()"))
         #expect(source.contains("clientIdSaveTask?.cancel()"))
         #expect(source.contains("clientSecretSaveTask?.cancel()"))
     }
 
     @Test
-    func simklSettingsCancelsDebouncedSaveTaskOnDisappear() throws {
-        let source = try contents(of: "VPStudio/Views/Windows/Settings/Destinations/SimklSettingsView.swift")
-        #expect(source.contains(".onDisappear"))
-        #expect(source.contains("simklClientIdSaveTask?.cancel()"))
+    func traktSettingsSurfacesPersistenceErrors() throws {
+        let source = try contents(of: "VPStudio/Views/Windows/Settings/Destinations/TraktSettingsView.swift")
+        #expect(source.contains("persistBool"))
+        #expect(source.contains("persistString"))
+        #expect(source.contains("errorMessage = error.localizedDescription"))
     }
 
     @Test
-    func subtitleSettingsCancelsDebouncedSaveTaskOnDisappear() throws {
+    func simklSettingsExposeReadOnlyCleanupSurface() throws {
+        let source = try contents(of: "VPStudio/Views/Windows/Settings/Destinations/SimklSettingsView.swift")
+        #expect(source.contains("Cleanup Only in This Build"))
+        #expect(source.contains("read-only"))
+        #expect(source.contains("Saved Authorization"))
+        #expect(source.contains("Disconnect"))
+        #expect(source.contains("isShowingDisconnectConfirmation"))
+        #expect(source.contains(".alert(\"Disconnect Simkl?\", isPresented: $isShowingDisconnectConfirmation)"))
+    }
+
+    @Test
+    func simklSettingsNoLongerOfferInteractiveAuthorizationFlow() throws {
+        let source = try contents(of: "VPStudio/Views/Windows/Settings/Destinations/SimklSettingsView.swift")
+        #expect(source.contains("authorizationState") == false)
+        #expect(source.contains("openAuthorizationPage") == false)
+        #expect(source.contains("completeAuthorization") == false)
+        #expect(source.contains("simklClientIdSaveTask") == false)
+        #expect(source.contains("simklClientSecretSaveTask") == false)
+    }
+
+    @Test
+    func subtitleSettingsFlushesOpenSubtitlesKeyOnDisappear() throws {
         let source = try contents(of: "VPStudio/Views/Windows/Settings/Destinations/SubtitleSettingsView.swift")
-        #expect(source.contains(".onDisappear"))
+        #expect(source.contains(".onDisappear { flushOpenSubtitlesKey() }"))
         #expect(source.contains("openSubsSaveTask?.cancel()"))
+        #expect(source.contains("private func flushOpenSubtitlesKey()"))
+        #expect(source.contains("persistStringSetting(key: SettingsKeys.openSubtitlesApiKey, value: openSubsApiKey)"))
     }
 
     private func contents(of relativePath: String) throws -> String {

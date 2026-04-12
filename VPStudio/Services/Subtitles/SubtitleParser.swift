@@ -156,7 +156,15 @@ struct SubtitleParser {
 
     private static func normalizeNewlines(_ value: String) -> String {
         value
+            .trimmingPrefixBOM()
             .replacingOccurrences(of: "\r\n", with: "\n")
             .replacingOccurrences(of: "\r", with: "\n")
+    }
+}
+
+private extension String {
+    func trimmingPrefixBOM() -> String {
+        guard let first = unicodeScalars.first, first == UnicodeScalar(0xFEFF) else { return self }
+        return String(dropFirst())
     }
 }

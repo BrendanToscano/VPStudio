@@ -35,6 +35,8 @@ struct DownloadsView: View {
     @State private var viewModel: DownloadsViewModel?
     @State private var reloadTask: Task<Void, Never>?
     @State private var confirmDeleteMediaId: String?
+    @State private var confirmDeleteTaskID: String?
+    @State private var playbackValidationMessage: String?
     @State private var didPerformQADownloadAction = false
 
     private var shouldShowRootLoadingSurface: Bool {
@@ -74,6 +76,17 @@ struct DownloadsView: View {
                 .ignoresSafeArea()
         }
         .navigationTitle("Downloads")
+        .alert(
+            "Download Unavailable",
+            isPresented: Binding(
+                get: { playbackValidationMessage != nil },
+                set: { if !$0 { playbackValidationMessage = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(playbackValidationMessage ?? "The downloaded file is no longer available.")
+        }
         .task {
             if viewModel == nil {
                 let vm = DownloadsViewModel(appState: appState)
@@ -369,8 +382,8 @@ struct DownloadsView: View {
                     )
                 }
 
-                if let error = task.errorMessage, !error.isEmpty {
-                    Text(error)
+                if let message = task.errorMessage, !message.isEmpty {
+                    Text(message)
                         .font(.caption2)
                         .foregroundStyle(.red)
                         .lineLimit(2)
@@ -432,7 +445,7 @@ struct DownloadsView: View {
                 }
 
                 Button(role: .destructive) {
-                    Task { await vm.remove(task) }
+                    confirmDeleteTaskID = task.id
                 } label: {
                     Image(systemName: "trash")
                         .font(.body)
@@ -445,6 +458,22 @@ struct DownloadsView: View {
                 #if os(visionOS)
                 .hoverEffect(.highlight)
                 #endif
+                .confirmationDialog(
+                    "Delete Download?",
+                    isPresented: Binding(
+                        get: { confirmDeleteTaskID == task.id },
+                        set: { if !$0 { confirmDeleteTaskID = nil } }
+                    ),
+                    titleVisibility: .visible
+                ) {
+                    Button("Delete", role: .destructive) {
+                        confirmDeleteTaskID = nil
+                        Task { await vm.remove(task) }
+                    }
+                    Button("Cancel", role: .cancel) {}
+                } message: {
+                    Text("This will permanently delete \"\(task.displayTitle)\" from storage.")
+                }
             }
         }
         .padding(.horizontal, 16)
@@ -452,10 +481,21 @@ struct DownloadsView: View {
     }
 
     private func playDownload(_ task: DownloadTask, vm: DownloadsViewModel) {
+        guard task.status == .completed else { return }
+        guard let fileURL = task.destinationURL else {
+            playbackValidationMessage = "The downloaded file for \"\(task.displayTitle)\" is no longer available on disk."
+            Task { await vm.load() }
+            return
+        }
+        guard FileManager.default.fileExists(atPath: fileURL.path) else {
+            playbackValidationMessage = "The downloaded file for \"\(task.displayTitle)\" is no longer available on disk."
+            Task { await vm.load() }
+            return
+        }
+
         #if os(macOS)
         vm.playFile(task)
         #else
-        guard task.status == .completed, let fileURL = task.destinationURL else { return }
         guard appState.activePlayerSession == nil else { return }
         let stream = StreamInfo(
             streamURL: fileURL,

@@ -82,7 +82,7 @@ struct PlayerEngineFallbackTests {
         )
 
         let order = selector.engineOrder(for: stream, strategy: .adaptive)
-        #expect(order == [.avPlayer, .ksPlayer])
+        #expect(order == [.avPlayer])
     }
 
     @Test func selectorPrefersAVPlayerForDolbyVisionPlusStreams() {

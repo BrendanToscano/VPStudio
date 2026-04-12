@@ -18,6 +18,12 @@ struct EnvironmentPickerSheet: View {
     @State private var isShowingFileImporter = false
     @State private var importError: String?
     @State private var environmentLoadTask: Task<Void, Never>?
+    @State private var pendingDeletion: PendingDeletion?
+
+    private struct PendingDeletion: Identifiable {
+        let id: String
+        let name: String
+    }
 
     var body: some View {
         NavigationStack {
@@ -68,6 +74,23 @@ struct EnvironmentPickerSheet: View {
         ) { result in
             Task { await handleFileImport(result) }
         }
+        .confirmationDialog(
+            "Delete Imported Environment?",
+            isPresented: Binding(
+                get: { pendingDeletion != nil },
+                set: { if !$0 { pendingDeletion = nil } }
+            ),
+            titleVisibility: .visible,
+            presenting: pendingDeletion
+        ) { deletion in
+            Button("Delete", role: .destructive) {
+                pendingDeletion = nil
+                Task { await deleteAsset(id: deletion.id) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { deletion in
+            Text("Delete \(deletion.name)? This removes the imported environment from disk.")
+        }
     }
 
     // MARK: - Content Types
@@ -104,7 +127,7 @@ struct EnvironmentPickerSheet: View {
                         dismiss()
                     },
                     onDelete: asset.sourceType == .imported ? {
-                        Task { await deleteAsset(asset) }
+                        pendingDeletion = PendingDeletion(id: asset.id, name: asset.name)
                     } : nil
                 )
             }
@@ -198,9 +221,9 @@ struct EnvironmentPickerSheet: View {
         }
     }
 
-    private func deleteAsset(_ asset: EnvironmentAsset) async {
+    private func deleteAsset(id: String) async {
         do {
-            try await appState.environmentCatalogManager.deleteAsset(id: asset.id)
+            try await appState.environmentCatalogManager.deleteAsset(id: id)
             await coalescedLoadEnvironments()
         } catch {
             importError = "Failed to delete: \(error.localizedDescription)"

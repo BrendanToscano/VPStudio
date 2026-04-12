@@ -109,6 +109,9 @@ private struct TestScreenTile: View {
             }
         }
         .buttonStyle(.plain)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(screen.title), \(screen.subtitle)")
+        .accessibilityHint("Opens the \(screen.title) preview screen.")
         #if os(visionOS)
         .hoverEffect(.lift)
         #endif
@@ -721,10 +724,9 @@ private struct TestDownloadsView: View {
                             Spacer()
 
                             if i == 0 {
-                                Button(action: {}) {
-                                    Image(systemName: "xmark.circle")
-                                        .foregroundStyle(.secondary)
-                                }
+                                Image(systemName: "xmark.circle")
+                                    .foregroundStyle(.secondary)
+                                    .accessibilityHidden(true)
                             } else {
                                 Image(systemName: "checkmark.circle.fill")
                                     .foregroundStyle(.green)
@@ -800,6 +802,9 @@ private struct TestPlayerView: View {
                         VStack(spacing: 4) {
                             Slider(value: .constant(0.35), in: 0...1)
                                 .tint(.white)
+                                .accessibilityLabel("Playback position")
+                                .accessibilityValue("35 percent")
+                                .accessibilityHint("Preview-only playback progress in test mode.")
                             HStack {
                                 Text("58:21")
                                 Spacer()
@@ -815,6 +820,9 @@ private struct TestPlayerView: View {
                             Slider(value: .constant(0.7), in: 0...1)
                                 .frame(width: 80)
                                 .tint(.white)
+                                .accessibilityLabel("Volume")
+                                .accessibilityValue("70 percent")
+                                .accessibilityHint("Preview-only volume level in test mode.")
 
                             Spacer()
 

@@ -48,6 +48,7 @@ struct ViewModelTaskLifecycleTests {
         #expect(source.contains("tmdbReloadTask = Task { await reloadDetailForLatestTMDBKey() }"))
         #expect(source.contains("libraryReloadTask?.cancel()"))
         #expect(source.contains("libraryReloadTask = Task { await vm.reloadLibraryState() }"))
+        #expect(source.contains(".watchHistoryDidChange"))
         #expect(source.contains("feedbackReloadTask?.cancel()"))
         #expect(source.contains("feedbackReloadTask = Task { await vm.reloadFeedbackState() }"))
     }
@@ -169,6 +170,44 @@ struct ViewModelTaskLifecycleTests {
     }
 
     @Test
+    func searchViewUsesBrowseAwareEmptyStateCopy() throws {
+        let source = try contents(of: "VPStudio/Views/Windows/Search/SearchView.swift")
+        #expect(source.contains("ExploreEmptyView(query: emptyStateQuery)"))
+        #expect(source.contains("private var emptyStateQuery: String"))
+    }
+
+    @Test
+    func contentViewDoesNotPostMainWindowPlayerDismissalNotification() throws {
+        let source = try contents(of: "VPStudio/Views/Windows/ContentView.swift")
+        #expect(!source.contains("NotificationCenter.default.post(name: .mainWindowDidActivate, object: nil)"))
+        #expect(!source.contains("dismissWindow(id: \"player\")"))
+        #expect(!source.contains("terminateActivePlayerSession()"))
+    }
+
+    @Test
+    func quickStartPromptRoutesExploreNowToExploreAndOnlyShowsOnDiscover() throws {
+        let source = try contents(of: "VPStudio/Views/Windows/ContentView.swift")
+        #expect(source.contains("Label(\"Explore Now\", systemImage: \"play.fill\")"))
+        #expect(source.contains("appState.selectedTab = .search"))
+        #expect(source.contains("appState.isShowingSetup = true"))
+        #expect(source.contains("if isShowingQuickStartPrompt, state.selectedTab == .discover"))
+    }
+
+    @Test
+    func contentViewConfiguresDiscoverViewModelWithTheSharedDatabase() throws {
+        let source = try contents(of: "VPStudio/Views/Windows/ContentView.swift")
+        #expect(source.contains("discoverViewModel.configure(database: appState.database)"))
+    }
+
+    @Test
+    func playerViewHandlesDedicatedPlayerDismissalFromThePlayerLifecycle() throws {
+        let source = try contents(of: "VPStudio/Views/Windows/Player/PlayerView.swift")
+        #expect(source.contains("dismissWindow(id: \"player\")"))
+        #expect(source.contains("PlayerLifecyclePolicy.closesDedicatedPlayerWindowOnBack"))
+        #expect(source.contains("PlayerLifecyclePolicy.dismissesCurrentPresentationOnBack"))
+    }
+
+    @Test
     func downloadsViewCoalescesNotificationReloadsAndCancelsOnDisappear() throws {
         let source = try contents(of: "VPStudio/Views/Windows/Downloads/DownloadsView.swift")
         #expect(source.contains("@State private var reloadTask: Task<Void, Never>?"))
@@ -177,6 +216,36 @@ struct ViewModelTaskLifecycleTests {
         #expect(source.contains("reloadTask = Task {"))
         #expect(source.contains("await vm.load()"))
         #expect(source.contains("await performQADownloadActionIfNeeded(vm)"))
+    }
+
+    @Test
+    func downloadsViewRequiresConfirmationBeforeRemovingSingleTask() throws {
+        let source = try contents(of: "VPStudio/Views/Windows/Downloads/DownloadsView.swift")
+        #expect(source.contains("confirmDeleteTaskID = task.id"))
+        #expect(source.contains(".confirmationDialog("))
+        #expect(source.contains("Delete Download?"))
+        #expect(source.contains("Task { await vm.remove(task) }"))
+    }
+
+    @Test
+    func imdbImportPreviewStagingDoesNotAutoImport() throws {
+        let source = try contents(of: "VPStudio/Views/Windows/Settings/Destinations/IMDbImportSettingsView.swift")
+        #expect(source.contains(".fileImporter("))
+        #expect(source.contains("selectedFileURL = url"))
+        #expect(source.contains("await analyzeCSVHeaders(url: url)"))
+        #expect(source.contains("previewDetected = true"))
+        #expect(source.contains("isShowingPreview = false"))
+    }
+
+    @Test
+    func seriesDetailEpisodeCardsUseSemanticButtonsAndAccessibility() throws {
+        let source = try contents(of: "VPStudio/Views/Windows/Detail/SeriesDetailLayout.swift")
+        #expect(source.contains("private func episodeCard(episode: Episode) -> some View"))
+        #expect(source.contains("return Button {"))
+        #expect(source.contains("viewModel.selectEpisode(episode)"))
+        #expect(source.contains(".contextMenu {"))
+        #expect(source.contains(".accessibilityLabel(\"Episode"))
+        #expect(source.contains("Press and hold for watched options."))
     }
 
     @Test

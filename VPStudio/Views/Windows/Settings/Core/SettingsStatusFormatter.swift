@@ -23,7 +23,10 @@ struct SettingsStatusSnapshot: Equatable, Sendable {
     var hasGeminiKey = false
     var hasOllamaEndpoint = true
     var hasOpenRouterKey = false
+    var isLocalAIEnabled = false
+    var hasUsableLocalModel = false
     var hasTraktCredentials = false
+    var hasTraktConnection = false
     var hasSimklCredentials = false
 }
 
@@ -60,38 +63,53 @@ enum SettingsStatusFormatter {
             return SettingsDestinationStatus(message: "API key required", kind: .warning)
 
         case .ai:
-            let provider = snapshot.aiProvider.displayName
-            let isConfigured: Bool
-            switch snapshot.aiProvider {
-            case .openAI:
-                isConfigured = snapshot.hasOpenAIKey
-            case .anthropic:
-                isConfigured = snapshot.hasAnthropicKey
-            case .ollama:
-                isConfigured = snapshot.hasOllamaEndpoint
-            case .gemini:
-                isConfigured = snapshot.hasGeminiKey
-            case .openRouter:
-                isConfigured = snapshot.hasOpenRouterKey
-            case .local:
-                isConfigured = true
+            let availableProviders = availableAIProviders(for: snapshot)
+            let resolvedProvider = AIAssistantManager.resolvedDefaultProvider(
+                preferredProvider: snapshot.aiProvider,
+                availableProviders: availableProviders
+            )
+
+            if let resolvedProvider {
+                if resolvedProvider == snapshot.aiProvider {
+                    return SettingsDestinationStatus(
+                        message: "\(resolvedProvider.displayName) configured",
+                        kind: .positive
+                    )
+                }
+
+                return SettingsDestinationStatus(
+                    message: "Using \(resolvedProvider.displayName)",
+                    kind: .warning
+                )
             }
-            if isConfigured {
-                return SettingsDestinationStatus(message: "\(provider) configured", kind: .positive)
+
+            if snapshot.aiProvider == .local {
+                let provider = snapshot.aiProvider.displayName
+                let message = snapshot.isLocalAIEnabled
+                    ? "\(provider) needs a downloaded model"
+                    : "\(provider) is disabled"
+                return SettingsDestinationStatus(message: message, kind: .warning)
             }
-            return SettingsDestinationStatus(message: "\(provider) needs credentials", kind: .warning)
+
+            return SettingsDestinationStatus(
+                message: "\(snapshot.aiProvider.displayName) needs credentials",
+                kind: .warning
+            )
 
         case .trakt:
-            if snapshot.hasTraktCredentials {
+            if snapshot.hasTraktConnection {
                 return SettingsDestinationStatus(message: "Connected", kind: .positive)
+            }
+            if snapshot.hasTraktCredentials {
+                return SettingsDestinationStatus(message: "Ready to connect", kind: .neutral)
             }
             return SettingsDestinationStatus(message: "Not connected", kind: .warning)
 
         case .simkl:
             if snapshot.hasSimklCredentials {
-                return SettingsDestinationStatus(message: "Connected", kind: .positive)
+                return SettingsDestinationStatus(message: "Unavailable in this build", kind: .neutral)
             }
-            return SettingsDestinationStatus(message: "Not connected", kind: .warning)
+            return SettingsDestinationStatus(message: "Unavailable in this build", kind: .neutral)
 
         case .imdbImport:
             return SettingsDestinationStatus(message: "CSV import via IMDb exports", kind: .neutral)
@@ -127,5 +145,19 @@ enum SettingsStatusFormatter {
         case .testMode:
             return SettingsDestinationStatus(message: "9 screens to preview", kind: .neutral)
         }
+    }
+
+    private static func availableAIProviders(for snapshot: SettingsStatusSnapshot) -> [AIProviderKind] {
+        var cloudProviders: [AIProviderKind] = []
+        if snapshot.hasAnthropicKey { cloudProviders.append(.anthropic) }
+        if snapshot.hasOpenAIKey { cloudProviders.append(.openAI) }
+        if snapshot.hasGeminiKey { cloudProviders.append(.gemini) }
+        if snapshot.hasOpenRouterKey { cloudProviders.append(.openRouter) }
+
+        return AIAssistantManager.availableDefaultProviders(
+            configuredCloudProviders: cloudProviders,
+            hasOllamaEndpoint: snapshot.hasOllamaEndpoint,
+            hasUsableLocalProvider: snapshot.isLocalAIEnabled && snapshot.hasUsableLocalModel
+        )
     }
 }

@@ -25,7 +25,7 @@ Quick install summary:
 
 1. Launch VPStudio.
 2. In the first-run prompt, choose:
-   - `Explore Now` for immediate use, or
+   - `Explore Now` to browse local sections immediately, or
    - `Run Setup` to configure services now.
 3. Open `Discover` or `Search`.
 4. Add an item to your Library, Watchlist, or Favorites.
@@ -35,7 +35,8 @@ Optional setup for full streaming features:
 
 1. Open `Settings` -> `Quick Actions` -> `Run Setup Wizard`.
 2. Add TMDB and Debrid credentials.
-3. Configure optional Trakt/Simkl/AI/Subtitles integrations.
+3. Configure optional Trakt/AI/Subtitles integrations.
+4. Use the Simkl settings screen only to review or clear saved authorization; Simkl is cleanup-only in this build and sync/scrobbling are unavailable.
 
 ## 2) Main Navigation
 
@@ -45,7 +46,7 @@ VPStudio is organized into these main areas:
 - `Search`: title search and browsing results.
 - `Library`: your saved content and imports.
 - `Downloads`: downloaded items and progress state.
-- `Environments` (visionOS): immersive environment controls.
+- `Environments` (visionOS): immersive environment controls; selection remains unstable.
 - `Settings`: integrations, sync, playback, and app configuration.
 
 ## 3) Importing Content
@@ -53,7 +54,7 @@ VPStudio is organized into these main areas:
 1. Go to `Library`.
 2. Select the import action.
 3. Choose your file or folder source (for example CSV export files).
-4. Confirm import target/folder behavior if prompted.
+4. Confirm the import destination or target folder.
 5. Wait for completion, then refresh the view if needed.
 
 If expected items do not appear:
@@ -116,7 +117,8 @@ Common configuration areas:
 
 - TMDB metadata key
 - Debrid provider tokens
-- Trakt/Simkl sync
+- Trakt sync
+- Simkl cleanup-only surface in this build
 - AI provider preferences (optional)
 - Subtitle provider setup
 - Playback behavior
@@ -129,8 +131,13 @@ If onboarding needs to be repeated, use:
 
 When sync is configured:
 
-- Watch progress and list changes can be mirrored across services.
+- Watch progress and list changes can be mirrored through configured services such as Trakt.
 - Token/auth expiration can stop sync until reconnected.
+
+Simkl note:
+
+- Simkl is cleanup-only in this build, so you can review or clear saved authorization.
+- Simkl sync and scrobbling are unavailable in this build.
 
 If sync appears stale:
 
@@ -167,7 +174,7 @@ If sync appears stale:
 ## 11) FAQ
 
 ### Do I need all integrations to use VPStudio?
-No. You can explore the app without any integrations and connect services later.
+No. You can browse local sections without integrations and connect services later. TMDB is still required for Discover/Search metadata.
 
 ### Can I change settings after onboarding?
 Yes. Everything can be updated in `Settings`.

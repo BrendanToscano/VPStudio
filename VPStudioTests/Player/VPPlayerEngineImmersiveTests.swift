@@ -1,3 +1,4 @@
+import CoreGraphics
 import Testing
 @testable import VPStudio
 
@@ -23,6 +24,52 @@ struct VPPlayerEngineImmersiveTests {
         engine.currentTitle = "Movie"
         engine.currentTitle = nil
         #expect(engine.currentTitle == nil)
+    }
+
+    @Test("resetSessionState clears per-session playback state")
+    @MainActor func resetSessionStateClearsPlaybackState() {
+        let engine = VPPlayerEngine()
+        engine.currentTitle = "Movie"
+        engine.currentTime = 42
+        engine.duration = 120
+        engine.bufferedPercent = 0.5
+        engine.audioTracks = [
+            .init(id: 1, name: "English", language: "en", codec: "aac")
+        ]
+        engine.subtitleTracks = [
+            .init(id: 2, name: "English Subs", language: "en", codec: "srt")
+        ]
+        engine.selectedAudioTrack = 1
+        engine.selectedSubtitleTrack = 2
+        engine.subtitlesEnabled = true
+        engine.currentSubtitleText = "Caption"
+        engine.videoSize = CGSize(width: 1920, height: 1080)
+        engine.fps = 24
+        engine.videoBitrate = 6_000_000
+        engine.stereoMode = .sideBySide
+        engine.chapters = [
+            .init(id: 1, title: "Intro", startTime: 0, endTime: 10)
+        ]
+        engine.error = "Boom"
+
+        engine.resetSessionState()
+
+        #expect(engine.currentTitle == nil)
+        #expect(engine.currentTime == 0)
+        #expect(engine.duration == 0)
+        #expect(engine.bufferedPercent == 0)
+        #expect(engine.audioTracks.isEmpty)
+        #expect(engine.subtitleTracks.isEmpty)
+        #expect(engine.selectedAudioTrack == 0)
+        #expect(engine.selectedSubtitleTrack == -1)
+        #expect(engine.subtitlesEnabled == false)
+        #expect(engine.currentSubtitleText == nil)
+        #expect(engine.videoSize == .zero)
+        #expect(engine.fps == 0)
+        #expect(engine.videoBitrate == 0)
+        #expect(engine.stereoMode == .mono)
+        #expect(engine.chapters.isEmpty)
+        #expect(engine.error == nil)
     }
 
     @Test("progressPercent returns 0 when duration is 0")

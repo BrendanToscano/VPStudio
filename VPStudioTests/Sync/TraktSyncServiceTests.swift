@@ -119,6 +119,7 @@ struct TraktTokenRefreshCallbackTests {
             }
         )
 
+        _ = await service.getAuthorizationURL()
         try await service.exchangeCode("code-123")
 
         #expect(callbackState.refreshedAccess == "new-access")

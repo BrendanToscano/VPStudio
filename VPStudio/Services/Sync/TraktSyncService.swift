@@ -1,4 +1,6 @@
+import CryptoKit
 import Foundation
+import Security
 
 // MARK: - Bundled Trakt App Credentials
 
@@ -13,8 +15,20 @@ enum TraktDefaults {
         userClientId: String?,
         userClientSecret: String?
     ) -> (clientId: String, clientSecret: String)? {
-        let id = (userClientId?.isEmpty == false) ? userClientId! : clientId
-        let secret = (userClientSecret?.isEmpty == false) ? userClientSecret! : clientSecret
+        let id: String
+        if let userClientId, !userClientId.isEmpty {
+            id = userClientId
+        } else {
+            id = clientId
+        }
+
+        let secret: String
+        if let userClientSecret, !userClientSecret.isEmpty {
+            secret = userClientSecret
+        } else {
+            secret = clientSecret
+        }
+
         guard !id.isEmpty, id != "TRAKT_CLIENT_ID_PLACEHOLDER",
               !secret.isEmpty, secret != "TRAKT_CLIENT_SECRET_PLACEHOLDER"
         else { return nil }
@@ -28,6 +42,14 @@ enum TraktDefaults {
 
 /// Trakt.tv sync service for watchlist, history, and scrobbling
 actor TraktSyncService {
+    private static let authorizationRedirectURI = "urn:ietf:wg:oauth:2.0:oob"
+    private static let defaultSession: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 30
+        configuration.timeoutIntervalForResource = 90
+        return URLSession(configuration: configuration)
+    }()
+
     private let clientId: String
     private let clientSecret: String
     private let baseURL = "https://api.trakt.tv"
@@ -39,39 +61,47 @@ actor TraktSyncService {
     init(
         clientId: String,
         clientSecret: String,
-        session: URLSession = .shared,
+        session: URLSession? = nil,
         onTokensRefreshed: (@Sendable (String, String?) async -> Void)? = nil
     ) {
         self.clientId = clientId
         self.clientSecret = clientSecret
-        self.session = session
+        self.session = session ?? Self.defaultSession
         self.onTokensRefreshed = onTokensRefreshed
     }
 
     // MARK: - OAuth (legacy code exchange)
 
     func getAuthorizationURL() -> URL? {
+        let authorizationSession = beginAuthorizationSession()
         var components = URLComponents(string: "https://trakt.tv/oauth/authorize")
         components?.queryItems = [
             URLQueryItem(name: "response_type", value: "code"),
-            URLQueryItem(name: "client_id", value: clientId),
-            URLQueryItem(name: "redirect_uri", value: "urn:ietf:wg:oauth:2.0:oob"),
+            URLQueryItem(name: "client_id", value: self.clientId),
+            URLQueryItem(name: "redirect_uri", value: Self.authorizationRedirectURI),
+            URLQueryItem(name: "state", value: authorizationSession.state),
+            URLQueryItem(name: "code_challenge", value: authorizationSession.codeChallenge),
+            URLQueryItem(name: "code_challenge_method", value: authorizationSession.codeChallengeMethod),
         ]
         return components?.url
     }
 
-    func exchangeCode(_ code: String) async throws {
+    func exchangeCode(_ code: String, returnedState: String? = nil) async throws {
+        let trimmedCode = code.trimmingCharacters(in: .whitespacesAndNewlines)
+        let authorizationSession = try validateAuthorizationSession(returnedState: returnedState)
         let body: [String: String] = [
-            "code": code,
-            "client_id": clientId,
-            "client_secret": clientSecret,
-            "redirect_uri": "urn:ietf:wg:oauth:2.0:oob",
+            "code": trimmedCode,
+            "client_id": self.clientId,
+            "client_secret": self.clientSecret,
+            "redirect_uri": Self.authorizationRedirectURI,
             "grant_type": "authorization_code",
+            "code_verifier": authorizationSession.codeVerifier,
         ]
 
         let response: TokenResponse = try await post(path: "/oauth/token", body: body, auth: false)
         accessToken = response.accessToken
         refreshToken = response.refreshToken
+        clearAuthorizationSession()
         await onTokensRefreshed?(response.accessToken, response.refreshToken)
     }
 
@@ -80,7 +110,7 @@ actor TraktSyncService {
     /// Requests a device code from Trakt. The user visits the verification URL
     /// and enters the user code to authorize the app.
     func requestDeviceCode() async throws -> DeviceCodeResponse {
-        let body: [String: String] = ["client_id": clientId]
+        let body: [String: String] = ["client_id": self.clientId]
         return try await post(path: "/oauth/device/code", body: body, auth: false)
     }
 
@@ -89,11 +119,11 @@ actor TraktSyncService {
     func pollDeviceToken(deviceCode: String) async throws -> DevicePollResult {
         let body: [String: String] = [
             "code": deviceCode,
-            "client_id": clientId,
-            "client_secret": clientSecret,
+            "client_id": self.clientId,
+            "client_secret": self.clientSecret,
         ]
 
-        guard let url = URL(string: baseURL + "/oauth/device/token") else {
+        guard let url = URL(string: self.baseURL + "/oauth/device/token") else {
             throw TraktError.invalidURL
         }
 
@@ -149,9 +179,9 @@ actor TraktSyncService {
 
         let body: [String: String] = [
             "refresh_token": refreshToken,
-            "client_id": clientId,
-            "client_secret": clientSecret,
-            "redirect_uri": "urn:ietf:wg:oauth:2.0:oob",
+            "client_id": self.clientId,
+            "client_secret": self.clientSecret,
+            "redirect_uri": Self.authorizationRedirectURI,
             "grant_type": "refresh_token",
         ]
 
@@ -160,7 +190,7 @@ actor TraktSyncService {
         if let newRefresh = response.refreshToken, !newRefresh.isEmpty {
             self.refreshToken = newRefresh
         }
-        await onTokensRefreshed?(accessToken!, self.refreshToken)
+        await onTokensRefreshed?(response.accessToken, self.refreshToken)
     }
 
     // MARK: - Sync
@@ -351,7 +381,7 @@ actor TraktSyncService {
         var request = URLRequest(url: url)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("2", forHTTPHeaderField: "trakt-api-version")
-        request.setValue(clientId, forHTTPHeaderField: "trakt-api-key")
+        request.setValue(self.clientId, forHTTPHeaderField: "trakt-api-key")
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
 
         let (data, response) = try await session.data(for: request)
@@ -400,7 +430,7 @@ actor TraktSyncService {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("2", forHTTPHeaderField: "trakt-api-version")
-        request.setValue(clientId, forHTTPHeaderField: "trakt-api-key")
+        request.setValue(self.clientId, forHTTPHeaderField: "trakt-api-key")
         if let token, !token.isEmpty {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
@@ -447,7 +477,7 @@ actor TraktSyncService {
         request.httpMethod = "DELETE"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("2", forHTTPHeaderField: "trakt-api-version")
-        request.setValue(clientId, forHTTPHeaderField: "trakt-api-key")
+        request.setValue(self.clientId, forHTTPHeaderField: "trakt-api-key")
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
 
         let (_, response) = try await session.data(for: request)
@@ -463,6 +493,107 @@ actor TraktSyncService {
         default:
             throw TraktError.httpError(http.statusCode)
         }
+    }
+
+    private func beginAuthorizationSession() -> PendingOAuthAuthorizationSession {
+        let authorizationSession = PendingOAuthAuthorizationSession.make()
+        TraktAuthorizationSessionStore.store(authorizationSession, for: self.clientId)
+        return authorizationSession
+    }
+
+    private func validateAuthorizationSession(returnedState: String?) throws -> PendingOAuthAuthorizationSession {
+        guard let authorizationSession = TraktAuthorizationSessionStore.session(for: self.clientId) else {
+            throw TraktError.authorizationSessionMissing
+        }
+        guard !authorizationSession.isExpired else {
+            clearAuthorizationSession()
+            throw TraktError.authorizationSessionExpired
+        }
+        if let returnedState, returnedState != authorizationSession.state {
+            clearAuthorizationSession()
+            throw TraktError.authorizationStateMismatch
+        }
+        return authorizationSession
+    }
+
+    private func clearAuthorizationSession() {
+        TraktAuthorizationSessionStore.remove(clientId: self.clientId)
+    }
+}
+
+private struct PendingOAuthAuthorizationSession: Sendable {
+    private static let lifetime: TimeInterval = 15 * 60
+
+    let state: String
+    let codeVerifier: String
+    let codeChallenge: String
+    let codeChallengeMethod = "S256"
+    let createdAt: Date
+
+    var isExpired: Bool {
+        createdAt.addingTimeInterval(Self.lifetime) < Date()
+    }
+
+    static func make() -> PendingOAuthAuthorizationSession {
+        let verifier = OAuthSecurityRandom.urlSafeToken(byteCount: 32)
+        return PendingOAuthAuthorizationSession(
+            state: OAuthSecurityRandom.urlSafeToken(byteCount: 16),
+            codeVerifier: verifier,
+            codeChallenge: OAuthPKCE.codeChallenge(for: verifier),
+            createdAt: Date()
+        )
+    }
+}
+
+private enum TraktAuthorizationSessionStore {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var sessions: [String: PendingOAuthAuthorizationSession] = [:]
+
+    static func store(_ session: PendingOAuthAuthorizationSession, for clientId: String) {
+        lock.lock()
+        sessions[clientId] = session
+        lock.unlock()
+    }
+
+    static func session(for clientId: String) -> PendingOAuthAuthorizationSession? {
+        lock.lock()
+        defer { lock.unlock() }
+        return sessions[clientId]
+    }
+
+    static func remove(clientId: String) {
+        lock.lock()
+        sessions.removeValue(forKey: clientId)
+        lock.unlock()
+    }
+}
+
+private enum OAuthSecurityRandom {
+    static func urlSafeToken(byteCount: Int) -> String {
+        var bytes = [UInt8](repeating: 0, count: byteCount)
+        let status = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        if status != errSecSuccess {
+            for index in bytes.indices {
+                bytes[index] = UInt8.random(in: .min ... .max)
+            }
+        }
+        return Data(bytes).base64URLEncodedString()
+    }
+}
+
+private enum OAuthPKCE {
+    static func codeChallenge(for verifier: String) -> String {
+        let digest = SHA256.hash(data: Data(verifier.utf8))
+        return Data(digest).base64URLEncodedString()
+    }
+}
+
+private extension Data {
+    func base64URLEncodedString() -> String {
+        base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
     }
 }
 
@@ -631,6 +762,9 @@ enum TraktError: LocalizedError {
     case httpError(Int)
     case unauthorized
     case notConnected
+    case authorizationSessionMissing
+    case authorizationSessionExpired
+    case authorizationStateMismatch
     case deviceCodeExpired
     case deviceCodeDenied
     case deviceCodeInvalid
@@ -642,6 +776,9 @@ enum TraktError: LocalizedError {
         case .httpError(let code): return "Trakt API error: HTTP \(code)"
         case .unauthorized: return "Trakt authorization expired"
         case .notConnected: return "Not connected to Trakt"
+        case .authorizationSessionMissing: return "Start Trakt authorization again before entering the code."
+        case .authorizationSessionExpired: return "The Trakt authorization session expired. Start the login flow again."
+        case .authorizationStateMismatch: return "The Trakt authorization response did not match the active login session."
         case .deviceCodeExpired: return "Authorization code expired. Try again."
         case .deviceCodeDenied: return "Authorization was denied by the user."
         case .deviceCodeInvalid: return "Invalid device code. Try again."

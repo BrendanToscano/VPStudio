@@ -113,6 +113,30 @@ struct IndexerConnectivityTests {
         }
     }
 
+    @Test func httpBaseURLsAreRejectedBeforeNetworkCall() async {
+        let config = IndexerConfig(
+            id: "torznab-http-1",
+            name: "HTTP Torznab",
+            indexerType: .torznab,
+            baseURL: "http://indexer.example",
+            apiKey: "key",
+            isActive: true,
+            priority: 0
+        )
+
+        do {
+            _ = try IndexerConnectivityTester.makeRequest(for: config)
+            Issue.record("Expected IndexerConnectivityError.invalidBaseURL")
+        } catch let error as IndexerConnectivityError {
+            if case .invalidBaseURL = error {
+                return
+            }
+            Issue.record("Unexpected IndexerConnectivityError: \(error)")
+        } catch {
+            Issue.record("Unexpected error type: \(error)")
+        }
+    }
+
     @Test func torznabMissingApiKeyIsRejectedBeforeNetworkCall() async {
         let config = IndexerConfig(
             id: "torznab-2",
@@ -203,6 +227,35 @@ struct IndexerConnectivityTests {
         #expect(state.capturedPath.hasSuffix("/api/v2.0/indexers/all/results/torznab/api"))
     }
 
+    @Test func zileanConnectionUsesConfiguredEndpointPath() async throws {
+        final class RequestState: @unchecked Sendable {
+            var capturedPath: String = ""
+        }
+        let state = RequestState()
+
+        let session = makeStubSession { request in
+            let url = try #require(request.url)
+            state.capturedPath = url.path
+            let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (response, Data("[]".utf8))
+        }
+
+        let config = IndexerConfig(
+            id: "zilean-2",
+            name: "Zilean",
+            indexerType: .zilean,
+            baseURL: "https://zilean.example",
+            apiKey: nil,
+            isActive: true,
+            priority: 0,
+            providerSubtype: .customTorznab,
+            endpointPath: "/custom-api"
+        )
+
+        try await IndexerConnectivityTester.testConnection(for: config, session: session)
+        #expect(state.capturedPath.hasSuffix("/custom-api/dmm/search"))
+    }
+
     @Test func stremioConnectionTargetsManifestEndpoint() async throws {
         final class RequestState: @unchecked Sendable {
             var capturedPath: String = ""
@@ -213,7 +266,8 @@ struct IndexerConnectivityTests {
             let url = try #require(request.url)
             state.capturedPath = url.path
             let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            return (response, Data(#"{"id":"addon.test"}"#.utf8))
+            let body = #"{"catalogs":[{"id":"search","type":"movie","extra":[{"name":"search"}]}]}"#
+            return (response, Data(body.utf8))
         }
 
         let config = IndexerConfig(
@@ -232,6 +286,40 @@ struct IndexerConnectivityTests {
 
         try await IndexerConnectivityTester.testConnection(for: config, session: session)
         #expect(state.capturedPath.hasSuffix("/manifest.json"))
+    }
+
+    @Test func stremioConnectionRejectsIncompatibleManifest() async {
+        let session = makeStubSession { request in
+            let url = try #require(request.url)
+            let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (response, Data(#"{"id":"addon.test"}"#.utf8))
+        }
+
+        let config = IndexerConfig(
+            id: "stremio-2",
+            name: "Stremio",
+            indexerType: .stremio,
+            baseURL: "https://stremio-addon.example",
+            apiKey: nil,
+            isActive: true,
+            priority: 0,
+            providerSubtype: .stremioAddon,
+            endpointPath: "/manifest.json",
+            categoryFilter: nil,
+            apiKeyTransport: .query
+        )
+
+        do {
+            try await IndexerConnectivityTester.testConnection(for: config, session: session)
+            Issue.record("Expected IndexerConnectivityError.incompatibleManifest")
+        } catch let error as IndexerConnectivityError {
+            if case .incompatibleManifest = error {
+                return
+            }
+            Issue.record("Unexpected IndexerConnectivityError: \(error)")
+        } catch {
+            Issue.record("Unexpected error type: \(error)")
+        }
     }
 
     @Test func ytsConnectionUsesReachableFallbackHost() throws {

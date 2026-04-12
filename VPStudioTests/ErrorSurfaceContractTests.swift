@@ -71,6 +71,7 @@ struct ErrorSurfaceContractTests {
         #expect(source.contains("saveErrorMessage") == false)
         #expect(source.contains("testMessage") == false)
         #expect(source.contains(".alert(") == false)
+        #expect(source.contains("try? await appState.database.setSetting") == false)
     }
 
     @Test
@@ -82,6 +83,13 @@ struct ErrorSurfaceContractTests {
         #expect(source.contains("persistStringSetting(key:"))
         #expect(source.contains("persistBoolSetting(key:"))
         #expect(source.contains("Task { try? await appState.settingsManager.set") == false)
+    }
+
+    @Test
+    func debridSettingsDoNotSilentlySwallowSecretCleanupFailures() throws {
+        let source = try contents(of: "VPStudio/Views/Windows/Settings/Destinations/DebridSettingsView.swift")
+
+        #expect(source.contains("try? await appState.secretStore.deleteSecret") == false)
     }
 
     private func contents(of relativePath: String) throws -> String {

@@ -73,7 +73,7 @@ actor LocalInferenceEngine {
 
     func checkMemory(for modelID: String) async -> MemoryAvailability {
         guard let model = try? await catalogStore.model(id: modelID) else { return .insufficient(availableMB: 0, requiredMB: 0) }
-        let availableBytes = os_proc_available_memory()
+        let availableBytes = availableMemoryBytes()
         let availableMB = Int(availableBytes / 1_048_576)
         let requiredMB = model.minMemoryMB
 
@@ -136,6 +136,14 @@ actor LocalInferenceEngine {
         idleUnloadTask = nil
         // CoreML handles its own memory cleanup on model dealloc
         logger.info("Model unloaded: \(name)")
+    }
+
+    private func availableMemoryBytes() -> UInt64 {
+#if os(macOS)
+        ProcessInfo.processInfo.physicalMemory
+#else
+        UInt64(os_proc_available_memory())
+#endif
     }
 
     /// Force unload on memory pressure — no hysteresis check.
@@ -227,7 +235,7 @@ enum LocalInferenceError: LocalizedError {
         case .insufficientMemory(let avail, let req):
             return "Insufficient memory: \(avail)MB available, \(req)MB required."
         case .generationTimeout:
-            return "Generation timed out after 2 minutes."
+            return "Generation timed out after 5 minutes."
         case .inferenceError(let msg):
             return "Inference error: \(msg)"
         }

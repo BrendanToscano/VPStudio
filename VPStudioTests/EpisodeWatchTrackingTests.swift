@@ -118,7 +118,7 @@ struct EpisodeWatchTrackingDatabaseTests {
         #expect(history?.title == "S02E05 - Title")
     }
 
-    @Test func markEpisodeWatchedIdempotent() async throws {
+    @Test func markEpisodeWatchedAppendsRewatchButKeepsSingleLatestState() async throws {
         let db = try await makeDatabase()
         let mediaId = "tt200002"
         let episodeId = "ep-s01e01"
@@ -127,7 +127,57 @@ struct EpisodeWatchTrackingDatabaseTests {
         try await db.markEpisodeWatched(mediaId: mediaId, episodeId: episodeId, title: "Pilot")
 
         let states = try await db.fetchEpisodeWatchStates(mediaId: mediaId)
+        let completedEntries = try await db.fetchCompletedWatchHistory(limit: 10)
+            .filter { $0.mediaId == mediaId && $0.episodeId == episodeId }
         #expect(states.count == 1)
+        #expect(completedEntries.count == 2)
+    }
+
+    @Test func markMovieWatchedCreatesCompletedMovieEntry() async throws {
+        let db = try await makeDatabase()
+
+        try await db.markMovieWatched(mediaId: "ttmovie1", title: "Movie One")
+
+        let history = try await db.fetchWatchHistory(mediaId: "ttmovie1")
+        #expect(history?.episodeId == nil)
+        #expect(history?.isCompleted == true)
+        #expect(history?.title == "Movie One")
+    }
+
+    @Test func markMovieUnwatchedDeletesAllMovieEntries() async throws {
+        let db = try await makeDatabase()
+
+        try await db.markMovieWatched(mediaId: "ttmovie2", title: "Movie Two")
+        try await db.saveWatchHistory(
+            WatchHistory(
+                id: "ttmovie2-progress",
+                mediaId: "ttmovie2",
+                title: "Movie Two",
+                progress: 120,
+                duration: 7200,
+                watchedAt: Date(),
+                isCompleted: false
+            )
+        )
+
+        try await db.markMovieUnwatched(mediaId: "ttmovie2")
+
+        #expect(try await db.fetchWatchHistory(mediaId: "ttmovie2") == nil)
+    }
+
+    @Test func markSeriesUnwatchedDeletesOnlyEpisodeEntriesForMedia() async throws {
+        let db = try await makeDatabase()
+
+        try await db.markEpisodeWatched(mediaId: "ttseries1", episodeId: "s1e1", title: "S01E01")
+        try await db.markEpisodeWatched(mediaId: "ttseries1", episodeId: "s1e2", title: "S01E02")
+        try await db.markMovieWatched(mediaId: "ttseries1", title: "Series Summary Entry")
+        try await db.markEpisodeWatched(mediaId: "ttseries2", episodeId: "s1e1", title: "Other Show Episode")
+
+        try await db.markSeriesUnwatched(mediaId: "ttseries1")
+
+        #expect(try await db.fetchEpisodeWatchStates(mediaId: "ttseries1").isEmpty)
+        #expect(try await db.fetchWatchHistory(mediaId: "ttseries1")?.episodeId == nil)
+        #expect(try await db.fetchEpisodeWatchStates(mediaId: "ttseries2")["s1e1"]?.isCompleted == true)
     }
 
     // MARK: - markEpisodeUnwatched
@@ -250,6 +300,22 @@ struct EpisodeWatchTrackingDatabaseTests {
 
 @Suite("Episode Watch Tracking - ViewModel")
 struct EpisodeWatchTrackingViewModelTests {
+    private struct StubDetailMetadataProvider: DetailMetadataProviding {
+        let seasons: [Season]
+        let episodesBySeason: [Int: [Episode]]
+
+        func getDetail(id: String, type: MediaType) async throws -> MediaItem {
+            MediaItem(id: id, type: type, title: "Stub")
+        }
+
+        func getSeasons(tmdbId: Int) async throws -> [Season] {
+            seasons
+        }
+
+        func getEpisodes(tmdbId: Int, season: Int) async throws -> [Episode] {
+            episodesBySeason[season] ?? []
+        }
+    }
 
     private func makeDatabase() async throws -> DatabaseManager {
         let rootDir = FileManager.default.temporaryDirectory
@@ -430,6 +496,65 @@ struct EpisodeWatchTrackingViewModelTests {
     }
 
     @MainActor
+    @Test func markSeriesWatchedLoadsEpisodesAcrossAllKnownSeasons() async throws {
+        let db = try await makeDatabase()
+        let provider = StubDetailMetadataProvider(
+            seasons: [
+                Season(id: 1, seasonNumber: 1, name: "Season 1", overview: nil, posterPath: nil, episodeCount: 2, airDate: nil),
+                Season(id: 2, seasonNumber: 2, name: "Season 2", overview: nil, posterPath: nil, episodeCount: 2, airDate: nil),
+            ],
+            episodesBySeason: [
+                1: [
+                    makeEpisode(id: "s1e1", seasonNumber: 1, episodeNumber: 1, title: "One"),
+                    makeEpisode(id: "s1e2", seasonNumber: 1, episodeNumber: 2, title: "Two"),
+                ],
+                2: [
+                    makeEpisode(id: "s2e1", seasonNumber: 2, episodeNumber: 1, title: "Three"),
+                    makeEpisode(id: "s2e2", seasonNumber: 2, episodeNumber: 2, title: "Four"),
+                ],
+            ]
+        )
+        let appState = AppState(database: db)
+        let vm = DetailViewModel(
+            appState: appState,
+            metadataProviderFactory: { _ in provider }
+        )
+
+        vm.mediaItem = MediaItem(id: "tt-series", type: .series, title: "Stub Show", tmdbId: 42)
+        vm.seasons = provider.seasons
+        vm.selectedSeason = 1
+        vm.episodes = provider.episodesBySeason[1] ?? []
+
+        await vm.markSeriesWatched()
+
+        #expect(vm.episodeWatchStates.count == 4)
+        #expect(vm.episodeWatchStates["s1e1"]?.isCompleted == true)
+        #expect(vm.episodeWatchStates["s2e2"]?.isCompleted == true)
+    }
+
+    @MainActor
+    @Test func markSeriesUnwatchedClearsCompletedEpisodesAcrossSeasons() async throws {
+        let db = try await makeDatabase()
+        let appState = AppState(database: db)
+        let vm = DetailViewModel(appState: appState)
+
+        vm.mediaItem = MediaItem(id: "tt-series-clear", type: .series, title: "Clear Show")
+        vm.seasons = [
+            Season(id: 1, seasonNumber: 1, name: "Season 1", overview: nil, posterPath: nil, episodeCount: 2, airDate: nil),
+            Season(id: 2, seasonNumber: 2, name: "Season 2", overview: nil, posterPath: nil, episodeCount: 1, airDate: nil),
+        ]
+
+        try await db.markEpisodeWatched(mediaId: "tt-series-clear", episodeId: "s1e1", title: "S01E01")
+        try await db.markEpisodeWatched(mediaId: "tt-series-clear", episodeId: "s2e1", title: "S02E01")
+        await vm.loadEpisodeWatchStates()
+
+        await vm.markSeriesUnwatched()
+
+        #expect(vm.episodeWatchStates.isEmpty)
+        #expect(try await db.fetchEpisodeWatchStates(mediaId: "tt-series-clear").isEmpty)
+    }
+
+    @MainActor
     @Test func episodeWatchStatesStartsEmpty() async throws {
         let appState = AppState(testHooks: .init())
         let vm = DetailViewModel(appState: appState)
@@ -455,6 +580,41 @@ struct EpisodeWatchTrackingViewModelTests {
         let episode = makeEpisode(id: "ep-1", seasonNumber: 1, episodeNumber: 1)
         await vm.toggleEpisodeWatched(episode)
         #expect(vm.episodeWatchStates.isEmpty)
+    }
+
+    @MainActor
+    @Test func toggleCurrentWatchStateMarksMovieWatchedAndUnwatched() async throws {
+        let db = try await makeDatabase()
+        let appState = AppState(database: db)
+        let vm = DetailViewModel(appState: appState)
+
+        vm.mediaItem = makeMovieItem(id: "tt-movie-toggle", title: "Toggle Movie")
+
+        #expect(vm.currentWatchStatusState == .notWatched)
+
+        await vm.toggleCurrentWatchState()
+        #expect(vm.currentWatchStatusState == .watched)
+        #expect(try await db.fetchWatchHistory(mediaId: "tt-movie-toggle")?.isCompleted == true)
+
+        await vm.toggleCurrentWatchState()
+        #expect(vm.currentWatchStatusState == .notWatched)
+        #expect(try await db.fetchWatchHistory(mediaId: "tt-movie-toggle") == nil)
+    }
+
+    @MainActor
+    @Test func seriesWatchStateRequiresSelectionBeforeManualToggle() async throws {
+        let db = try await makeDatabase()
+        let appState = AppState(database: db)
+        let vm = DetailViewModel(appState: appState)
+
+        vm.mediaItem = makeSeriesItem(id: "tt-select", title: "Select Show")
+
+        #expect(vm.currentWatchStatusState == .selectionRequired)
+
+        await vm.toggleCurrentWatchState()
+
+        #expect(vm.currentWatchStatusState == .selectionRequired)
+        #expect(vm.mediaLibrary.statusMessage == "Select an episode first.")
     }
 
     @MainActor

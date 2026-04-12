@@ -6,6 +6,21 @@ import Testing
 @MainActor
 struct ExploreUIPolishTests {
 
+    private static func waitUntil(
+        timeout: Duration = .milliseconds(5000),
+        _ condition: @MainActor () -> Bool
+    ) async throws {
+        let deadline = ContinuousClock.now + timeout
+        while !condition() {
+            guard ContinuousClock.now < deadline else {
+                Issue.record("waitUntil timed out after \(timeout)")
+                return
+            }
+            await Task.yield()
+            try await Task.sleep(for: .milliseconds(50))
+        }
+    }
+
     // MARK: - ExplorePhase Equatable Conformance
 
     @Test func explorePhaseIdleEqualsIdle() {
@@ -86,12 +101,13 @@ struct ExploreUIPolishTests {
         #expect(viewModel.explorePhase == .results)
     }
 
-    @Test func phaseTransitionsFromSearchingToEmptyOnNoResults() {
-        let viewModel = SearchViewModel()
+    @Test func phaseTransitionsFromSearchingToEmptyOnNoResults() async throws {
+        let viewModel = SearchViewModel(metadataService: StubMetadataProvider())
         viewModel.isSearching = false
-        // Use the real submit path so `hasAttemptedTextSearch` is set.
+        // Use the real submit path so `hasAttemptedTextSearch` is set and the
+        // empty state reflects a successful configured search with zero results.
         viewModel.search(queryText: "no matches here")
-        viewModel.results = []
+        try await Self.waitUntil(timeout: .seconds(1)) { viewModel.explorePhase == .empty }
         #expect(viewModel.explorePhase == .empty)
     }
 

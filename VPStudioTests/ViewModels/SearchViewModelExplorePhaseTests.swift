@@ -240,10 +240,24 @@ struct SearchViewModelExplorePhaseTests {
         #expect(viewModel.explorePhase == .results)
     }
 
-    @Test func phaseIsResultsWhenGenreIsSelected() {
+    @Test func phaseIsEmptyWhenGenreIsSelectedWithoutResults() async throws {
         let viewModel = SearchViewModel(metadataService: PhaseTestMetadataStub())
-        viewModel.selectedGenre = Genre(id: 28, name: "Action")
-        #expect(viewModel.explorePhase == .results)
+        viewModel.selectGenre(Genre(id: 28, name: "Action"))
+
+        try await Self.waitUntil { viewModel.explorePhase == .empty }
+        #expect(viewModel.explorePhase == .empty)
+        #expect(viewModel.emptyStateQuery == "Action")
+    }
+
+    @Test func phaseIsEmptyWhenMoodCardIsSelectedWithoutResults() async throws {
+        let viewModel = SearchViewModel(metadataService: PhaseTestMetadataStub())
+        let newReleasesCard = ExploreGenreCatalog.cards.first(where: { $0.id == "new" })!
+
+        viewModel.selectMoodCard(newReleasesCard)
+
+        try await Self.waitUntil { viewModel.explorePhase == .empty }
+        #expect(viewModel.explorePhase == .empty)
+        #expect(viewModel.emptyStateQuery == "New Releases")
     }
 
     @Test func phaseStaysIdleWhenQueryExistsButSearchHasNotStarted() {
@@ -361,11 +375,10 @@ struct SearchViewModelExplorePhaseTests {
 
     // MARK: - primaryLanguage Computed Property
 
-    @Test func primaryLanguageReturnsFirstSortedLanguage() {
+    @Test func primaryLanguageReturnsPreferredLanguageWhenMultipleLanguagesAreSelected() {
         let viewModel = SearchViewModel()
         viewModel.languageFilters = ["fr-FR", "en-US"]
-        // Sorted: ["en-US", "fr-FR"], first = "en-US"
-        #expect(viewModel.primaryLanguage == "en-US")
+        #expect(viewModel.primaryLanguage == "fr-FR")
     }
 
     @Test func primaryLanguageReturnsSingleLanguage() {
@@ -648,6 +661,15 @@ struct SearchViewModelExplorePhaseTests {
         let viewModel = SearchViewModel(metadataService: PhaseTestMetadataStub())
         viewModel.applyLanguageFilters(["ja-JP", "ko-KR"])
         #expect(viewModel.languageFilters == ["ja-JP", "ko-KR"])
+    }
+
+    @Test func applyLanguageFiltersReplacesExistingSelection() {
+        let viewModel = SearchViewModel(metadataService: PhaseTestMetadataStub())
+        viewModel.languageFilters = ["fr-FR"]
+        viewModel.applyLanguageFilters(["ja-JP"])
+
+        #expect(viewModel.languageFilters == ["ja-JP"])
+        #expect(viewModel.primaryLanguage == "ja-JP")
     }
 
     @Test func applyLanguageFiltersToEmptySet() {

@@ -130,7 +130,7 @@ struct SearchView: View {
                         ExploreSkeletonView()
                             .transition(.opacity.animation(.easeInOut(duration: 0.2)))
                     case .empty:
-                        ExploreEmptyView(query: viewModel.submittedQuery)
+                        ExploreEmptyView(query: emptyStateQuery)
                             .frame(maxHeight: .infinity)
                             .transition(.opacity.animation(.easeInOut(duration: 0.25)))
                     case .error:
@@ -198,7 +198,7 @@ struct SearchView: View {
             if showing {
                 // Sync local filter state from viewModel when sheet opens
                 selectedYear = viewModel.yearFilter
-                selectedLanguages = viewModel.languageFilters
+                selectedLanguages = SearchLanguageOption.normalizeSelection(from: viewModel.languageFilters)
                 // Ensure genres are loaded for the filter sheet
                 if viewModel.genres.isEmpty {
                     viewModel.loadGenres()
@@ -568,13 +568,13 @@ struct SearchView: View {
         .shadow(color: .black.opacity(0.14), radius: 6, y: 2)
         .opacity(aiButtonEnabled ? 1.0 : 0.5)
         .allowsHitTesting(aiButtonEnabled)
+        .accessibilityLabel(viewModel.isLoadingAI ? "Curating recommendations" : "Curate search results")
+        .accessibilityHint("Uses your taste profile to assemble a short list for the current search lane.")
         #if os(visionOS)
         .hoverEffect(.highlight)
         #endif
     }
-
-
-        private var filterUtilityButton: some View {
+    private var filterUtilityButton: some View {
         Button {
             isShowingFilters = true
         } label: {
@@ -582,7 +582,7 @@ struct SearchView: View {
                 Image(systemName: "gearshape")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.72))
-                    .frame(width: 34, height: 34)
+                    .frame(width: 44, height: 44)
                     .background {
                         RoundedRectangle(cornerRadius: 11, style: .continuous)
                             .fill(Color.white.opacity(0.10))
@@ -618,6 +618,8 @@ struct SearchView: View {
         }
         .buttonStyle(.plain)
         .shadow(color: .black.opacity(0.12), radius: 5, y: 2)
+        .accessibilityLabel("Open Filters")
+        .accessibilityHint("Opens the search filters.")
         #if os(visionOS)
         .hoverEffect(.highlight)
         #endif
@@ -715,6 +717,8 @@ struct SearchView: View {
             .animation(.spring(response: 0.3, dampingFraction: 0.7), value: viewModel.activeFilterCount)
         }
         .buttonStyle(.plain)
+        .accessibilityLabel("Open more search filters")
+        .accessibilityHint("Opens additional sort, year, genre, and language filters.")
         #if os(visionOS)
         .hoverEffect(.lift)
         #endif
@@ -755,7 +759,8 @@ struct SearchView: View {
 
     /// Menu button to add additional languages.
     private var addLanguageMenu: some View {
-        Menu {
+        let normalizedSelection = SearchLanguageOption.normalizeSelection(from: viewModel.languageFilters)
+        return Menu {
             ForEach(
                 SearchLanguageOption.common,
                 id: \SearchLanguageOption.Option.code
@@ -765,7 +770,7 @@ struct SearchView: View {
                 } label: {
                     HStack {
                         Text(option.name)
-                        if viewModel.languageFilters.contains(option.code) {
+                        if normalizedSelection.contains(option.code) {
                             Image(systemName: "checkmark")
                         }
                     }
@@ -1130,7 +1135,12 @@ struct SearchView: View {
 
                     Spacer(minLength: 20)
 
-                    GlassIconButton(icon: "line.3.horizontal.decrease", size: 36) {
+                    GlassIconButton(
+                        icon: "line.3.horizontal.decrease",
+                        size: 36,
+                        accessibilityLabel: "Open Filters",
+                        accessibilityHint: "Opens the search filters."
+                    ) {
                         isShowingFilters = true
                     }
                 }
@@ -1210,6 +1220,11 @@ struct SearchView: View {
         }
     }
 
+    private var emptyStateQuery: String {
+        let query = viewModel.emptyStateQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        return query.isEmpty ? "this selection" : query
+    }
+
     @ViewBuilder
     private var aiRecommendationsSection: some View {
         if viewModel.isLoadingAI {
@@ -1255,6 +1270,8 @@ struct SearchView: View {
                             .foregroundStyle(.secondary)
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel("Clear AI recommendations")
+                    .accessibilityHint("Removes the current AI recommendations from this section.")
                     #if os(visionOS)
                     .hoverEffect(.highlight)
                     #endif
@@ -1481,6 +1498,8 @@ private struct SearchQueryBar: View {
         }
         .buttonStyle(.plain)
         .frame(width: 14, height: 14)
+        .accessibilityLabel("Clear search text")
+        .accessibilityHint("Clears the current search query.")
         .transition(.scale.combined(with: .opacity))
     }
 
@@ -1643,5 +1662,16 @@ enum SearchLanguageOption {
             return names.sorted().joined(separator: ", ")
         }
         return "\(names.count) languages"
+    }
+
+    static func normalizeSelection(from codes: Set<String>) -> Set<String> {
+        let knownCodes = Set(common.map(\.code))
+        let normalized = codes.intersection(knownCodes)
+
+        if !normalized.isEmpty {
+            return normalized
+        }
+
+        return ["en-US"]
     }
 }

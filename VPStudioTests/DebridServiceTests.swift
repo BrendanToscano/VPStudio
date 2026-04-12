@@ -94,6 +94,9 @@ private func makeNoNetworkSession() -> URLSession {
     }
 }
 
+private let validInfoHash40 = "0123456789abcdef0123456789abcdef01234567"
+private let invalidInfoHash = "bad-hash"
+
 // MARK: - RealDebridService Tests
 
 @Suite("RealDebridService")
@@ -132,20 +135,22 @@ struct RealDebridServiceTests {
         } catch { Issue.record("Unexpected error: \(error)") }
     }
 
-    @Test func rateLimitedThrowsDebridError() async {
+    @Test func rateLimitedRetriesAndEventuallySucceeds() async throws {
+        final class State: @unchecked Sendable { var requestCount = 0 }
+        let state = State()
+
         let session = makeStubSession { request in
-            let response = HTTPURLResponse(url: request.url!, statusCode: 429, httpVersion: nil, headerFields: nil)!
-            return (response, Data())
+            state.requestCount += 1
+            let statusCode = state.requestCount < 3 ? 429 : 200
+            let response = HTTPURLResponse(url: request.url!, statusCode: statusCode, httpVersion: nil, headerFields: statusCode == 429 ? ["Retry-After": "0.001"] : nil)!
+            let body = #"{"username":"sample-user","email":"sample@domain.test","type":"premium","expiration":"2026-12-31T00:00:00Z"}"#
+            return (response, Data(body.utf8))
         }
 
         let service = RealDebridService(apiToken: "token", session: session)
-        do {
-            let _ = try await service.validateToken()
-            Issue.record("Expected DebridError.rateLimited")
-        } catch let error as DebridError {
-            if case .rateLimited = error { /* OK */ }
-            else { Issue.record("Unexpected DebridError: \(error)") }
-        } catch { Issue.record("Unexpected error: \(error)") }
+        let valid = try await service.validateToken()
+        #expect(valid == true)
+        #expect(state.requestCount == 3)
     }
 
     @Test func getAccountInfoParsesResponse() async throws {
@@ -236,15 +241,41 @@ struct RealDebridServiceTests {
         #expect(state.requestCount == 1)
     }
 
-    @Test func addMagnetPostsMagnetDirectly() async throws {
+    @Test func checkCacheDisabledEndpointMemoizesUnsupportedState() async throws {
+        final class State: @unchecked Sendable {
+            var requestCount = 0
+        }
+        let state = State()
+        let hash1 = "abc123abc123abc123abc123abc123abc123abc1"
+        let hash2 = "def456def456def456def456def456def456def4"
+
         let session = makeStubSession { request in
-            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            let body = #"{"id":"new-torrent-id","uri":"magnet:?xt=urn:btih:abc123"}"#
+            state.requestCount += 1
+            let response = HTTPURLResponse(url: request.url!, statusCode: 403, httpVersion: nil, headerFields: nil)!
+            let body = #"{"error":"disabled_endpoint","error_code":37}"#
             return (response, Data(body.utf8))
         }
 
         let service = RealDebridService(apiToken: "token", session: session)
-        let id = try await service.addMagnet(hash: "abc123")
+        let first = try await service.checkCache(hashes: [hash1, hash2])
+        let second = try await service.checkCache(hashes: [hash1, hash2])
+
+        #expect(state.requestCount == 1)
+        #expect(first[hash1] == .unknown)
+        #expect(first[hash2] == .unknown)
+        #expect(second[hash1] == .unknown)
+        #expect(second[hash2] == .unknown)
+    }
+
+    @Test func addMagnetPostsMagnetDirectly() async throws {
+        let session = makeStubSession { request in
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            let body = #"{"id":"new-torrent-id","uri":"magnet:?xt=urn:btih:\#(validInfoHash40)"}"#
+            return (response, Data(body.utf8))
+        }
+
+        let service = RealDebridService(apiToken: "token", session: session)
+        let id = try await service.addMagnet(hash: validInfoHash40)
         #expect(id == "new-torrent-id")
     }
 
@@ -273,6 +304,27 @@ struct RealDebridServiceTests {
         let service = RealDebridService(apiToken: "token", session: session)
         // Should not throw — 204 No Content is valid for selectFiles
         try await service.selectFiles(torrentId: "torrent-1", fileIds: [1, 2])
+    }
+
+    @Test func cleanupRemoteTransferDeletesTorrent() async throws {
+        final class State: @unchecked Sendable {
+            var capturedMethod: String?
+            var capturedPath: String?
+        }
+        let state = State()
+
+        let session = makeStubSession { request in
+            state.capturedMethod = request.httpMethod
+            state.capturedPath = request.url?.path
+            let response = HTTPURLResponse(url: request.url!, statusCode: 204, httpVersion: nil, headerFields: nil)!
+            return (response, Data())
+        }
+
+        let service = RealDebridService(apiToken: "token", session: session)
+        try await service.cleanupRemoteTransfer(torrentId: "torrent-1")
+
+        #expect(state.capturedMethod == "DELETE")
+        #expect(state.capturedPath == "/rest/1.0/torrents/delete/torrent-1")
     }
 
     @Test func selectMatchingEpisodeFileChoosesRequestedEpisodeFromSeasonPack() async throws {
@@ -317,10 +369,10 @@ struct RealDebridServiceTests {
         }
 
         let service = RealDebridService(apiToken: "token", session: session)
-        let _ = try await service.addMagnet(hash: "abc123")
+        let _ = try await service.addMagnet(hash: validInfoHash40)
 
         let captured = try #require(state.capturedBody)
-        #expect(captured.contains("abc123"))
+        #expect(captured.contains(validInfoHash40))
     }
 
     @Test func unrestrictReturnsURL() async throws {
@@ -352,11 +404,42 @@ struct RealDebridServiceTests {
         }
 
         let service = RealDebridService(apiToken: "token", session: session)
-        let _ = try await service.addMagnet(hash: "abc123")
+        let _ = try await service.addMagnet(hash: validInfoHash40)
         // The magnet URI contains ? and : which should be encoded in form body
         // & and = must be percent-encoded so they don't break form parsing
         let body = try #require(state.capturedBody)
         #expect(!body.contains("&xt="))  // & must be encoded, not literal
+    }
+}
+
+@Suite("Debrid addMagnet hash validation")
+struct DebridAddMagnetHashValidationTests {
+    @Test func malformedHashesAreRejectedBeforeNetworkForAllProviders() async {
+        let session = makeNoNetworkSession()
+
+        let services: [(String, any DebridServiceProtocol)] = [
+            ("RealDebrid", RealDebridService(apiToken: "token", session: session)),
+            ("AllDebrid", AllDebridService(apiToken: "token", session: session)),
+            ("Premiumize", PremiumizeService(apiToken: "token", session: session)),
+            ("DebridLink", DebridLinkService(apiToken: "token", session: session)),
+            ("TorBox", TorBoxService(apiToken: "token", session: session)),
+            ("Offcloud", OffcloudService(apiToken: "token", session: session)),
+        ]
+
+        for (name, service) in services {
+            do {
+                _ = try await service.addMagnet(hash: invalidInfoHash)
+                Issue.record("Expected DebridError.invalidHash for \(name)")
+            } catch let error as DebridError {
+                if case .invalidHash(let hash) = error {
+                    #expect(hash == invalidInfoHash)
+                } else {
+                    Issue.record("Unexpected DebridError for \(name): \(error)")
+                }
+            } catch {
+                Issue.record("Unexpected error for \(name): \(error)")
+            }
+        }
     }
 }
 
@@ -379,7 +462,7 @@ struct AllDebridServiceTests {
         }
 
         let service = AllDebridService(apiToken: "token", session: session)
-        let _ = try await service.addMagnet(hash: "abc123")
+        let _ = try await service.addMagnet(hash: validInfoHash40)
 
         let body = try #require(state.capturedBody)
         // Should use magnets[0] (indexed format) consistent with checkCache's magnets[\(offset)]
@@ -405,6 +488,33 @@ struct AllDebridServiceTests {
         // Should use magnets[0], magnets[1] (indexed) not magnets[]
         #expect(query.contains("magnets%5B0%5D=") || query.contains("magnets[0]="))
         #expect(query.contains("magnets%5B1%5D=") || query.contains("magnets[1]="))
+    }
+
+    @Test func cleanupRemoteTransferDeletesMagnetById() async throws {
+        final class State: @unchecked Sendable {
+            var capturedMethod: String?
+            var capturedPath: String?
+            var capturedBody: String?
+        }
+        let state = State()
+
+        let session = makeStubSession { request in
+            state.capturedMethod = request.httpMethod
+            state.capturedPath = request.url?.path
+            if let bodyData = request.httpBody {
+                state.capturedBody = String(data: bodyData, encoding: .utf8)
+            }
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            let body = #"{"status":"success","data":{"message":"Magnet was successfully deleted"}}"#
+            return (response, Data(body.utf8))
+        }
+
+        let service = AllDebridService(apiToken: "token", session: session)
+        try await service.cleanupRemoteTransfer(torrentId: "123456")
+
+        #expect(state.capturedMethod == "POST")
+        #expect(state.capturedPath == "/v4/magnet/delete")
+        #expect(state.capturedBody?.contains("id=123456") == true)
     }
 }
 
@@ -604,7 +714,7 @@ struct PremiumizeServiceTests {
         }
 
         let service = PremiumizeService(apiToken: "token", session: session)
-        // selectFiles is a no-op for Premiumize, should not throw
+        // selectFiles is a no-op for Premiumize, should not throw or hit the network.
         try await service.selectFiles(torrentId: "123", fileIds: [1, 2])
     }
 
@@ -625,6 +735,85 @@ struct PremiumizeServiceTests {
             if case .networkError = error { /* OK */ }
             else { Issue.record("Unexpected DebridError: \(error)") }
         } catch { Issue.record("Unexpected error: \(error)") }
+    }
+
+    @Test func seasonPackSelectionFailsWhenTransferNameCannotIdentifyEpisode() async throws {
+        final class State: @unchecked Sendable { var requestCount = 0 }
+        let state = State()
+
+        let session = makeStubSession { request in
+            state.requestCount += 1
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            if state.requestCount == 1 {
+                return (response, Data(#"{"status":"success","transfers":[]}"#.utf8))
+            }
+            let body = #"{"status":"success","transfers":[{"id":"torrent-1","name":"The.Show.Season.1.Pack","status":"finished","link":"https://cdn.example.com/pack.mkv"}]}"#
+            return (response, Data(body.utf8))
+        }
+
+        let service = PremiumizeService(apiToken: "token", session: session)
+        let selected = try await service.selectMatchingEpisodeFile(
+            torrentId: "torrent-1",
+            seasonNumber: 1,
+            episodeNumber: 2,
+            resolvedFileNameHint: nil,
+            resolvedFileSizeHint: nil
+        )
+        #expect(selected)
+
+        do {
+            _ = try await service.getStreamURL(torrentId: "torrent-1")
+            Issue.record("Expected Premiumize deterministic episode-selection failure")
+        } catch let error as DebridError {
+            if case .networkError(let message) = error {
+                #expect(message.contains("deterministically select"))
+            } else {
+                Issue.record("Unexpected DebridError: \(error)")
+            }
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+    }
+
+    @Test func seasonPackSelectionPersistsResolvedHintForLaterValidation() async throws {
+        final class State: @unchecked Sendable { var requestCount = 0 }
+        let state = State()
+
+        let session = makeStubSession { request in
+            state.requestCount += 1
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+
+            if state.requestCount == 1 {
+                let body = #"{"status":"success","transfers":[{"id":"torrent-1","name":"The.Show.S01E02.mkv","status":"waiting","link":null}]}"#
+                return (response, Data(body.utf8))
+            }
+
+            let body = #"{"status":"success","transfers":[{"id":"torrent-1","name":"The.Show.Season.1.Pack","status":"finished","link":"https://cdn.example.com/pack.mkv"}]}"#
+            return (response, Data(body.utf8))
+        }
+
+        let service = PremiumizeService(apiToken: "token", session: session)
+        let selected = try await service.selectMatchingEpisodeFile(
+            torrentId: "torrent-1",
+            seasonNumber: 1,
+            episodeNumber: 2,
+            resolvedFileNameHint: "The.Show.S01E02.mkv",
+            resolvedFileSizeHint: nil
+        )
+        #expect(selected)
+
+        do {
+            _ = try await service.getStreamURL(torrentId: "torrent-1")
+            Issue.record("Expected Premiumize to revalidate the resolved file hint before returning a finished pack link")
+        } catch let error as DebridError {
+            if case .networkError(let message) = error {
+                #expect(message.contains("deterministically select"))
+            } else {
+                Issue.record("Unexpected DebridError: \(error)")
+            }
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
     }
 }
 
@@ -687,7 +876,7 @@ struct EasyNewsServiceTests {
         let session = makeNoNetworkSession()
         let service = EasyNewsService(apiToken: "token", session: session)
         do {
-            let _ = try await service.addMagnet(hash: "abc123")
+            let _ = try await service.addMagnet(hash: validInfoHash40)
             Issue.record("Expected DebridError.networkError")
         } catch let error as DebridError {
             if case .networkError(let msg) = error {
@@ -792,6 +981,145 @@ struct DebridLinkServiceURLEncodingTests {
             if case .torrentNotFound = error { /* OK */ }
             else { Issue.record("Unexpected DebridError: \(error)") }
         } catch { Issue.record("Unexpected error: \(error)") }
+    }
+
+    @Test func seasonPackSelectionFailsDeterministicallyWhenNoMatchingFileExists() async throws {
+        let session = makeStubSession { request in
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            let body = #"{"success":true,"value":[{"name":"The.Show.S01.Pack","totalSize":2000,"downloadPercent":100,"files":[{"id":1,"name":"The.Show.S01E01.mkv","size":1000,"downloadUrl":"https://cdn.example.com/ep1.mkv"},{"id":2,"name":"The.Show.S01E03.mkv","size":1200,"downloadUrl":"https://cdn.example.com/ep3.mkv"}]}]}"#
+            return (response, Data(body.utf8))
+        }
+
+        let service = DebridLinkService(apiToken: "token", session: session)
+        let selected = try await service.selectMatchingEpisodeFile(
+            torrentId: "torrent-123",
+            seasonNumber: 1,
+            episodeNumber: 2,
+            resolvedFileNameHint: nil,
+            resolvedFileSizeHint: nil
+        )
+        #expect(selected)
+
+        do {
+            _ = try await service.getStreamURL(torrentId: "torrent-123")
+            Issue.record("Expected deterministic Debrid-Link episode-selection failure")
+        } catch let error as DebridError {
+            if case .networkError(let message) = error {
+                #expect(message.contains("deterministically select"))
+            } else {
+                Issue.record("Unexpected DebridError: \(error)")
+            }
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+    }
+}
+
+@Suite("OffcloudService")
+struct OffcloudServiceTests {
+
+    @Test func directStatusURLFailsWhenRequestedEpisodeCannotBeVerified() async throws {
+        let session = makeStubSession { request in
+            let url = request.url ?? URL(string: "https://offcloud.com/api")!
+            if url.path == "/api/cloud/status" || url.path == "/cloud/status" {
+                let body = #"{"requestId":"req-123","fileName":"The.Show.Season.1.Pack","status":"downloaded","url":"https://cdn.example.com/season-pack.mkv"}"#
+                let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+                return (response, Data(body.utf8))
+            }
+
+            let bad = HTTPURLResponse(url: url, statusCode: 404, httpVersion: nil, headerFields: nil)!
+            return (bad, Data())
+        }
+
+        let service = OffcloudService(apiToken: "token", session: session)
+        let selected = try await service.selectMatchingEpisodeFile(
+            torrentId: "req-123",
+            seasonNumber: 1,
+            episodeNumber: 2,
+            resolvedFileNameHint: nil,
+            resolvedFileSizeHint: nil
+        )
+        #expect(selected)
+
+        do {
+            _ = try await service.getStreamURL(torrentId: "req-123")
+            Issue.record("Expected Offcloud deterministic episode-selection failure")
+        } catch let error as DebridError {
+            if case .networkError(let message) = error {
+                #expect(message.contains("deterministically select"))
+            } else {
+                Issue.record("Unexpected DebridError: \(error)")
+            }
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+    }
+
+    @Test func failedEpisodeSelectionClearsStateForLaterGenericFetch() async throws {
+        let session = makeStubSession { request in
+            let url = request.url ?? URL(string: "https://offcloud.com/api")!
+            if url.path == "/api/cloud/status" || url.path == "/cloud/status" {
+                let body = #"{"requestId":"req-123","fileName":"The.Show.Season.1.Pack","status":"downloaded","url":null}"#
+                let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+                return (response, Data(body.utf8))
+            }
+
+            if url.path == "/api/cloud/explore/req-123" || url.path == "/cloud/explore/req-123" {
+                let body = #"["https://cdn.example.com/The.Show.S01E01.mkv","https://cdn.example.com/The.Show.S01E03.mkv"]"#
+                let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+                return (response, Data(body.utf8))
+            }
+
+            let bad = HTTPURLResponse(url: url, statusCode: 404, httpVersion: nil, headerFields: nil)!
+            return (bad, Data())
+        }
+
+        let service = OffcloudService(apiToken: "token", session: session)
+        let selected = try await service.selectMatchingEpisodeFile(
+            torrentId: "req-123",
+            seasonNumber: 1,
+            episodeNumber: 2,
+            resolvedFileNameHint: nil,
+            resolvedFileSizeHint: nil
+        )
+        #expect(selected)
+
+        await #expect(throws: DebridError.networkError("Offcloud could not deterministically select the requested episode file.")) {
+            _ = try await service.getStreamURL(torrentId: "req-123")
+        }
+
+        let stream = try await service.getStreamURL(torrentId: "req-123")
+        #expect(stream.streamURL.absoluteString == "https://cdn.example.com/The.Show.S01E01.mkv")
+    }
+}
+
+@Suite("Debrid settings source contracts")
+struct DebridSettingsSourceContractTests {
+    @Test func easyNewsIsExcludedFromSharedStreamingAddFlow() throws {
+        let source = try normalizedContents(of: "VPStudio/Views/Windows/Settings/Destinations/DebridSettingsView.swift")
+        #expect(source.contains("sharedStreamingServiceTypes"))
+        #expect(source.contains("type!=.easyNews"))
+        #expect(source.contains("UnsupportedinSharedStreaming"))
+    }
+
+    private func contents(of relativePath: String) throws -> String {
+        let absolutePath = repoRootURL().appendingPathComponent(relativePath).path
+        return try String(contentsOfFile: absolutePath, encoding: .utf8)
+    }
+
+    private func normalizedContents(of relativePath: String) throws -> String {
+        let source = try contents(of: relativePath)
+        return source.components(separatedBy: .whitespacesAndNewlines).joined()
+    }
+
+    private func repoRootURL() -> URL {
+        var url = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        while !FileManager.default.fileExists(atPath: url.appendingPathComponent("Package.swift").path) {
+            let parent = url.deletingLastPathComponent()
+            if parent.path == url.path { break }
+            url = parent
+        }
+        return url
     }
 }
 

@@ -150,6 +150,7 @@ enum DiscoverLoadingPresentationPolicy {
 
 struct DiscoverView: View {
     @Environment(AppState.self) private var appState
+    @Environment(\.accessibilityVoiceOverEnabled) private var accessibilityVoiceOverEnabled
     @Bindable var viewModel: DiscoverViewModel
     @State private var selectedItem: MediaPreview?
     @State private var currentHeroIndex = 0
@@ -283,11 +284,12 @@ struct DiscoverView: View {
             viewModel.hasPerformedInitialLoad = true
             await reloadDiscoverForLatestTMDBKey()
         }
-        .task {
+        .task(id: accessibilityVoiceOverEnabled) {
+            guard !accessibilityVoiceOverEnabled else { return }
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(8))
                 guard !Task.isCancelled else { break }
-                guard !heroItems.isEmpty else { continue }
+                guard heroItems.count > 1 else { continue }
                 withAnimation(.easeInOut(duration: 0.8)) {
                     currentHeroIndex = (currentHeroIndex + 1) % heroItems.count
                 }
@@ -313,6 +315,12 @@ struct DiscoverView: View {
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .libraryDidChange)) { _ in
+            recommendationsFilterTask?.cancel()
+            recommendationsFilterTask = Task {
+                await viewModel.refreshLocalPersonalizationState()
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .watchHistoryDidChange)) { _ in
             recommendationsFilterTask?.cancel()
             recommendationsFilterTask = Task {
                 await viewModel.refreshLocalPersonalizationState()
@@ -855,12 +863,12 @@ struct FeaturedHeroView: View {
 
                 // Action buttons
                 HStack(spacing: 12) {
-                    // Primary play button — red pill
+                    // Primary details button — red pill
                     Button(action: onTap) {
                         HStack(spacing: 8) {
-                            Image(systemName: "play.fill")
+                            Image(systemName: "info.circle.fill")
                                 .font(.system(size: 14))
-                            Text("Play Now")
+                            Text("View Details")
                                 .font(.subheadline)
                                 .fontWeight(.semibold)
                         }
@@ -877,6 +885,7 @@ struct FeaturedHeroView: View {
                         .shadow(color: .vpRed.opacity(0.5), radius: 16, y: 4)
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel("View details for \(item.title)")
                     #if os(visionOS)
                     .hoverEffect(.lift)
                     #endif
@@ -900,6 +909,7 @@ struct FeaturedHeroView: View {
                             }
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel("More details for \(item.title)")
                     #if os(visionOS)
                     .hoverEffect(.highlight)
                     #endif

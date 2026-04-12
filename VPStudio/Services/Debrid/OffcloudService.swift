@@ -7,6 +7,7 @@ actor OffcloudService: DebridServiceProtocol {
     private let fallbackBaseURL = "https://offcloud.com"
     private let session: URLSession
     private var selectedFileIDsByTorrent: [String: Set<Int>] = [:]
+    private var episodeSelectionByTorrent: [String: EpisodeSelectionRequest] = [:]
 
     init(apiToken: String, session: URLSession = .shared) {
         self.apiToken = apiToken
@@ -52,21 +53,39 @@ actor OffcloudService: DebridServiceProtocol {
     }
 
     func addMagnet(hash: String) async throws -> String {
-        let magnet = "magnet:?xt=urn:btih:\(hash)"
+        let normalizedHash = try DebridHashValidator.validatedInfoHash(hash)
+        let magnet = "magnet:?xt=urn:btih:\(normalizedHash)"
         let decoded: OCAddResponse = try await request(
             method: "POST",
             path: "/cloud",
             jsonBody: ["url": magnet]
         )
-        return decoded.requestId ?? hash
+        return decoded.requestId ?? normalizedHash
     }
 
     func selectFiles(torrentId: String, fileIds: [Int]) async throws {
         if fileIds.isEmpty {
-            selectedFileIDsByTorrent.removeValue(forKey: torrentId)
+            clearSelectionState(for: torrentId)
             return
         }
         selectedFileIDsByTorrent[torrentId] = Set(fileIds)
+        episodeSelectionByTorrent.removeValue(forKey: torrentId)
+    }
+
+    func selectMatchingEpisodeFile(
+        torrentId: String,
+        seasonNumber: Int,
+        episodeNumber: Int,
+        resolvedFileNameHint: String?,
+        resolvedFileSizeHint: Int64?
+    ) async throws -> Bool {
+        episodeSelectionByTorrent[torrentId] = EpisodeSelectionRequest(
+            seasonNumber: seasonNumber,
+            episodeNumber: episodeNumber,
+            resolvedFileNameHint: resolvedFileNameHint,
+            resolvedFileSizeHint: resolvedFileSizeHint
+        )
+        return true
     }
 
     func getStreamURL(torrentId: String) async throws -> StreamInfo {
@@ -75,6 +94,7 @@ actor OffcloudService: DebridServiceProtocol {
             path: "/cloud/status",
             jsonBody: ["requestId": torrentId]
         )
+        let episodeSelection = episodeSelectionByTorrent[torrentId]
 
         let status = statusResponse.status?.lowercased() ?? "unknown"
         guard status == "downloaded" else {
@@ -82,7 +102,18 @@ actor OffcloudService: DebridServiceProtocol {
         }
 
         if let direct = statusResponse.url, let directURL = URL(string: direct) {
-            selectedFileIDsByTorrent.removeValue(forKey: torrentId)
+            let directFileName = resolvedDisplayFileName(
+                linkFileName: directURL.lastPathComponent.removingPercentEncoding ?? directURL.lastPathComponent,
+                statusFileName: statusResponse.fileName
+            )
+            guard isDeterministicEpisodeMatch(
+                fileName: directFileName,
+                request: episodeSelection
+            ) else {
+                clearSelectionState(for: torrentId)
+                throw DebridError.networkError("Offcloud could not deterministically select the requested episode file.")
+            }
+            clearSelectionState(for: torrentId)
             let fileName = statusResponse.fileName ?? directURL.lastPathComponent
             let q = VideoQuality.parse(from: fileName)
             let c = VideoCodec.parse(from: fileName)
@@ -109,14 +140,25 @@ actor OffcloudService: DebridServiceProtocol {
         let selectedIDs = selectedFileIDsByTorrent[torrentId] ?? []
         let selectedLink = links.enumerated().first(where: { pair in
             selectedIDs.contains(pair.offset + 1)
-        })?.element
-        guard let link = selectedLink ?? preferredVideoLink(from: links),
-              let streamURL = URL(string: link) else {
+        })?.element ?? bestEpisodeMatch(in: links, request: episodeSelection)
+        guard let link = selectedLink ?? fallbackSelectedLink(in: links, request: episodeSelection) else {
+            clearSelectionState(for: torrentId)
+            if episodeSelection != nil {
+                throw DebridError.networkError("Offcloud could not deterministically select the requested episode file.")
+            }
             throw DebridError.networkError("No download link")
         }
+        guard let streamURL = URL(string: link) else {
+            clearSelectionState(for: torrentId)
+            throw DebridError.networkError("Invalid URL")
+        }
 
-        selectedFileIDsByTorrent.removeValue(forKey: torrentId)
-        let fileName = statusResponse.fileName ?? streamURL.lastPathComponent
+        clearSelectionState(for: torrentId)
+        let linkFileName = streamURL.lastPathComponent.removingPercentEncoding ?? streamURL.lastPathComponent
+        let fileName = resolvedDisplayFileName(
+            linkFileName: linkFileName,
+            statusFileName: statusResponse.fileName
+        )
         let q = VideoQuality.parse(from: fileName)
         let c = VideoCodec.parse(from: fileName)
         let a = AudioFormat.parse(from: fileName)
@@ -213,11 +255,13 @@ actor OffcloudService: DebridServiceProtocol {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
 
-        let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse else {
-            throw DebridError.networkError("Invalid response")
-        }
+        let (data, http) = try await DebridHTTPExecutor.data(for: request, session: session)
         return (data, http)
+    }
+
+    private func clearSelectionState(for torrentId: String) {
+        selectedFileIDsByTorrent.removeValue(forKey: torrentId)
+        episodeSelectionByTorrent.removeValue(forKey: torrentId)
     }
 
     private func preferredVideoLink(from links: [String]) -> String? {
@@ -230,6 +274,120 @@ actor OffcloudService: DebridServiceProtocol {
         }
         return links.first
     }
+
+    private func bestEpisodeMatch(in links: [String], request: EpisodeSelectionRequest?) -> String? {
+        guard let request else { return nil }
+
+        if let exact = bestExactMatch(in: links, request: request) {
+            return exact
+        }
+
+        let matchingLinks = links.filter { link in
+            let fileName = URL(string: link)?.lastPathComponent.removingPercentEncoding
+                ?? URL(fileURLWithPath: link).lastPathComponent
+            return EpisodeTokenMatcher.matches(
+                title: fileName,
+                season: request.seasonNumber,
+                episode: request.episodeNumber
+            )
+        }
+
+        if matchingLinks.count == 1 {
+            return matchingLinks[0]
+        }
+
+        if !matchingLinks.isEmpty {
+            return matchingLinks.max(by: { estimatedFileSize(from: $0) < estimatedFileSize(from: $1) })
+        }
+
+        if links.count == 1 {
+            return links.first
+        }
+
+        return nil
+    }
+
+    private func fallbackSelectedLink(in links: [String], request: EpisodeSelectionRequest?) -> String? {
+        if request != nil {
+            return bestEpisodeMatch(in: links, request: request)
+        }
+        return preferredVideoLink(from: links)
+    }
+
+    private func bestExactMatch(in links: [String], request: EpisodeSelectionRequest) -> String? {
+        guard let normalizedHint = Self.normalizedFileName(request.resolvedFileNameHint) else {
+            return nil
+        }
+
+        let matches = links.filter { link in
+            let fileName = URL(string: link)?.lastPathComponent.removingPercentEncoding
+                ?? URL(fileURLWithPath: link).lastPathComponent
+            return Self.normalizedFileName(fileName) == normalizedHint
+        }
+        guard !matches.isEmpty else { return nil }
+
+        if let resolvedFileSizeHint = request.resolvedFileSizeHint,
+           let exactSize = matches.first(where: { estimatedFileSize(from: $0) == resolvedFileSizeHint }) {
+            return exactSize
+        }
+
+        return matches.max(by: { estimatedFileSize(from: $0) < estimatedFileSize(from: $1) })
+    }
+
+    private func isDeterministicEpisodeMatch(fileName: String, request: EpisodeSelectionRequest?) -> Bool {
+        guard let request else { return true }
+
+        if let normalizedHint = Self.normalizedFileName(request.resolvedFileNameHint) {
+            return Self.normalizedFileName(fileName) == normalizedHint
+        }
+
+        return EpisodeTokenMatcher.matches(
+            title: fileName,
+            season: request.seasonNumber,
+            episode: request.episodeNumber
+        )
+    }
+
+    private func estimatedFileSize(from link: String) -> Int64 {
+        Int64(URLComponents(string: link)?
+            .queryItems?
+            .first(where: { $0.name == "size" })?
+            .value ?? "") ?? 0
+    }
+
+    private static func normalizedFileName(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        return URL(fileURLWithPath: trimmed).lastPathComponent.lowercased()
+    }
+
+    private func resolvedDisplayFileName(linkFileName: String, statusFileName: String?) -> String {
+        let normalizedStatusFileName = statusFileName?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let linkName = linkFileName.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if let normalizedStatusFileName, !normalizedStatusFileName.isEmpty {
+            let genericBaseNames = Set(["video", "download", "file", "stream"])
+            let linkBaseName = URL(fileURLWithPath: linkName).deletingPathExtension().lastPathComponent.lowercased()
+            if linkName.isEmpty || genericBaseNames.contains(linkBaseName) {
+                return normalizedStatusFileName
+            }
+        }
+
+        if !linkName.isEmpty {
+            return linkName
+        }
+
+        return statusFileName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? linkFileName
+    }
+}
+
+private struct EpisodeSelectionRequest: Sendable {
+    let seasonNumber: Int
+    let episodeNumber: Int
+    let resolvedFileNameHint: String?
+    let resolvedFileSizeHint: Int64?
 }
 
 private struct OCAddResponse: Sendable {

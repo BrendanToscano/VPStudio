@@ -64,4 +64,23 @@ struct EpisodeTokenMatcherMatrixTests {
         )
         #expect(mismatch == false)
     }
+
+    @Test func matchesIfPresentAllowsUntokenizedTitle() {
+        #expect(EpisodeTokenMatcher.matches(title: "Series Name 1080p", season: 1, episode: 2) == false)
+        #expect(EpisodeTokenMatcher.matchesIfPresent(title: "Series Name 1080p", season: 1, episode: 2))
+    }
+
+    @Test func matchesIfPresentRejectsMismatchedTokenizedTitle() {
+        #expect(EpisodeTokenMatcher.matchesIfPresent(title: "Series.Name.S01E03.1080p", season: 1, episode: 2) == false)
+    }
+
+    @Test func nxnResolutionStringDoesNotParseAsEpisodeContext() {
+        #expect(EpisodeTokenMatcher.context(fromQuery: "Some.Show.1920x1080.REMUX") == nil)
+        #expect(EpisodeTokenMatcher.matches(title: "Some.Show.1920x1080.REMUX", season: 19, episode: 20) == false)
+    }
+
+    @Test func nxnEpisodeStringStillParses() {
+        #expect(EpisodeTokenMatcher.context(fromQuery: "Some.Show.1x02.WEBRip") == .init(season: 1, episode: 2))
+        #expect(EpisodeTokenMatcher.matches(title: "Some.Show.1x02.WEBRip", season: 1, episode: 2))
+    }
 }

@@ -143,4 +143,24 @@ struct DiscoverContinueWatchingTests {
 
         #expect(vm.continueWatching.count == 10)
     }
+
+    @Test func lateDatabaseConfigurationRefreshesContinueWatchingAfterInitialLoad() async throws {
+        let db = try await makeDB()
+        try await seedHistory(
+            db: db,
+            mediaId: "tt7654321",
+            title: "Configured Late",
+            progress: 1800,
+            duration: 7200,
+            completed: false
+        )
+
+        let vm = DiscoverViewModel()
+        vm.hasPerformedInitialLoad = true
+        vm.configure(database: db)
+        try? await Task.sleep(for: .milliseconds(25))
+
+        #expect(vm.continueWatching.count == 1)
+        #expect(vm.continueWatching.first?.preview.title == "Configured Late")
+    }
 }

@@ -1,6 +1,9 @@
 import Foundation
 
 actor EasyNewsService: DebridServiceProtocol {
+    nonisolated static let sharedStreamingExclusionReason =
+        "EasyNews uses a separate Usenet search flow and is not part of the shared torrent streaming resolver in this build."
+
     let serviceType: DebridServiceType = .easyNews
     private let apiToken: String
     private let baseURL = "https://members.easynews.com"
@@ -20,10 +23,7 @@ actor EasyNewsService: DebridServiceProtocol {
         request.timeoutInterval = 15
         request.setValue("Basic \(apiToken)", forHTTPHeaderField: "Authorization")
 
-        let (_, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse else {
-            throw DebridError.networkError("Invalid response")
-        }
+        let (_, http) = try await DebridHTTPExecutor.data(for: request, session: session)
 
         switch http.statusCode {
         case 200 ... 299:

@@ -808,6 +808,71 @@ struct SecretKeyTests {
     }
 }
 
+@Suite("DebridConfig Secret Migration")
+struct DebridConfigSecretMigrationTests {
+    private actor ThrowingSetSecretStore: SecretStore {
+        struct Failure: Error {}
+
+        func setSecret(_ value: String, for key: String) async throws {
+            throw Failure()
+        }
+
+        func getSecret(for key: String) async throws -> String? { nil }
+        func deleteSecret(for key: String) async throws {}
+        func deleteAllSecrets() async throws {}
+    }
+
+    @Test func persistedCopyMigratesPlaintextTokenToSecretReference() async throws {
+        let secretStore = TestSecretStore()
+        let config = DebridConfig(
+            id: "legacy",
+            serviceType: .realDebrid,
+            apiTokenRef: "  plaintext-token  "
+        )
+
+        let persisted = try await config.persistedCopy(using: secretStore)
+        let resolved = try await persisted.config.resolvedCopy(using: secretStore)
+        let expectedKey = SecretKey.debridToken(service: .realDebrid, configId: "legacy")
+
+        #expect(persisted.changed)
+        #expect(persisted.config.apiTokenRef == SecretReference.encode(key: expectedKey))
+        #expect(try await secretStore.getSecret(for: expectedKey) == "plaintext-token")
+        #expect(resolved.apiTokenRef == "plaintext-token")
+    }
+
+    @Test func resolvedCopyMigratesPlaintextTokenIntoSecretStoreBeforeReturning() async throws {
+        let secretStore = TestSecretStore()
+        let config = DebridConfig(
+            id: "legacy-read",
+            serviceType: .realDebrid,
+            apiTokenRef: "  plaintext-token  "
+        )
+
+        let resolved = try await config.resolvedCopy(using: secretStore)
+        let expectedKey = SecretKey.debridToken(service: .realDebrid, configId: "legacy-read")
+
+        #expect(resolved.apiTokenRef == "plaintext-token")
+        #expect(try await secretStore.getSecret(for: expectedKey) == "plaintext-token")
+    }
+
+    @Test func resolvedTokenThrowsWhenPlaintextMigrationFails() async {
+        let config = DebridConfig(
+            id: "legacy-failure",
+            serviceType: .realDebrid,
+            apiTokenRef: "plaintext-token"
+        )
+
+        do {
+            _ = try await config.resolvedToken(using: ThrowingSetSecretStore())
+            Issue.record("Expected plaintext read to fail when secret migration fails")
+        } catch is ThrowingSetSecretStore.Failure {
+            // expected
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+    }
+}
+
 // MARK: - AIMovieRecommendation ID Tests
 
 @Suite("AIMovieRecommendation - ID Uniqueness")

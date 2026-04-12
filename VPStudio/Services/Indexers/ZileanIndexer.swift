@@ -1,13 +1,23 @@
 import Foundation
 
 struct ZileanIndexer: TorrentIndexer {
+    private static let defaultSession: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 20
+        configuration.timeoutIntervalForResource = 60
+        return URLSession(configuration: configuration)
+    }()
+    private static let requestLimiter = IndexerRequestLimiter()
+
     let name = "Zilean"
     private let baseURL: String
+    private let endpointPath: String
     private let session: URLSession
 
-    init(baseURL: String, session: URLSession = .shared) {
+    init(baseURL: String, endpointPath: String = "/api", session: URLSession? = nil) {
         self.baseURL = baseURL
-        self.session = session
+        self.endpointPath = endpointPath
+        self.session = session ?? Self.defaultSession
     }
 
     func search(imdbId: String, type: MediaType, season: Int?, episode: Int?) async throws -> [TorrentResult] {
@@ -15,22 +25,22 @@ struct ZileanIndexer: TorrentIndexer {
         if let season { queryItems.append(URLQueryItem(name: "season", value: String(season))) }
         if let episode { queryItems.append(URLQueryItem(name: "episode", value: String(episode))) }
 
-        let url = try buildURL(path: "/dmm/filtered", queryItems: queryItems)
+        let url = try buildURL(path: endpointPath.appending("/dmm/filtered"), queryItems: queryItems)
         let results = try await fetchResults(from: url)
-        return filter(results: results, season: season, episode: episode)
+        return filter(results: results, season: season, episode: episode, allowUntokenizedTitles: true)
     }
 
     func searchByQuery(query: String, type: MediaType) async throws -> [TorrentResult] {
         let context = EpisodeTokenMatcher.context(fromQuery: query)
-        let url = try buildURL(path: "/dmm/search", queryItems: [
+        let url = try buildURL(path: endpointPath.appending("/dmm/search"), queryItems: [
             URLQueryItem(name: "query", value: query),
         ])
         let results = try await fetchResults(from: url)
-        return filter(results: results, season: context?.season, episode: context?.episode)
+        return filter(results: results, season: context?.season, episode: context?.episode, allowUntokenizedTitles: false)
     }
 
     private func fetchResults(from url: URL) async throws -> [TorrentResult] {
-        let (data, response) = try await session.data(from: url)
+        let (data, response) = try await Self.requestLimiter.data(from: url, session: session)
         guard let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) else {
             throw URLError(.badServerResponse)
         }
@@ -51,10 +61,18 @@ struct ZileanIndexer: TorrentIndexer {
         }
     }
 
-    private func filter(results: [TorrentResult], season: Int?, episode: Int?) -> [TorrentResult] {
+    private func filter(
+        results: [TorrentResult],
+        season: Int?,
+        episode: Int?,
+        allowUntokenizedTitles: Bool
+    ) -> [TorrentResult] {
         guard let season, let episode else { return results }
         return results.filter { result in
-            EpisodeTokenMatcher.matches(title: result.title, season: season, episode: episode)
+            if allowUntokenizedTitles {
+                return EpisodeTokenMatcher.matchesIfPresent(title: result.title, season: season, episode: episode)
+            }
+            return EpisodeTokenMatcher.matches(title: result.title, season: season, episode: episode)
         }
     }
 
@@ -65,6 +83,9 @@ struct ZileanIndexer: TorrentIndexer {
         components.queryItems = queryItems
         guard let url = components.url else {
             throw URLError(.badURL)
+        }
+        guard url.scheme?.lowercased() == "https" else {
+            throw URLError(.unsupportedURL)
         }
         return url
     }
