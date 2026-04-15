@@ -588,12 +588,14 @@ actor DatabaseManager {
             )
         }
 
+        let writer = try dbPool
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            migrator.asyncMigrate(dbPool) { _, error in
-                if let error {
-                    continuation.resume(throwing: error)
-                } else {
+            migrator.asyncMigrate(writer) { result in
+                switch result {
+                case .success:
                     continuation.resume()
+                case .failure(let error):
+                    continuation.resume(throwing: error)
                 }
             }
         }
