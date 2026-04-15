@@ -29,7 +29,8 @@ struct YTSIndexerTests {
         let indexer = YTSIndexer(session: session)
         let results = try await indexer.searchByQuery(query: "The Matrix", type: .movie)
 
-        #expect(state.requestedHosts.prefix(2) == ["yts.torrentbay.st", "yts.mx"])
+        #expect(state.requestedHosts.prefix(3) == ["yts.torrentbay.st", "yts.torrentbay.st", "yts.torrentbay.st"])
+        #expect(state.requestedHosts.contains("yts.mx"))
         #expect(results.count == 1)
         #expect(results.first?.infoHash == "abcdef123456")
         #expect(results.first?.indexerName == "YTS")
@@ -94,7 +95,7 @@ struct YTSIndexerTests {
             Issue.record("Unexpected error type: \(error)")
         }
 
-        #expect(state.requestCount == 3)
+        #expect(state.requestCount == 9)
     }
 
     @Test

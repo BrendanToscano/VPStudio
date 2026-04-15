@@ -88,6 +88,28 @@ actor OffcloudService: DebridServiceProtocol {
         return true
     }
 
+    func cleanupRemoteTransfer(torrentId: String) async throws {
+        clearSelectionState(for: torrentId)
+        let url = try buildURL(base: baseURL, path: "/cloud/remove", queryItems: [])
+        let (data, http) = try await send(
+            to: url,
+            method: "POST",
+            jsonBody: ["requestId": torrentId]
+        )
+
+        switch http.statusCode {
+        case 200...299:
+            return
+        case 401:
+            throw DebridError.unauthorized
+        case 429:
+            throw DebridError.rateLimited
+        default:
+            let message = String(data: data, encoding: .utf8) ?? ""
+            throw DebridError.httpError(http.statusCode, message)
+        }
+    }
+
     func getStreamURL(torrentId: String) async throws -> StreamInfo {
         let statusResponse: OCStatusResponse = try await request(
             method: "POST",

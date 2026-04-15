@@ -16,7 +16,7 @@ struct TorznabIndexer: TorrentIndexer {
         endpointPath: String = "/api",
         apiKey: String? = nil,
         categoryFilter: String? = nil,
-        apiKeyTransport: IndexerConfig.APIKeyTransport = .query,
+        apiKeyTransport: IndexerConfig.APIKeyTransport = .header,
         session: URLSession = .shared
     ) {
         self.name = name

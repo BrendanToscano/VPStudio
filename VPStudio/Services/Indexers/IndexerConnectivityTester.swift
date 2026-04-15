@@ -36,38 +36,16 @@ enum IndexerRequestError: LocalizedError {
 
 enum IndexerConnectivityTester {
     static func testConnection(for config: IndexerConfig, session: URLSession = .shared) async throws {
-        if config.indexerType == .stremio {
-            try await validateStremioManifest(for: config, session: session)
-            return
-        }
-
         let request = try makeRequest(for: config)
-        let (_, response) = try await session.data(for: request)
+        let limiter = IndexerRequestLimiter()
+        let (data, response) = try await limiter.data(for: request, session: session)
         guard let http = response as? HTTPURLResponse else {
             throw IndexerConnectivityError.invalidResponse
         }
         guard (200...299).contains(http.statusCode) else {
             throw IndexerConnectivityError.badStatusCode(http.statusCode)
         }
-    }
-
-    private static func validateStremioManifest(for config: IndexerConfig, session: URLSession) async throws {
-        let request = try makeRequest(for: config)
-        let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse else {
-            throw IndexerConnectivityError.invalidResponse
-        }
-        guard (200...299).contains(http.statusCode) else {
-            throw IndexerConnectivityError.badStatusCode(http.statusCode)
-        }
-
-        let manifest = try JSONDecoder().decode(StremioManifestResponse.self, from: data)
-        guard let catalogs = manifest.catalogs, !catalogs.isEmpty else {
-            throw IndexerConnectivityError.incompatibleManifest
-        }
-        guard catalogs.contains(where: { $0.isCompatible }) else {
-            throw IndexerConnectivityError.incompatibleManifest
-        }
+        try validatePayload(data, for: config)
     }
 
     static func makeRequest(for config: IndexerConfig) throws -> URLRequest {
@@ -185,6 +163,45 @@ enum IndexerConnectivityTester {
         }
         return url
     }
+
+    private static func validatePayload(_ data: Data, for config: IndexerConfig) throws {
+        switch config.indexerType {
+        case .stremio:
+            let manifest = try JSONDecoder().decode(StremioManifestResponse.self, from: data)
+            guard let catalogs = manifest.catalogs, !catalogs.isEmpty else {
+                throw IndexerConnectivityError.incompatibleManifest
+            }
+            guard catalogs.contains(where: { $0.isCompatible }) else {
+                throw IndexerConnectivityError.incompatibleManifest
+            }
+
+        case .jackett, .torznab:
+            try validateTorznabCapsPayload(data)
+
+        case .prowlarr, .apiBay, .yts, .eztv, .zilean:
+            guard let object = try? JSONSerialization.jsonObject(with: data),
+                  object is [String: Any] || object is [[String: Any]] || object is [Any] else {
+                throw IndexerConnectivityError.invalidResponse
+            }
+        }
+    }
+
+    private static func validateTorznabCapsPayload(_ data: Data) throws {
+        let parser = XMLParser(data: data)
+        let delegate = ConnectivityTorznabCapsParserDelegate()
+        parser.delegate = delegate
+        parser.shouldProcessNamespaces = false
+        parser.shouldResolveExternalEntities = false
+
+        guard parser.parse() else {
+            throw IndexerConnectivityError.invalidResponse
+        }
+
+        guard let root = delegate.rootElement?.lowercased(),
+              root == "caps" || root == "error" else {
+            throw IndexerConnectivityError.invalidResponse
+        }
+    }
 }
 
 actor IndexerRequestLimiter {
@@ -193,6 +210,16 @@ actor IndexerRequestLimiter {
     private let maximumAttempts: Int
     private var lastRequestDate: Date?
     private var nextAllowedRequestDate: Date?
+    private let retryableStatusCodes: Set<Int> = [408, 425, 429, 500, 502, 503, 504]
+    private let retryableTransportErrorCodes: Set<URLError.Code> = [
+        .timedOut,
+        .cannotConnectToHost,
+        .cannotFindHost,
+        .dnsLookupFailed,
+        .networkConnectionLost,
+        .notConnectedToInternet,
+        .resourceUnavailable
+    ]
 
     init(
         minimumRequestInterval: TimeInterval = 0.15,
@@ -218,19 +245,32 @@ actor IndexerRequestLimiter {
             attempt += 1
             try await waitForRequestSlot()
 
-            let (data, response) = try await session.data(for: request)
+            let data: Data
+            let response: URLResponse
+            do {
+                (data, response) = try await session.data(for: request)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch let urlError as URLError where retryableTransportErrorCodes.contains(urlError.code) && attempt < maximumAttempts {
+                let delay = exponentialBackoffDelay(for: attempt)
+                nextAllowedRequestDate = Date().addingTimeInterval(max(delay, minimumRequestInterval))
+                continue
+            }
             defer { lastRequestDate = Date() }
 
             guard let http = response as? HTTPURLResponse else {
                 return (data, response)
             }
 
-            guard http.statusCode == 429 else {
+            guard retryableStatusCodes.contains(http.statusCode) else {
                 return (data, response)
             }
 
             guard attempt < maximumAttempts else {
-                throw IndexerRequestError.rateLimited
+                if http.statusCode == 429 {
+                    throw IndexerRequestError.rateLimited
+                }
+                return (data, response)
             }
 
             let delay = max(
@@ -257,13 +297,24 @@ actor IndexerRequestLimiter {
     private func retryDelay(from response: HTTPURLResponse) -> TimeInterval? {
         guard let value = response.value(forHTTPHeaderField: "Retry-After")?
             .trimmingCharacters(in: .whitespacesAndNewlines),
-              !value.isEmpty,
-              let seconds = TimeInterval(value),
-              seconds > 0 else {
+              !value.isEmpty else {
             return nil
         }
 
-        return min(maximumBackoffInterval, seconds)
+        if let seconds = TimeInterval(value), seconds > 0 {
+            return min(maximumBackoffInterval, seconds)
+        }
+
+        guard let date = IndexerRetryHeaderDateParser.date(from: value) else {
+            return nil
+        }
+
+        let interval = date.timeIntervalSinceNow
+        guard interval > 0 else {
+            return nil
+        }
+
+        return min(maximumBackoffInterval, interval)
     }
 
     private func exponentialBackoffDelay(for attempt: Int) -> TimeInterval {
@@ -274,6 +325,52 @@ actor IndexerRequestLimiter {
 
     private static func nanoseconds(for interval: TimeInterval) -> UInt64 {
         UInt64((max(interval, 0) * 1_000_000_000).rounded())
+    }
+}
+
+private final class ConnectivityTorznabCapsParserDelegate: NSObject, XMLParserDelegate {
+    private(set) var rootElement: String?
+
+    func parser(
+        _ parser: XMLParser,
+        didStartElement elementName: String,
+        namespaceURI: String?,
+        qualifiedName qName: String?,
+        attributes attributeDict: [String : String] = [:]
+    ) {
+        if rootElement == nil {
+            rootElement = elementName
+        }
+    }
+}
+
+private enum IndexerRetryHeaderDateParser {
+    private static let formatters: [DateFormatter] = {
+        let formatter1 = DateFormatter()
+        formatter1.locale = Locale(identifier: "en_US_POSIX")
+        formatter1.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter1.dateFormat = "EEE',' dd MMM yyyy HH':'mm':'ss zzz"
+
+        let formatter2 = DateFormatter()
+        formatter2.locale = Locale(identifier: "en_US_POSIX")
+        formatter2.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter2.dateFormat = "EEEE',' dd-MMM-yy HH':'mm':'ss zzz"
+
+        let formatter3 = DateFormatter()
+        formatter3.locale = Locale(identifier: "en_US_POSIX")
+        formatter3.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter3.dateFormat = "EEE MMM d HH':'mm':'ss yyyy"
+
+        return [formatter1, formatter2, formatter3]
+    }()
+
+    static func date(from value: String) -> Date? {
+        for formatter in formatters {
+            if let date = formatter.date(from: value) {
+                return date
+            }
+        }
+        return nil
     }
 }
 

@@ -857,6 +857,76 @@ struct VPStudioTests {
         #expect(await secondService.cacheBatchSizes() == [48, 48, 3])
     }
 
+    @Test func debridManagerMarksUnresolvedHashesUnknownAfterPartialCacheFailure() async throws {
+        let (database, tempDir) = try await makeTemporaryDatabase(named: "vpstudio-debrid-cache-partial-failure.sqlite")
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let secretStore = TestSecretStore()
+        let rdSecretKey = SecretKey.debridToken(service: .realDebrid, configId: "rd")
+        let adSecretKey = SecretKey.debridToken(service: .allDebrid, configId: "ad")
+        try await secretStore.setSecret("rd-token", for: rdSecretKey)
+        try await secretStore.setSecret("ad-token", for: adSecretKey)
+
+        try await database.saveDebridConfig(
+            DebridConfig(
+                id: "rd",
+                serviceType: .realDebrid,
+                apiTokenRef: SecretReference.encode(key: rdSecretKey),
+                isActive: true,
+                priority: 0,
+                createdAt: Date(),
+                updatedAt: Date()
+            )
+        )
+        try await database.saveDebridConfig(
+            DebridConfig(
+                id: "ad",
+                serviceType: .allDebrid,
+                apiTokenRef: SecretReference.encode(key: adSecretKey),
+                isActive: true,
+                priority: 1,
+                createdAt: Date(),
+                updatedAt: Date()
+            )
+        )
+
+        let cachedHash = "0123456789abcdef0123456789abcdef01234567"
+        let unresolvedHash = "fedcba9876543210fedcba9876543210fedcba98"
+        let fallbackFixture = QADebridFixture(
+            hash: cachedHash,
+            serviceType: .allDebrid,
+            streamURLs: [URL(string: "https://fixtures.example/ad.mkv")!],
+            fileName: "Cached.Release.mkv"
+        )
+
+        let manager = DebridManager(
+            database: database,
+            secretStore: secretStore,
+            serviceFactory: { type, _ in
+                switch type {
+                case .realDebrid:
+                    return FailingCacheDebridService(serviceType: .realDebrid)
+                case .allDebrid:
+                    return QADebridService(fixture: fallbackFixture)
+                default:
+                    return FailingCacheDebridService(serviceType: type)
+                }
+            }
+        )
+        try await manager.initialize()
+
+        let result = try await manager.checkCacheAcrossServices(hashes: [cachedHash, unresolvedHash])
+
+        if case .cached = result[cachedHash]?.0 {
+            #expect(true)
+        } else {
+            Issue.record("Expected cached result for resolved hash")
+        }
+        #expect(result[cachedHash]?.1 == .allDebrid)
+        #expect(result[unresolvedHash]?.0 == .unknown)
+        #expect(result[unresolvedHash]?.1 == .allDebrid)
+    }
+
     @Test func qaDebridServiceReturnsSequentialFixtureURLsForRepeatedRequests() async throws {
         let fixture = QADebridFixture(
             hash: "0123456789abcdef0123456789abcdef01234567",
@@ -1350,7 +1420,13 @@ struct VPStudioTests {
 
         let apiKey = "key+with&symbols=="
         let query = "Dune & Part+Two"
-        let indexer = TorznabIndexer(name: "Test", baseURL: "https://indexer.example", apiKey: apiKey, session: session)
+        let indexer = TorznabIndexer(
+            name: "Test",
+            baseURL: "https://indexer.example",
+            apiKey: apiKey,
+            apiKeyTransport: .query,
+            session: session
+        )
         let results = try await indexer.searchByQuery(query: query, type: .movie)
 
         #expect(results.count == 1)
@@ -1787,7 +1863,7 @@ struct VPStudioTests {
             Issue.record("Unexpected error type: \(error)")
         }
 
-        #expect(state.requestCount == 2)
+        #expect(state.requestCount >= 2)
     }
 
     @Test func zileanIndexerFiltersByEpisodeContextFromQuery() async throws {

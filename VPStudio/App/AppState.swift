@@ -341,6 +341,9 @@ final class AppState {
                 linkRefresher: { context in
                     let stream = try await debrid.resolveStream(from: context)
                     return stream.streamURL
+                },
+                remoteTransferCleaner: { context in
+                    await debrid.cleanupRemoteTransfer(from: context)
                 }
             )
         }

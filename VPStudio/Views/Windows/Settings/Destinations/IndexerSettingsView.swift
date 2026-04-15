@@ -490,7 +490,7 @@ struct IndexerSettingsView: View {
                 isActive: true,
                 endpointPath: "/api/v2.0/indexers/all/results/torznab/api",
                 categoryFilter: "",
-                apiKeyTransport: .query
+                apiKeyTransport: .header
             )
         }
 
@@ -631,7 +631,7 @@ struct IndexerSettingsView: View {
 
         private func defaultTransport(for type: IndexerConfig.IndexerType) -> IndexerConfig.APIKeyTransport {
             switch type {
-            case .prowlarr:
+            case .jackett, .prowlarr, .torznab:
                 return .header
             default:
                 return .query

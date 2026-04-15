@@ -394,7 +394,7 @@ extension IndexerConfig.IndexerType {
 
     fileprivate var defaultAPIKeyTransport: IndexerConfig.APIKeyTransport {
         switch self {
-        case .prowlarr:
+        case .jackett, .prowlarr, .torznab:
             return .header
         default:
             return .query

@@ -166,7 +166,8 @@ actor DebridManager {
 
         let fallbackService = firstSuccessfulService ?? orderedServices.first ?? .realDebrid
         for hash in normalizedHashes where results[hash] == nil {
-            results[hash] = (.notCached, fallbackService)
+            let unresolvedStatus: CacheStatus = firstFailure == nil ? .notCached : .unknown
+            results[hash] = (unresolvedStatus, fallbackService)
         }
 
         return results

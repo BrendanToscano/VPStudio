@@ -90,6 +90,15 @@ actor DebridLinkService: DebridServiceProtocol {
         return true
     }
 
+    func cleanupRemoteTransfer(torrentId: String) async throws {
+        selectedFileIDsByTorrent.removeValue(forKey: torrentId)
+        episodeSelectionByTorrent.removeValue(forKey: torrentId)
+        let _: DLResponse<DLDeleteResponse> = try await request(
+            method: "DELETE",
+            path: "/seedbox/\(torrentId)/remove"
+        )
+    }
+
     func getStreamURL(torrentId: String) async throws -> StreamInfo {
         var listComponents = URLComponents()
         listComponents.queryItems = [URLQueryItem(name: "ids", value: torrentId)]
@@ -265,6 +274,11 @@ extension DLFile: Decodable {}
 
 private struct DLAddResponse: Sendable { let id: String? }
 extension DLAddResponse: Decodable {}
+
+private struct DLDeleteResponse: Sendable {
+    let removed: Int?
+}
+extension DLDeleteResponse: Decodable {}
 
 private struct DLTorrentInfo: Sendable { let name: String?; let totalSize: Int64?; let downloadPercent: Int?; let files: [DLFile]? }
 extension DLTorrentInfo: Decodable {}

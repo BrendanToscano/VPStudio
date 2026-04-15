@@ -117,6 +117,35 @@ actor TorBoxService: DebridServiceProtocol {
         )
     }
 
+    func cleanupRemoteTransfer(torrentId: String) async throws {
+        selectedFileIDsByTorrent.removeValue(forKey: torrentId)
+
+        guard let url = URL(string: baseURL + "/torrents/controltorrent") else {
+            throw DebridError.networkError("Invalid request URL")
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 30
+        request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(
+            withJSONObject: ["torrent_id": torrentId, "operation": "delete"]
+        )
+
+        let (data, http) = try await DebridHTTPExecutor.data(for: request, session: session)
+        switch http.statusCode {
+        case 200...299:
+            return
+        case 401, 403:
+            throw DebridError.unauthorized
+        case 429:
+            throw DebridError.rateLimited
+        default:
+            let message = String(data: data, encoding: .utf8) ?? ""
+            throw DebridError.httpError(http.statusCode, message)
+        }
+    }
+
     private func selectMatchingEpisodeFile(
         torrentId: String,
         seasonNumber: Int,

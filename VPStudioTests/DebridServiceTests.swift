@@ -153,6 +153,50 @@ struct RealDebridServiceTests {
         #expect(state.requestCount == 3)
     }
 
+    @Test func serverErrorRetriesAndEventuallySucceeds() async throws {
+        final class State: @unchecked Sendable { var requestCount = 0 }
+        let state = State()
+
+        let session = makeStubSession { request in
+            state.requestCount += 1
+            let statusCode = state.requestCount < 3 ? 503 : 200
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: statusCode,
+                httpVersion: nil,
+                headerFields: statusCode == 503 ? ["Retry-After": "0.001"] : nil
+            )!
+            let body = #"{"username":"sample-user","email":"sample@domain.test","type":"premium","expiration":"2026-12-31T00:00:00Z"}"#
+            return (response, Data(body.utf8))
+        }
+
+        let service = RealDebridService(apiToken: "token", session: session)
+        let valid = try await service.validateToken()
+        #expect(valid == true)
+        #expect(state.requestCount == 3)
+    }
+
+    @Test func transportTimeoutRetriesAndEventuallySucceeds() async throws {
+        final class State: @unchecked Sendable { var requestCount = 0 }
+        let state = State()
+
+        let session = makeStubSession { request in
+            state.requestCount += 1
+            if state.requestCount < 3 {
+                throw URLError(.timedOut)
+            }
+
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            let body = #"{"username":"sample-user","email":"sample@domain.test","type":"premium","expiration":"2026-12-31T00:00:00Z"}"#
+            return (response, Data(body.utf8))
+        }
+
+        let service = RealDebridService(apiToken: "token", session: session)
+        let valid = try await service.validateToken()
+        #expect(valid == true)
+        #expect(state.requestCount == 3)
+    }
+
     @Test func getAccountInfoParsesResponse() async throws {
         let session = makeStubSession { request in
             let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
@@ -635,6 +679,32 @@ struct TorBoxServiceTests {
         // Falls back to file_id=0 when no files array present
         #expect(state.capturedFileId == "0")
     }
+
+    @Test func cleanupRemoteTransferUsesControlTorrentDeleteOperation() async throws {
+        final class State: @unchecked Sendable {
+            var capturedMethod: String?
+            var capturedPath: String?
+            var capturedBody: String?
+        }
+        let state = State()
+
+        let session = makeStubSession { request in
+            state.capturedMethod = request.httpMethod
+            state.capturedPath = request.url?.path
+            state.capturedBody = request.httpBody.flatMap { String(data: $0, encoding: .utf8) }
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (response, Data(#"{"success":true,"data":null}"#.utf8))
+        }
+
+        let service = TorBoxService(apiToken: "token", session: session)
+        try await service.cleanupRemoteTransfer(torrentId: "42")
+
+        #expect(state.capturedMethod == "POST")
+        #expect(state.capturedPath == "/v1/api/torrents/controltorrent")
+        let body = try #require(state.capturedBody)
+        #expect(body.contains("\"torrent_id\":\"42\""))
+        #expect(body.contains("\"operation\":\"delete\""))
+    }
 }
 
 // MARK: - PremiumizeService Tests
@@ -735,6 +805,30 @@ struct PremiumizeServiceTests {
             if case .networkError = error { /* OK */ }
             else { Issue.record("Unexpected DebridError: \(error)") }
         } catch { Issue.record("Unexpected error: \(error)") }
+    }
+
+    @Test func cleanupRemoteTransferPostsTransferDeleteById() async throws {
+        final class State: @unchecked Sendable {
+            var capturedMethod: String?
+            var capturedPath: String?
+            var capturedBody: String?
+        }
+        let state = State()
+
+        let session = makeStubSession { request in
+            state.capturedMethod = request.httpMethod
+            state.capturedPath = request.url?.path
+            state.capturedBody = request.httpBody.flatMap { String(data: $0, encoding: .utf8) }
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (response, Data(#"{"status":"success"}"#.utf8))
+        }
+
+        let service = PremiumizeService(apiToken: "token", session: session)
+        try await service.cleanupRemoteTransfer(torrentId: "pm-123")
+
+        #expect(state.capturedMethod == "POST")
+        #expect(state.capturedPath == "/api/transfer/delete")
+        #expect(state.capturedBody == "id=pm-123")
     }
 
     @Test func seasonPackSelectionFailsWhenTransferNameCannotIdentifyEpisode() async throws {
@@ -1013,6 +1107,27 @@ struct DebridLinkServiceURLEncodingTests {
             Issue.record("Unexpected error: \(error)")
         }
     }
+
+    @Test func cleanupRemoteTransferUsesDocumentedDeleteRoute() async throws {
+        final class State: @unchecked Sendable {
+            var capturedMethod: String?
+            var capturedPath: String?
+        }
+        let state = State()
+
+        let session = makeStubSession { request in
+            state.capturedMethod = request.httpMethod
+            state.capturedPath = request.url?.path
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (response, Data(#"{"success":true,"value":{"removed":1}}"#.utf8))
+        }
+
+        let service = DebridLinkService(apiToken: "token", session: session)
+        try await service.cleanupRemoteTransfer(torrentId: "torrent-123")
+
+        #expect(state.capturedMethod == "DELETE")
+        #expect(state.capturedPath == "/api/v2/seedbox/torrent-123/remove")
+    }
 }
 
 @Suite("OffcloudService")
@@ -1090,6 +1205,31 @@ struct OffcloudServiceTests {
 
         let stream = try await service.getStreamURL(torrentId: "req-123")
         #expect(stream.streamURL.absoluteString == "https://cdn.example.com/The.Show.S01E01.mkv")
+    }
+
+    @Test func cleanupRemoteTransferPostsCloudRemoveRequest() async throws {
+        final class State: @unchecked Sendable {
+            var capturedMethod: String?
+            var capturedPath: String?
+            var capturedBody: String?
+        }
+        let state = State()
+
+        let session = makeStubSession { request in
+            state.capturedMethod = request.httpMethod
+            state.capturedPath = request.url?.path
+            state.capturedBody = request.httpBody.flatMap { String(data: $0, encoding: .utf8) }
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (response, Data(#"{"success":true}"#.utf8))
+        }
+
+        let service = OffcloudService(apiToken: "token", session: session)
+        try await service.cleanupRemoteTransfer(torrentId: "req-123")
+
+        #expect(state.capturedMethod == "POST")
+        #expect(state.capturedPath == "/api/cloud/remove")
+        let body = try #require(state.capturedBody)
+        #expect(body.contains("\"requestId\":\"req-123\""))
     }
 }
 

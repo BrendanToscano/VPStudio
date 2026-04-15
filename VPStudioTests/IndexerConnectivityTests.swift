@@ -53,17 +53,19 @@ private final class IndexerConnectivityURLProtocolStub: URLProtocol, @unchecked 
 
 @Suite
 struct IndexerConnectivityTests {
-    @Test func torznabConnectionSuccessIncludesApiKeyAndCapsQuery() async throws {
+    @Test func torznabConnectionSuccessSendsHeaderApiKeyAndCapsQuery() async throws {
         final class RequestState: @unchecked Sendable {
+            var headerValue: String?
             var queryItems: [URLQueryItem] = []
         }
         let state = RequestState()
 
         let session = makeStubSession { request in
             let url = try #require(request.url)
+            state.headerValue = request.value(forHTTPHeaderField: "X-Api-Key")
             state.queryItems = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
             let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            return (response, Data("ok".utf8))
+            return (response, Data("<caps></caps>".utf8))
         }
 
         let config = IndexerConfig(
@@ -73,12 +75,14 @@ struct IndexerConnectivityTests {
             baseURL: "https://indexer.example",
             apiKey: "my-key",
             isActive: true,
-            priority: 0
+            priority: 0,
+            apiKeyTransport: .header
         )
 
         try await IndexerConnectivityTester.testConnection(for: config, session: session)
 
-        #expect(state.queryItems.first(where: { $0.name == "apikey" })?.value == "my-key")
+        #expect(state.headerValue == "my-key")
+        #expect(state.queryItems.first(where: { $0.name == "apikey" }) == nil)
         #expect(state.queryItems.first(where: { $0.name == "t" })?.value == "caps")
     }
 
@@ -173,7 +177,7 @@ struct IndexerConnectivityTests {
             let url = try #require(request.url)
             state.queryItems = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
             let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            return (response, Data("ok".utf8))
+            return (response, Data(#"{"records":[]}"#.utf8))
         }
 
         let config = IndexerConfig(
@@ -206,7 +210,7 @@ struct IndexerConnectivityTests {
             let url = try #require(request.url)
             state.capturedPath = url.path
             let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            return (response, Data("ok".utf8))
+            return (response, Data("<caps></caps>".utf8))
         }
 
         let config = IndexerConfig(
@@ -237,7 +241,7 @@ struct IndexerConnectivityTests {
             let url = try #require(request.url)
             state.capturedPath = url.path
             let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            return (response, Data("[]".utf8))
+            return (response, Data(#"{"results":[]}"#.utf8))
         }
 
         let config = IndexerConfig(

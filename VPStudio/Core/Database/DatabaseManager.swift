@@ -178,7 +178,7 @@ actor DatabaseManager {
                 t.column("providerSubtype", .text).notNull().defaults(to: IndexerConfig.ProviderSubtype.builtIn.rawValue)
                 t.column("endpointPath", .text).notNull().defaults(to: "")
                 t.column("categoryFilter", .text)
-                t.column("apiKeyTransport", .text).notNull().defaults(to: IndexerConfig.APIKeyTransport.query.rawValue)
+                t.column("apiKeyTransport", .text).notNull().defaults(to: IndexerConfig.APIKeyTransport.header.rawValue)
             }
 
             try db.create(table: "user_taste_profiles") { t in
@@ -276,7 +276,7 @@ actor DatabaseManager {
             try addColumnIfMissing(
                 table: "indexer_configs",
                 column: "apiKeyTransport",
-                definition: "TEXT NOT NULL DEFAULT '\(IndexerConfig.APIKeyTransport.query.rawValue)'"
+                definition: "TEXT NOT NULL DEFAULT '\(IndexerConfig.APIKeyTransport.header.rawValue)'"
             )
 
             try addColumnIfMissing(
@@ -567,6 +567,24 @@ actor DatabaseManager {
                     resumeDataBase64 = NULL
                 WHERE recoveryContextJSON IS NOT NULL
                 """
+            )
+        }
+
+        migrator.registerMigration("v15_indexer_header_auth_defaults") { db in
+            try db.execute(
+                sql: """
+                UPDATE indexer_configs
+                SET apiKeyTransport = ?
+                WHERE apiKeyTransport = ?
+                  AND indexerType IN (?, ?, ?)
+                """,
+                arguments: [
+                    IndexerConfig.APIKeyTransport.header.rawValue,
+                    IndexerConfig.APIKeyTransport.query.rawValue,
+                    IndexerConfig.IndexerType.jackett.rawValue,
+                    IndexerConfig.IndexerType.prowlarr.rawValue,
+                    IndexerConfig.IndexerType.torznab.rawValue,
+                ]
             )
         }
 

@@ -108,6 +108,16 @@ enum DebridHTTPExecutor {
     private static let initialBackoffNanoseconds: UInt64 = 250_000_000
     private static let maximumBackoffNanoseconds: UInt64 = 5_000_000_000
     private static let maxAttempts = 4
+    private static let retryableStatusCodes: Set<Int> = [408, 425, 429, 500, 502, 503, 504]
+    private static let retryableTransportErrorCodes: Set<URLError.Code> = [
+        .timedOut,
+        .cannotConnectToHost,
+        .cannotFindHost,
+        .dnsLookupFailed,
+        .networkConnectionLost,
+        .notConnectedToInternet,
+        .resourceUnavailable
+    ]
 
     static func data(
         for request: URLRequest,
@@ -121,18 +131,40 @@ enum DebridHTTPExecutor {
         session: URLSession,
         attempt: Int
     ) async throws -> (Data, HTTPURLResponse) {
-        let (data, response) = try await session.data(for: request)
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let urlError as URLError where shouldRetry(urlError: urlError) {
+            guard attempt < maxAttempts - 1 else {
+                throw mapTransportError(urlError)
+            }
+
+            try await Task.sleep(
+                nanoseconds: retryDelayNanoseconds(from: nil, attempt: attempt)
+            )
+            return try await dataWithRetry(for: request, session: session, attempt: attempt + 1)
+        } catch let urlError as URLError {
+            throw mapTransportError(urlError)
+        } catch {
+            throw DebridError.networkError(error.localizedDescription)
+        }
 
         guard let httpResponse = response as? HTTPURLResponse else {
             throw DebridError.networkError("Invalid response")
         }
 
-        guard httpResponse.statusCode == 429 else {
+        guard retryableStatusCodes.contains(httpResponse.statusCode) else {
             return (data, httpResponse)
         }
 
         guard attempt < maxAttempts - 1 else {
-            throw DebridError.rateLimited
+            if httpResponse.statusCode == 429 {
+                throw DebridError.rateLimited
+            }
+            return (data, httpResponse)
         }
 
         let retryAfterNanoseconds = retryDelayNanoseconds(
@@ -154,11 +186,62 @@ enum DebridHTTPExecutor {
         }
 
         let trimmed = retryAfter.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let retryAfterSeconds = TimeInterval(trimmed), retryAfterSeconds > 0 else {
+        if let retryAfterSeconds = TimeInterval(trimmed), retryAfterSeconds > 0 {
+            let retryAfterDelay = UInt64((retryAfterSeconds * 1_000_000_000).rounded())
+            return min(maximumBackoffNanoseconds, max(exponentialDelay, retryAfterDelay))
+        }
+
+        guard let retryAfterDate = RetryHeaderDateParser.date(from: trimmed) else {
+            return exponentialDelay
+        }
+
+        let retryAfterSeconds = retryAfterDate.timeIntervalSinceNow
+        guard retryAfterSeconds > 0 else {
             return exponentialDelay
         }
 
         let retryAfterDelay = UInt64((retryAfterSeconds * 1_000_000_000).rounded())
         return min(maximumBackoffNanoseconds, max(exponentialDelay, retryAfterDelay))
+    }
+
+    private static func shouldRetry(urlError: URLError) -> Bool {
+        retryableTransportErrorCodes.contains(urlError.code)
+    }
+
+    private static func mapTransportError(_ error: URLError) -> DebridError {
+        if error.code == .timedOut {
+            return .timeout
+        }
+        return .networkError(error.localizedDescription)
+    }
+}
+
+private enum RetryHeaderDateParser {
+    private static let formatters: [DateFormatter] = {
+        let formatter1 = DateFormatter()
+        formatter1.locale = Locale(identifier: "en_US_POSIX")
+        formatter1.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter1.dateFormat = "EEE',' dd MMM yyyy HH':'mm':'ss zzz"
+
+        let formatter2 = DateFormatter()
+        formatter2.locale = Locale(identifier: "en_US_POSIX")
+        formatter2.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter2.dateFormat = "EEEE',' dd-MMM-yy HH':'mm':'ss zzz"
+
+        let formatter3 = DateFormatter()
+        formatter3.locale = Locale(identifier: "en_US_POSIX")
+        formatter3.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter3.dateFormat = "EEE MMM d HH':'mm':'ss yyyy"
+
+        return [formatter1, formatter2, formatter3]
+    }()
+
+    static func date(from value: String) -> Date? {
+        for formatter in formatters {
+            if let date = formatter.date(from: value) {
+                return date
+            }
+        }
+        return nil
     }
 }

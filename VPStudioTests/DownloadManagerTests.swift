@@ -123,6 +123,18 @@ private actor TransferRequestRecorder {
     }
 }
 
+private actor RemoteCleanupRecorder {
+    private var cleanedContexts: [StreamRecoveryContext] = []
+
+    func record(_ context: StreamRecoveryContext) {
+        cleanedContexts.append(context)
+    }
+
+    func snapshot() -> [StreamRecoveryContext] {
+        cleanedContexts
+    }
+}
+
 @Suite(.serialized)
 struct DownloadManagerTests {
     @Test func queuedDownloadCompletesAndPersists() async throws {
@@ -175,6 +187,48 @@ struct DownloadManagerTests {
 
         let cancelled = try await waitForStatus(database: database, id: task.id, expected: .cancelled)
         #expect(cancelled.status == .cancelled)
+    }
+
+    @Test func cancellingRecoveryBackedTaskInvokesRemoteCleanup() async throws {
+        let (database, rootDir) = try await makeDatabase(named: "download-manager-cancel-remote-cleanup.sqlite")
+        defer { try? FileManager.default.removeItem(at: rootDir) }
+
+        let downloadsDir = rootDir.appendingPathComponent("downloads", isDirectory: true)
+        let cleanupRecorder = RemoteCleanupRecorder()
+        let recoveryContext = try #require(
+            StreamRecoveryContext(
+                infoHash: "1111111111111111111111111111111111111111",
+                preferredService: .realDebrid,
+                torrentId: "rd-remote-1",
+                resolvedDebridService: DebridServiceType.realDebrid.rawValue
+            )
+        )
+        let manager = DownloadManager(
+            database: database,
+            downloadsDirectory: downloadsDir,
+            performer: makeDelayedPerformer(),
+            remoteTransferCleaner: { context in
+                await cleanupRecorder.record(context)
+            }
+        )
+
+        let task = try await manager.enqueueDownload(
+            stream: makeStream(name: "cancel-cleanup.mkv", recoveryContext: recoveryContext),
+            mediaId: "tt-cancel-cleanup",
+            episodeId: nil
+        )
+        _ = try await waitForStatus(database: database, id: task.id, expected: .downloading, timeoutSeconds: 10)
+
+        await manager.cancelDownload(id: task.id)
+
+        let cancelled = try await waitForStatus(database: database, id: task.id, expected: .cancelled)
+        let expectedCleanupContext = recoveryContext.enrichedForDownloadPersistence(
+            fileName: "cancel-cleanup.mkv",
+            sizeBytes: 100,
+            debridService: DebridServiceType.realDebrid.rawValue
+        )
+        #expect(cancelled.status == .cancelled)
+        #expect(await cleanupRecorder.snapshot() == [expectedCleanupContext])
     }
 
     @Test func cancellingRecoveryBackedTaskClearsPersistedReplayableTransportState() async throws {
@@ -305,6 +359,83 @@ struct DownloadManagerTests {
         #expect(completed.recoveryContext?.seasonNumber == recoveryContext.seasonNumber)
         #expect(completed.recoveryContext?.episodeNumber == recoveryContext.episodeNumber)
         #expect(completed.recoveryContextJSON != nil)
+    }
+
+    @Test func completedRecoveryBackedDownloadInvokesRemoteCleanup() async throws {
+        let (database, rootDir) = try await makeDatabase(named: "download-manager-complete-remote-cleanup.sqlite")
+        defer { try? FileManager.default.removeItem(at: rootDir) }
+
+        let downloadsDir = rootDir.appendingPathComponent("downloads", isDirectory: true)
+        let cleanupRecorder = RemoteCleanupRecorder()
+        let recoveryContext = try #require(
+            StreamRecoveryContext(
+                infoHash: "2222222222222222222222222222222222222222",
+                preferredService: .allDebrid,
+                torrentId: "ad-remote-1",
+                resolvedDebridService: DebridServiceType.allDebrid.rawValue
+            )
+        )
+        let manager = DownloadManager(
+            database: database,
+            downloadsDirectory: downloadsDir,
+            performer: makeSuccessfulPerformer(bytes: 2_048),
+            remoteTransferCleaner: { context in
+                await cleanupRecorder.record(context)
+            }
+        )
+
+        let task = try await manager.enqueueDownload(
+            stream: makeStream(name: "completed-cleanup.mkv", recoveryContext: recoveryContext),
+            mediaId: "tt-complete-cleanup",
+            episodeId: nil
+        )
+
+        _ = try await waitForStatus(database: database, id: task.id, expected: .completed)
+        let expectedCleanupContext = recoveryContext.enrichedForDownloadPersistence(
+            fileName: "completed-cleanup.mkv",
+            sizeBytes: 100,
+            debridService: DebridServiceType.realDebrid.rawValue
+        )
+        try await waitForRemoteCleanup(cleanupRecorder, expected: [expectedCleanupContext])
+    }
+
+    @Test func removingRecoveryBackedDownloadInvokesRemoteCleanup() async throws {
+        let (database, rootDir) = try await makeDatabase(named: "download-manager-remove-remote-cleanup.sqlite")
+        defer { try? FileManager.default.removeItem(at: rootDir) }
+
+        let downloadsDir = rootDir.appendingPathComponent("downloads", isDirectory: true)
+        let cleanupRecorder = RemoteCleanupRecorder()
+        let recoveryContext = try #require(
+            StreamRecoveryContext(
+                infoHash: "3333333333333333333333333333333333333333",
+                preferredService: .offcloud,
+                torrentId: "offcloud-remote-1",
+                resolvedDebridService: DebridServiceType.offcloud.rawValue
+            )
+        )
+        let persisted = DownloadTask(
+            id: "remove-recovery-backed",
+            mediaId: "tt-remove-cleanup",
+            streamURL: nil,
+            fileName: "remove-cleanup.mkv",
+            status: .cancelled,
+            recoveryContextJSON: try recoveryContext.jsonString()
+        )
+        try await database.saveDownloadTask(persisted)
+
+        let manager = DownloadManager(
+            database: database,
+            downloadsDirectory: downloadsDir,
+            performer: makeSuccessfulPerformer(bytes: 1),
+            remoteTransferCleaner: { context in
+                await cleanupRecorder.record(context)
+            }
+        )
+
+        try await manager.removeDownload(id: persisted.id)
+
+        #expect(try await database.fetchDownloadTask(id: persisted.id) == nil)
+        #expect(await cleanupRecorder.snapshot() == [recoveryContext])
     }
 
     @Test func retryWaitsForCancelledTransferTeardownBeforeRestarting() async throws {
@@ -1379,6 +1510,22 @@ struct DownloadManagerTests {
             debridService: DebridServiceType.realDebrid.rawValue,
             recoveryContext: recoveryContext
         )
+    }
+
+    private func waitForRemoteCleanup(
+        _ recorder: RemoteCleanupRecorder,
+        expected: [StreamRecoveryContext],
+        timeoutSeconds: TimeInterval = 5
+    ) async throws {
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        while Date() < deadline {
+            if await recorder.snapshot() == expected {
+                return
+            }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+
+        #expect(await recorder.snapshot() == expected)
     }
 }
 

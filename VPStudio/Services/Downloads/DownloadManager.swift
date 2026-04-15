@@ -72,6 +72,7 @@ actor DownloadManager {
 
     typealias DownloadPerformer = @Sendable (TransferRequest, @escaping @Sendable (Int64, Int64, Int64) -> Void, DownloadCancellationController) async throws -> (URL, URLResponse)
     typealias LinkRefresher = @Sendable (StreamRecoveryContext) async throws -> URL
+    typealias RemoteTransferCleaner = @Sendable (StreamRecoveryContext) async -> Void
     typealias SleepClosure = @Sendable (Duration) async throws -> Void
     typealias AvailableDiskSpaceProvider = @Sendable (URL) throws -> Int64?
 
@@ -82,6 +83,7 @@ actor DownloadManager {
     private let downloadsDirectory: URL
     private let performer: DownloadPerformer
     private let linkRefresher: LinkRefresher?
+    private let remoteTransferCleaner: RemoteTransferCleaner?
     private let sleep: SleepClosure
     private let availableDiskSpace: AvailableDiskSpaceProvider
     private let maxConcurrentTransfers: Int
@@ -104,6 +106,7 @@ actor DownloadManager {
         downloadsDirectory: URL? = nil,
         performer: DownloadPerformer? = nil,
         linkRefresher: LinkRefresher? = nil,
+        remoteTransferCleaner: RemoteTransferCleaner? = nil,
         maxConcurrentTransfers: Int = DownloadManager.defaultMaxConcurrentTransfers,
         minimumFreeSpaceBufferBytes: Int64 = 128 * 1_024 * 1_024,
         availableDiskSpace: @escaping AvailableDiskSpaceProvider = DownloadManager.defaultAvailableDiskSpace,
@@ -114,6 +117,7 @@ actor DownloadManager {
         self.database = database
         self.fileManager = fileManager
         self.linkRefresher = linkRefresher
+        self.remoteTransferCleaner = remoteTransferCleaner
         self.sleep = sleep
 
         if let downloadsDirectory {
@@ -187,6 +191,7 @@ actor DownloadManager {
         try? await database.updateDownloadTaskStatus(id: id, status: .cancelled, errorMessage: nil)
         if let existingTask {
             await clearReplayableTransferStateIfNeeded(for: existingTask, id: id)
+            await cleanupRemoteTransferIfNeeded(for: existingTask)
         }
         notifyDownloadsChanged()
     }
@@ -243,19 +248,18 @@ actor DownloadManager {
             await requestJobCancellation(id: id, job: job, allowGracefulResume: false)
         }
 
-        if let existing = try await database.fetchDownloadTask(id: id),
-           let destination = existing.destinationURL,
+        let existing = try await database.fetchDownloadTask(id: id)
+        if let destination = existing?.destinationURL,
            fileManager.fileExists(atPath: destination.path) {
-            do {
-                try fileManager.removeItem(at: destination)
-            } catch {
-                throw error
-            }
+            try fileManager.removeItem(at: destination)
         }
 
         try await database.deleteDownloadTask(id: id)
         inMemoryReplayableRequestsByTaskID[id] = nil
         releaseReservedDestination(for: id)
+        if let existing {
+            await cleanupRemoteTransferIfNeeded(for: existing)
+        }
         notifyDownloadsChanged()
     }
 
@@ -691,6 +695,7 @@ actor DownloadManager {
         try await database.updateDownloadTaskStatus(id: id, status: .completed, errorMessage: nil)
         try? await database.clearDownloadTaskReplayableTransportState(id: id)
         inMemoryReplayableRequestsByTaskID[id] = nil
+        await cleanupRemoteTransferIfNeeded(for: task)
         notifyDownloadsChanged()
     }
 
@@ -714,6 +719,14 @@ actor DownloadManager {
         updatedTask.updatedAt = Date()
         try? await database.saveDownloadTask(persistenceReadyTask(updatedTask))
         notifyDownloadsChanged()
+    }
+
+    private func cleanupRemoteTransferIfNeeded(for task: DownloadTask) async {
+        guard let remoteTransferCleaner,
+              let context = task.recoveryContext else {
+            return
+        }
+        await remoteTransferCleaner(context)
     }
 
     private func normalizedRestartProgress(_ progress: Double, canResumePartially: Bool) -> Double {

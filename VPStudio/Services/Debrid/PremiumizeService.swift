@@ -97,6 +97,19 @@ actor PremiumizeService: DebridServiceProtocol {
         return false
     }
 
+    func cleanupRemoteTransfer(torrentId: String) async throws {
+        episodeSelectionByTorrent.removeValue(forKey: torrentId)
+        let body = "id=\(torrentId.addingPercentEncoding(withAllowedCharacters: Self.formEncodingAllowed) ?? torrentId)"
+        let response: PMTransferDeleteResponse = try await request(
+            path: "/transfer/delete",
+            method: "POST",
+            body: body
+        )
+        guard response.status == nil || response.status == "success" else {
+            throw DebridError.networkError(response.message ?? "Premiumize rejected remote cleanup")
+        }
+    }
+
     func getStreamURL(torrentId: String) async throws -> StreamInfo {
         // For Premiumize, use direct download via transfer info
         let response: PMTransferInfoResponse = try await request(path: "/transfer/list")
@@ -224,3 +237,9 @@ private struct PMTransfer: Sendable {
     let link: String?
 }
 extension PMTransfer: Decodable {}
+
+private struct PMTransferDeleteResponse: Sendable {
+    let status: String?
+    let message: String?
+}
+extension PMTransferDeleteResponse: Decodable {}
