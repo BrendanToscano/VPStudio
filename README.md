@@ -29,13 +29,21 @@ It syncs to Trakt, and includes an AI assistant (Anthropic, OpenAI, Gemini, Open
 
 Current release preview:
 
-| Settings | Library |
+| Discover | Explore |
 | --- | --- |
-| ![VPStudio v2 Settings](.github/readme-assets/v2/settings.png) | ![VPStudio v2 Library](.github/readme-assets/v2/library.png) |
+| ![VPStudio v2 Discover](.github/pr-assets/v2/discover.png) | ![VPStudio v2 Explore](.github/pr-assets/v2/explore.png) |
 
-| Downloads | Favorites |
+| Detail | AI Detail |
 | --- | --- |
-| ![VPStudio v2 Downloads](.github/readme-assets/v2/downloads.png) | ![VPStudio v2 Favorites](.github/readme-assets/v2/favorites.png) |
+| ![VPStudio v2 Detail](.github/pr-assets/v2/detail-watch.png) | ![VPStudio v2 AI Detail](.github/pr-assets/v2/detail-ai.png) |
+
+| Discover AI | Settings |
+| --- | --- |
+| ![VPStudio v2 Discover AI](.github/pr-assets/v2/discover-ai.png) | ![VPStudio v2 Settings](.github/pr-assets/v2/settings.png) |
+
+| Library |
+| --- |
+| ![VPStudio v2 Library](.github/pr-assets/v2/library.png) |
 
 ### v1
 
