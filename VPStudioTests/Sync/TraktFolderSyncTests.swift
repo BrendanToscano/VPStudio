@@ -216,8 +216,9 @@ struct TraktListMappingModelTests {
     }
 
     @Test func equatableConformance() {
-        let a = TraktListMapping(id: "x", traktListId: 1, localFolderId: "f1")
-        let b = TraktListMapping(id: "x", traktListId: 1, localFolderId: "f1")
+        let syncedAt = Date(timeIntervalSince1970: 1_000)
+        let a = TraktListMapping(id: "x", traktListId: 1, localFolderId: "f1", lastSyncedAt: syncedAt)
+        let b = TraktListMapping(id: "x", traktListId: 1, localFolderId: "f1", lastSyncedAt: syncedAt)
         #expect(a == b)
     }
 

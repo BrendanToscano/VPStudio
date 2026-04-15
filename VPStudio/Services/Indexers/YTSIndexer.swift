@@ -7,10 +7,18 @@ struct YTSIndexer: TorrentIndexer {
         "https://yts.mx/api/v2",
         "https://yts.bz/api/v2",
     ]
+    private static let requestLimiter = IndexerRequestLimiter()
+    private static let defaultSession: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 20
+        configuration.timeoutIntervalForResource = 60
+        return URLSession(configuration: configuration)
+    }()
+
     private let session: URLSession
 
-    init(session: URLSession = .shared) {
-        self.session = session
+    init(session: URLSession? = nil) {
+        self.session = session ?? Self.defaultSession
     }
 
     func search(imdbId: String, type: MediaType, season: Int?, episode: Int?) async throws -> [TorrentResult] {
@@ -39,14 +47,22 @@ struct YTSIndexer: TorrentIndexer {
             }
 
             do {
-                let (data, response) = try await session.data(from: url)
+                let (data, response) = try await Self.requestLimiter.data(from: url, session: session)
                 guard let httpResponse = response as? HTTPURLResponse,
                       (200...299).contains(httpResponse.statusCode) else {
                     throw URLError(.badServerResponse)
                 }
                 let decoder = JSONDecoder()
                 decoder.keyDecodingStrategy = .convertFromSnakeCase
-                let ytsResponse = try decoder.decode(YTSResponse.self, from: data)
+                let ytsResponse: YTSResponse
+                do {
+                    ytsResponse = try decoder.decode(YTSResponse.self, from: data)
+                } catch {
+                    throw IndexerParseError.invalidPayload(
+                        indexer: name,
+                        reason: "malformed JSON from \(url.host ?? "unknown-host")"
+                    )
+                }
                 if let movies = ytsResponse.data?.movies, !movies.isEmpty {
                     return ytsResponse
                 }

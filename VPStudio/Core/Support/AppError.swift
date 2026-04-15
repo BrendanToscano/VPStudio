@@ -121,6 +121,8 @@ enum AppError: LocalizedError, Equatable, Sendable {
     case player(PlayerError)
     case unknown(String)
 
+    private static let tmdbSetupGuidance = "Open Settings → Movie & TV Metadata (TMDB), add your key, then tap Retry."
+
     init(_ error: Error, fallback: AppError? = nil) {
         if let mapped = Self.map(error) {
             self = mapped
@@ -133,6 +135,15 @@ enum AppError: LocalizedError, Equatable, Sendable {
         }
 
         self = .unknown((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)
+    }
+
+    static func tmdbSetupRequired(feature: String) -> AppError {
+        .unknown("\(feature) needs a TMDB API key. \(tmdbSetupGuidance)")
+    }
+
+    var requiresTMDBSetupAction: Bool {
+        guard case .unknown(let message) = self else { return false }
+        return message.contains("TMDB API key") && message.contains(Self.tmdbSetupGuidance)
     }
 
     var errorDescription: String? {

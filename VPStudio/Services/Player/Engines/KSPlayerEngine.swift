@@ -1,5 +1,8 @@
 import Foundation
 @preconcurrency import KSPlayer
+#if canImport(VideoToolbox)
+import VideoToolbox
+#endif
 
 struct KSPlayerEngine: PlayerEngine {
     let kind: PlayerEngineKind = .ksPlayer
@@ -35,6 +38,18 @@ struct KSPlayerEngine: PlayerEngine {
         // can't handle the stream (e.g. interlaced content).
         options.hardwareDecode = true
         options.asynchronousDecompression = true
+
+        // Note: KSPlayer's AVCodecID → CMVideoCodecType mapping does NOT
+        // include AV1, so VideoToolbox hardware decode is not used for AV1
+        // even when options.hardwareDecode is true. KSPlayer decodes AV1
+        // via the dav1d software decoder. On visionOS, prefer AVPlayer for
+        // AV1 streams to get M2 hardware decode (see PlayerEngineSelector).
+        #if os(visionOS)
+        if stream.codec == .av1,
+           VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1) {
+            KSLog("[VPStudio] AV1 hardware decode supported — prefer AVPlayer for this stream")
+        }
+        #endif
 
         // Per-stream buffer/probe tuning with a lower-RAM baseline.
         let profile = Self.tuningProfile(for: stream)
@@ -102,7 +117,19 @@ struct KSPlayerEngine: PlayerEngine {
                 return
 
             case .error:
-                let message = failureMessage() ?? "Unknown KSPlayer startup error"
+                // The onFinish callback may not have fired yet when the state
+                // transitions to .error, so failureMessage() can be nil.
+                // Give the callback a brief window to populate the error.
+                if failureMessage() == nil {
+                    try await Task.sleep(for: .milliseconds(100))
+                }
+                let detail = failureMessage()
+                let message: String
+                if let detail, !detail.isEmpty {
+                    message = "KSPlayer decode error: \(detail)"
+                } else {
+                    message = "KSPlayer failed to initialize (no error detail from decoder)"
+                }
                 throw PlayerEngineError.initializationFailed(.ksPlayer, message)
             }
 
@@ -127,21 +154,43 @@ struct KSPlayerEngine: PlayerEngine {
 
     nonisolated static func tuningProfile(for stream: StreamInfo) -> TuningProfile {
         if isHighDemandStream(stream) {
+            #if os(visionOS)
+            // Vision Pro has 16 GB shared memory; M2 hardware decode is fast
+            // enough that less buffering is fine. Reduce to save ~40% buffer RAM.
             return TuningProfile(
-                preferredForwardBufferDuration: 5.0,
-                maxBufferDuration: 30.0,
+                preferredForwardBufferDuration: 2.0,
+                maxBufferDuration: 10.0,
                 probesize: 6_000_000,
                 maxAnalyzeDuration: 6_000_000,
                 autoSelectEmbedSubtitle: false
             )
+            #else
+            return TuningProfile(
+                preferredForwardBufferDuration: 3.0,
+                maxBufferDuration: 16.0,
+                probesize: 6_000_000,
+                maxAnalyzeDuration: 6_000_000,
+                autoSelectEmbedSubtitle: false
+            )
+            #endif
         }
 
+        #if os(visionOS)
         return TuningProfile(
-            preferredForwardBufferDuration: 3.0,
-            maxBufferDuration: 15.0,
+            preferredForwardBufferDuration: 1.0,
+            maxBufferDuration: 5.0,
             probesize: 2_000_000,
             maxAnalyzeDuration: 2_500_000,
             autoSelectEmbedSubtitle: true
         )
+        #else
+        return TuningProfile(
+            preferredForwardBufferDuration: 1.5,
+            maxBufferDuration: 8.0,
+            probesize: 2_000_000,
+            maxAnalyzeDuration: 2_500_000,
+            autoSelectEmbedSubtitle: true
+        )
+        #endif
     }
 }

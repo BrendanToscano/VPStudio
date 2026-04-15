@@ -14,3 +14,16 @@ DerivedData/
 # Local env / secrets
 .env
 .env.*
+
+# Local smoke / markers
+.smoke-runs/
+.publishable_ready
+
+# Build artifacts (SPM checkouts, derived data)
+Build/
+
+# QA test artifacts
+qa-artifacts/
+
+# Codex cache
+.codex-home/

@@ -62,6 +62,72 @@ struct TorznabIndexerRequestRoutingTests {
                 == "{ImdbId:tt0944947} {Season:1} {Episode:2}"
         )
     }
+
+    @Test func torznabIndexerRejectsHttpBaseURLs() async {
+        let session = makeStubSession { request in
+            Issue.record("Unexpected network request: \(request.url?.absoluteString ?? "nil")")
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (response, Data("[]".utf8))
+        }
+
+        let indexer = TorznabIndexer(
+            name: "HTTP Torznab",
+            baseURL: "http://torznab.example",
+            endpointPath: "/api",
+            apiKey: "api-key",
+            apiKeyTransport: .header,
+            session: session
+        )
+
+        do {
+            _ = try await indexer.searchByQuery(query: "Dune", type: .movie)
+            Issue.record("Expected URLError.unsupportedURL")
+        } catch let error as URLError {
+            #expect(error.code == .unsupportedURL || error.code == .badURL)
+        } catch {
+            Issue.record("Unexpected error type: \(error)")
+        }
+    }
+
+    @Test func torznabQuerySearchFiltersSeriesResultsByEpisodeTokens() async throws {
+        let xml = """
+        <rss version="2.0">
+          <channel>
+            <item>
+              <title>Project Blue Book S01E02 1080p</title>
+              <guid>aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa</guid>
+              <size>123456789</size>
+              <torznab:attr xmlns:torznab="http://torznab.com/schemas/2015/feed" name="seeders" value="12" />
+            </item>
+            <item>
+              <title>Project Blue Book S01E03 1080p</title>
+              <guid>bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb</guid>
+              <size>123456789</size>
+              <torznab:attr xmlns:torznab="http://torznab.com/schemas/2015/feed" name="seeders" value="9" />
+            </item>
+          </channel>
+        </rss>
+        """
+
+        let session = makeStubSession { request in
+            let url = try #require(request.url)
+            let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (response, Data(xml.utf8))
+        }
+
+        let indexer = TorznabIndexer(
+            name: "Torznab",
+            baseURL: "https://torznab.example",
+            endpointPath: "/api",
+            apiKey: "api-key",
+            apiKeyTransport: .header,
+            session: session
+        )
+
+        let results = try await indexer.searchByQuery(query: "Project Blue Book S01E02", type: .series)
+
+        #expect(results.map(\.infoHash) == ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"])
+    }
 }
 
 private enum TorznabRequestStubError: Error {

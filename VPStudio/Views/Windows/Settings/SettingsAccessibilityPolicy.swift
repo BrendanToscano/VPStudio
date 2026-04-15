@@ -21,7 +21,7 @@ enum SettingsAccessibilityPolicy {
         if hasWarning {
             return "Needs attention"
         }
-        return "Tap to configure"
+        return "Opens details for this setting"
     }
 
     /// Accessibility label for a settings section header, summarizing configuration progress.

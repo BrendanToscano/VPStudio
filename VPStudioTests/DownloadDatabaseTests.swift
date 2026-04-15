@@ -79,6 +79,44 @@ struct DownloadDatabaseTests {
         #expect((updated?.updatedAt ?? initialDate) > initialDate)
     }
 
+    @Test func recoveryBackedTasksPersistWithoutReplayableTransportState() async throws {
+        let (database, rootDir) = try await makeDatabase(named: "download-db-recovery-redaction.sqlite")
+        defer { try? FileManager.default.removeItem(at: rootDir) }
+
+        let context = try #require(
+            StreamRecoveryContext(
+                infoHash: "00112233445566778899aabbccddeeff00112233",
+                preferredService: .realDebrid
+            )
+        )
+
+        let task = DownloadTask(
+            id: "download-redacted",
+            mediaId: "tt999",
+            streamURL: nil,
+            fileName: "episode.mkv",
+            status: .queued,
+            progress: 0,
+            bytesWritten: 0,
+            totalBytes: nil,
+            destinationPath: nil,
+            errorMessage: nil,
+            mediaTitle: "Episode",
+            mediaType: "series",
+            recoveryContextJSON: try context.jsonString(),
+            expectedBytes: 1_024,
+            resumeDataBase64: Data("resume".utf8).base64EncodedString(),
+            createdAt: Date(),
+            updatedAt: Date()
+        )
+
+        try await database.saveDownloadTask(task.redactedForRecoveryBackedPersistence)
+        let fetched = try #require(try await database.fetchDownloadTask(id: task.id))
+        #expect(fetched.persistedStreamURL == nil)
+        #expect(fetched.resumeData == nil)
+        #expect(fetched.recoveryContext?.infoHash == context.infoHash)
+    }
+
     private func makeDatabase(named fileName: String) async throws -> (DatabaseManager, URL) {
         let rootDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: rootDir, withIntermediateDirectories: true)

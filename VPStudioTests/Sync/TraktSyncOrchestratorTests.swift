@@ -118,6 +118,35 @@ private func makeOrchestrator(
     return (orchestrator, service)
 }
 
+private func recentDate(daysAgo: Int) -> Date {
+    let offset = max(daysAgo, 0)
+    return Calendar(identifier: .gregorian).date(byAdding: .day, value: -offset, to: Date()) ?? Date()
+}
+
+private func iso8601String(from date: Date) -> String {
+    let formatter = ISO8601DateFormatter()
+    formatter.timeZone = TimeZone(secondsFromGMT: 0)
+    formatter.formatOptions = [.withInternetDateTime]
+    return formatter.string(from: date)
+}
+
+private final class CancellationPageTracker: @unchecked Sendable {
+    private let lock = NSLock()
+    private var requestedPages: [Int] = []
+
+    func record(_ page: Int) {
+        lock.lock()
+        requestedPages.append(page)
+        lock.unlock()
+    }
+
+    func hasSeen(_ page: Int) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return requestedPages.contains(page)
+    }
+}
+
 /// Builds a stub session that returns path-matched JSON responses for Trakt API endpoints.
 private func makeOrchestratorStubSession(
     watchlistMovies: String = "[]",
@@ -172,6 +201,27 @@ private func makeOrchestratorStubSession(
 
 @Suite("TraktSyncOrchestrator - Pull", .serialized)
 struct TraktSyncOrchestratorPullTests {
+    private func generateWatchlistMovieItems(count: Int, startIndex: Int = 0) -> String {
+        let items = (0..<count).map { i in
+            let index = startIndex + i
+            let imdb = String(format: "tt%07d", index)
+            return """
+            {"rank":\(index + 1),"movie":{"title":"Movie \(index)","year":2025,"ids":{"trakt":\(index + 1),"imdb":"\(imdb)"}}}
+            """
+        }
+        return "[\(items.joined(separator: ","))]"
+    }
+
+    private func generateRatingMovieItems(count: Int, startIndex: Int = 0, ratedAt: String) -> String {
+        let items = (0..<count).map { i in
+            let index = startIndex + i
+            let imdb = String(format: "tt%07d", index)
+            return """
+            {"rating":8,"rated_at":"\(ratedAt)","movie":{"title":"Movie \(index)","year":2025,"ids":{"trakt":\(index + 1),"imdb":"\(imdb)"}}}
+            """
+        }
+        return "[\(items.joined(separator: ","))]"
+    }
 
     @Test("pull creates watchlist entries from remote")
     func pullCreatesWatchlistEntries() async throws {
@@ -192,6 +242,7 @@ struct TraktSyncOrchestratorPullTests {
         let result = await orchestrator.sync()
 
         #expect(result.watchlistPulled == 1)
+        #expect(result.localRefreshTargets.contains(.library))
         let entries = try await database.fetchLibraryEntries(listType: .watchlist)
         #expect(entries.count == 1)
         #expect(entries[0].mediaId == "tt1160419")
@@ -230,6 +281,71 @@ struct TraktSyncOrchestratorPullTests {
         #expect(entries.count == 1)
     }
 
+    @Test("pull paginates watchlist pages beyond page 1")
+    func pullPaginatesWatchlistPages() async throws {
+        let database = try await makeTempDatabase()
+        let settings = makeSettingsManager(database: database)
+        try await settings.setBool(key: SettingsKeys.traktSyncWatchlist, value: true)
+        try await settings.setBool(key: SettingsKeys.traktSyncHistory, value: false)
+        try await settings.setBool(key: SettingsKeys.traktSyncRatings, value: false)
+
+        let page1 = generateWatchlistMovieItems(count: 50, startIndex: 1000)
+        let page2 = generateWatchlistMovieItems(count: 1, startIndex: 1050)
+
+        final class PageTracker: @unchecked Sendable {
+            private let lock = NSLock()
+            private var requestedPages: [Int] = []
+
+            func record(_ page: Int) {
+                lock.lock()
+                requestedPages.append(page)
+                lock.unlock()
+            }
+
+            var pages: [Int] {
+                lock.lock()
+                defer { lock.unlock() }
+                return requestedPages
+            }
+        }
+        let pageTracker = PageTracker()
+
+        let session = makeStubSession { request in
+            let url = request.url!
+            let path = url.path
+
+            if request.httpMethod == "POST" {
+                let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+                return (response, Data(#"{"added":{"movies":1,"shows":0,"episodes":0}}"#.utf8))
+            }
+
+            if path.contains("/sync/watchlist/movies") {
+                let page = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+                    .queryItems?
+                    .first(where: { $0.name == "page" })?
+                    .value
+                    .flatMap(Int.init) ?? 1
+                pageTracker.record(page)
+                let body = page == 1 ? page1 : (page == 2 ? page2 : "[]")
+                let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+                return (response, Data(body.utf8))
+            }
+
+            let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (response, Data("[]".utf8))
+        }
+        let (orchestrator, service) = makeOrchestrator(database: database, settingsManager: settings, session: session)
+        await service.setTokens(access: "token", refresh: "refresh")
+
+        let result = await orchestrator.sync()
+
+        #expect(result.watchlistPulled == 51)
+        #expect(Set(pageTracker.pages).contains(1))
+        #expect(Set(pageTracker.pages).contains(2))
+        let entries = try await database.fetchLibraryEntries(listType: .watchlist)
+        #expect(entries.count == 51)
+    }
+
     @Test("pull creates taste events from remote ratings")
     func pullCreatesRatings() async throws {
         let database = try await makeTempDatabase()
@@ -237,10 +353,11 @@ struct TraktSyncOrchestratorPullTests {
         try await settings.setBool(key: SettingsKeys.traktSyncWatchlist, value: false)
         try await settings.setBool(key: SettingsKeys.traktSyncHistory, value: false)
         try await settings.setBool(key: SettingsKeys.traktSyncRatings, value: true)
+        let ratedAt = iso8601String(from: recentDate(daysAgo: 30))
 
         let session = makeOrchestratorStubSession(
             ratingsMovies: """
-            [{"rating":9,"rated_at":"2025-01-20","movie":{"title":"Interstellar","year":2014,"ids":{"trakt":111,"imdb":"tt0816692"}}}]
+            [{"rating":9,"rated_at":"\(ratedAt)","movie":{"title":"Interstellar","year":2014,"ids":{"trakt":111,"imdb":"tt0816692"}}}]
             """
         )
         let (orchestrator, service) = makeOrchestrator(database: database, settingsManager: settings, session: session)
@@ -249,6 +366,7 @@ struct TraktSyncOrchestratorPullTests {
         let result = await orchestrator.sync()
 
         #expect(result.ratingsPulled == 1)
+        #expect(result.localRefreshTargets.contains(.tasteProfile))
         let event = try await database.fetchLatestTasteRating(mediaId: "tt0816692")
         #expect(event != nil)
         #expect(event?.feedbackValue == 9)
@@ -263,6 +381,7 @@ struct TraktSyncOrchestratorPullTests {
         try await settings.setBool(key: SettingsKeys.traktSyncWatchlist, value: false)
         try await settings.setBool(key: SettingsKeys.traktSyncHistory, value: false)
         try await settings.setBool(key: SettingsKeys.traktSyncRatings, value: true)
+        let ratedAt = iso8601String(from: recentDate(daysAgo: 30))
 
         // Pre-add a local rating
         let event = TasteEvent(
@@ -270,14 +389,14 @@ struct TraktSyncOrchestratorPullTests {
             mediaId: "tt0816692",
             eventType: .rated,
             feedbackScale: .oneToTen,
-            feedbackValue: 8,
+            feedbackValue: 9,
             source: .manual
         )
         try await database.saveTasteEvent(event)
 
         let session = makeOrchestratorStubSession(
             ratingsMovies: """
-            [{"rating":9,"rated_at":"2025-01-20","movie":{"title":"Interstellar","year":2014,"ids":{"trakt":111,"imdb":"tt0816692"}}}]
+            [{"rating":9,"rated_at":"\(ratedAt)","movie":{"title":"Interstellar","year":2014,"ids":{"trakt":111,"imdb":"tt0816692"}}}]
             """
         )
         let (orchestrator, service) = makeOrchestrator(database: database, settingsManager: settings, session: session)
@@ -286,6 +405,115 @@ struct TraktSyncOrchestratorPullTests {
         let result = await orchestrator.sync()
 
         #expect(result.ratingsPulled == 0)
+        let ratings = try await database.fetchTasteEvents(eventType: .rated, limit: 10)
+        #expect(ratings.count == 1)
+        #expect(ratings.first?.feedbackValue == 9)
+        #expect(ratings.first?.source == .manual)
+    }
+
+    @Test("pull paginates ratings pages beyond page 1")
+    func pullPaginatesRatingsPages() async throws {
+        let database = try await makeTempDatabase()
+        let settings = makeSettingsManager(database: database)
+        try await settings.setBool(key: SettingsKeys.traktSyncWatchlist, value: false)
+        try await settings.setBool(key: SettingsKeys.traktSyncHistory, value: false)
+        try await settings.setBool(key: SettingsKeys.traktSyncRatings, value: true)
+
+        let ratedAt = iso8601String(from: recentDate(daysAgo: 5))
+        let page1 = generateRatingMovieItems(count: 50, startIndex: 2000, ratedAt: ratedAt)
+        let page2 = generateRatingMovieItems(count: 1, startIndex: 2050, ratedAt: ratedAt)
+
+        final class PageTracker: @unchecked Sendable {
+            private let lock = NSLock()
+            private var requestedPages: [Int] = []
+
+            func record(_ page: Int) {
+                lock.lock()
+                requestedPages.append(page)
+                lock.unlock()
+            }
+
+            var pages: [Int] {
+                lock.lock()
+                defer { lock.unlock() }
+                return requestedPages
+            }
+        }
+        let pageTracker = PageTracker()
+
+        let session = makeStubSession { request in
+            let url = request.url!
+            let path = url.path
+
+            if request.httpMethod == "POST" {
+                let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+                return (response, Data(#"{"added":{"movies":1,"shows":0,"episodes":0}}"#.utf8))
+            }
+
+            if path.contains("/sync/ratings/movies") {
+                let page = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+                    .queryItems?
+                    .first(where: { $0.name == "page" })?
+                    .value
+                    .flatMap(Int.init) ?? 1
+                pageTracker.record(page)
+                let body = page == 1 ? page1 : (page == 2 ? page2 : "[]")
+                let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+                return (response, Data(body.utf8))
+            }
+
+            let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (response, Data("[]".utf8))
+        }
+        let (orchestrator, service) = makeOrchestrator(database: database, settingsManager: settings, session: session)
+        await service.setTokens(access: "token", refresh: "refresh")
+
+        let result = await orchestrator.sync()
+
+        #expect(result.ratingsPulled == 51)
+        #expect(Set(pageTracker.pages).contains(1))
+        #expect(Set(pageTracker.pages).contains(2))
+        let ratings = try await database.fetchTasteEvents(eventType: .rated, limit: 60)
+        #expect(ratings.count == 51)
+    }
+
+    @Test("history pull marks library refresh when it only backfills the history library entry")
+    func historyPullMarksLibraryRefreshWhenOnlyHistoryLibraryEntryChanges() async throws {
+        let database = try await makeTempDatabase()
+        let settings = makeSettingsManager(database: database)
+        try await settings.setBool(key: SettingsKeys.traktSyncWatchlist, value: false)
+        try await settings.setBool(key: SettingsKeys.traktSyncHistory, value: true)
+        try await settings.setBool(key: SettingsKeys.traktSyncRatings, value: false)
+        let watchedAt = recentDate(daysAgo: 20)
+        let watchedAtString = iso8601String(from: watchedAt)
+
+        try await database.saveWatchHistory(
+            WatchHistory(
+                id: UUID().uuidString,
+                mediaId: "tt7654321",
+                title: "Already Watched",
+                progress: 0,
+                duration: 0,
+                watchedAt: watchedAt,
+                isCompleted: true
+            )
+        )
+
+        let session = makeOrchestratorStubSession(
+            historyMovies: """
+            [{"id":5001,"watched_at":"\(watchedAtString)","action":"watch","movie":{"title":"Already Watched","year":2025,"ids":{"trakt":1,"imdb":"tt7654321"}}}]
+            """
+        )
+        let (orchestrator, service) = makeOrchestrator(database: database, settingsManager: settings, session: session)
+        await service.setTokens(access: "token", refresh: "refresh")
+
+        let result = await orchestrator.sync()
+
+        #expect(result.historyPulled == 0)
+        #expect(result.localRefreshTargets.contains(.library))
+        let historyEntries = try await database.fetchLibraryEntries(listType: .history)
+        #expect(historyEntries.count == 1)
+        #expect(historyEntries[0].mediaId == "tt7654321")
     }
 
     @Test("pull creates history entries in both WatchHistory and UserLibrary tables")
@@ -489,6 +717,193 @@ struct TraktSyncOrchestratorPushTests {
         #expect(result.ratingsPushed == 1)
         #expect(postState.paths.contains { $0.hasSuffix("/sync/ratings") })
     }
+
+    @Test("push ratings normalizes one-to-hundred ratings to Trakt's ten-point scale")
+    func pushRatingsNormalizesOneToHundredScale() async throws {
+        let database = try await makeTempDatabase()
+        let settings = makeSettingsManager(database: database)
+        try await settings.setBool(key: SettingsKeys.traktSyncWatchlist, value: false)
+        try await settings.setBool(key: SettingsKeys.traktSyncHistory, value: false)
+        try await settings.setBool(key: SettingsKeys.traktSyncRatings, value: true)
+
+        let event = TasteEvent(
+            userId: "default",
+            mediaId: "tt7654321",
+            eventType: .rated,
+            feedbackScale: .oneToHundred,
+            feedbackValue: 67,
+            source: .manual
+        )
+        try await database.saveTasteEvent(event)
+
+        final class PostState: @unchecked Sendable {
+            private let lock = NSLock()
+            private(set) var bodies: [Data] = []
+
+            func record(body: Data) {
+                lock.lock()
+                bodies.append(body)
+                lock.unlock()
+            }
+        }
+        let postState = PostState()
+
+        let session = makeOrchestratorStubSession(
+            postResponder: { request in
+                postState.record(body: request.httpBody ?? Data())
+                return (200, #"{"added":{"movies":1,"shows":0,"episodes":0}}"#)
+            }
+        )
+        let (orchestrator, service) = makeOrchestrator(database: database, settingsManager: settings, session: session)
+        await service.setTokens(access: "token", refresh: "refresh")
+
+        let result = await orchestrator.sync()
+        let body = try #require(postState.bodies.first)
+        let json = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        let movies = try #require(json["movies"] as? [[String: Any]])
+        let firstMovie = try #require(movies.first)
+
+        #expect(result.ratingsPushed == 1)
+        #expect(firstMovie["rating"] as? Int == 7)
+    }
+
+    @Test("push watchlist fails closed when remote deduplication fetch fails")
+    func pushWatchlistSkipsWhenRemoteDeduplicationFetchFails() async throws {
+        let database = try await makeTempDatabase()
+        let settings = makeSettingsManager(database: database)
+        try await settings.setBool(key: SettingsKeys.traktSyncWatchlist, value: true)
+        try await settings.setBool(key: SettingsKeys.traktSyncHistory, value: false)
+        try await settings.setBool(key: SettingsKeys.traktSyncRatings, value: false)
+
+        try await database.addToLibrary(
+            UserLibraryEntry(
+                id: UUID().uuidString,
+                mediaId: "tt7777777",
+                folderId: LibraryFolder.systemFolderID(for: .watchlist),
+                listType: .watchlist,
+                addedAt: Date()
+            )
+        )
+
+        final class RequestState: @unchecked Sendable {
+            private let lock = NSLock()
+            private var postCount = 0
+
+            func recordPost() {
+                lock.lock()
+                postCount += 1
+                lock.unlock()
+            }
+
+            var count: Int {
+                lock.lock()
+                defer { lock.unlock() }
+                return postCount
+            }
+        }
+        let state = RequestState()
+
+        let session = makeStubSession { request in
+            let url = try #require(request.url)
+            if request.httpMethod == "POST" {
+                state.recordPost()
+            }
+
+            let response: HTTPURLResponse
+            let body: String
+            if url.path.hasSuffix("/sync/watchlist/movies") {
+                response = HTTPURLResponse(url: url, statusCode: 503, httpVersion: nil, headerFields: nil)!
+                body = #"{"error":"unavailable"}"#
+            } else {
+                response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+                body = "[]"
+            }
+            return (response, Data(body.utf8))
+        }
+
+        let (orchestrator, service) = makeOrchestrator(database: database, settingsManager: settings, session: session)
+        await service.setTokens(access: "token", refresh: "refresh")
+
+        let result = await orchestrator.sync()
+
+        #expect(result.watchlistPushed == 0)
+        #expect(result.errors.contains { $0.localizedCaseInsensitiveContains("watchlist") })
+        #expect(state.count == 0)
+    }
+
+    @Test("push ratings skips when remote deduplication exceeds the configured page cap")
+    func pushRatingsSkipsWhenRemoteDeduplicationHitsPageCap() async throws {
+        let database = try await makeTempDatabase()
+        let settings = makeSettingsManager(database: database)
+        try await settings.setBool(key: SettingsKeys.traktSyncWatchlist, value: false)
+        try await settings.setBool(key: SettingsKeys.traktSyncHistory, value: false)
+        try await settings.setBool(key: SettingsKeys.traktSyncRatings, value: true)
+
+        try await database.saveTasteEvent(
+            TasteEvent(
+                userId: "default",
+                mediaId: "tt1234000",
+                eventType: .rated,
+                feedbackScale: .oneToTen,
+                feedbackValue: 9,
+                source: .manual
+            )
+        )
+
+        final class RequestState: @unchecked Sendable {
+            private let lock = NSLock()
+            private var postCount = 0
+
+            func recordPost() {
+                lock.lock()
+                postCount += 1
+                lock.unlock()
+            }
+
+            var count: Int {
+                lock.lock()
+                defer { lock.unlock() }
+                return postCount
+            }
+        }
+        let state = RequestState()
+
+        let fullRatingsPage = "[" + (0..<50).map { index in
+            """
+            {"rating":8,"rated_at":"2025-01-20","movie":{"title":"Movie \(index)","year":2025,"ids":{"trakt":\(index),"imdb":"tt\(String(format: "%07d", index))"}}}
+            """
+        }.joined(separator: ",") + "]"
+
+        let session = makeStubSession { request in
+            let url = try #require(request.url)
+            if request.httpMethod == "POST" {
+                state.recordPost()
+                let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+                return (response, Data(#"{"added":{"movies":1,"shows":0,"episodes":0}}"#.utf8))
+            }
+
+            let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            if url.path.hasSuffix("/sync/ratings/movies") {
+                return (response, Data(fullRatingsPage.utf8))
+            }
+            return (response, Data("[]".utf8))
+        }
+
+        let service = TraktSyncService(clientId: "test-client", clientSecret: "test-secret", session: session)
+        let orchestrator = TraktSyncOrchestrator(
+            traktService: service,
+            database: database,
+            settingsManager: settings,
+            maxHistoryPages: 1
+        )
+        await service.setTokens(access: "token", refresh: "refresh")
+
+        let result = await orchestrator.sync()
+
+        #expect(result.ratingsPushed == 0)
+        #expect(result.errors.contains { $0.localizedCaseInsensitiveContains("ratings") && $0.localizedCaseInsensitiveContains("cap") })
+        #expect(state.count == 0)
+    }
 }
 
 // MARK: - Toggle Settings Tests
@@ -605,6 +1020,7 @@ struct TraktSyncOrchestratorErrorResilienceTests {
         try await settings.setBool(key: SettingsKeys.traktSyncWatchlist, value: true)
         try await settings.setBool(key: SettingsKeys.traktSyncHistory, value: true)
         try await settings.setBool(key: SettingsKeys.traktSyncRatings, value: false)
+        try await settings.setString(key: SettingsKeys.traktLastSyncDate, value: "2025-01-01T00:00:00Z")
 
         // Watchlist movies endpoint returns 500, but history works
         let session = makeStubSession { request in
@@ -648,6 +1064,103 @@ struct TraktSyncOrchestratorErrorResilienceTests {
         #expect(result.historyPulled == 1)
         let historyEntries = try await database.fetchLibraryEntries(listType: .history)
         #expect(historyEntries.count == 1)
+
+        let after = try await settings.getString(key: SettingsKeys.traktLastSyncDate)
+        #expect(after != nil)
+        #expect(after != "2025-01-01T00:00:00Z")
+        let afterValue = try #require(after)
+        #expect(ISO8601DateFormatter().date(from: afterValue) != nil)
+    }
+
+    @Test("sync leaves last sync date unchanged when every enabled operation fails")
+    func syncPreservesLastSyncDateOnTotalFailure() async throws {
+        let database = try await makeTempDatabase()
+        let settings = makeSettingsManager(database: database)
+        try await settings.setBool(key: SettingsKeys.traktSyncWatchlist, value: true)
+        try await settings.setBool(key: SettingsKeys.traktSyncHistory, value: false)
+        try await settings.setBool(key: SettingsKeys.traktSyncRatings, value: false)
+        try await settings.setString(key: SettingsKeys.traktLastSyncDate, value: "2025-01-01T00:00:00Z")
+
+        let session = makeStubSession { request in
+            let url = request.url!
+            let response = HTTPURLResponse(url: url, statusCode: 500, httpVersion: nil, headerFields: nil)!
+            return (response, Data())
+        }
+
+        let (orchestrator, service) = makeOrchestrator(database: database, settingsManager: settings, session: session)
+        await service.setTokens(access: "token", refresh: "refresh")
+
+        let result = await orchestrator.sync()
+
+        #expect(result.hasErrors)
+        let after = try await settings.getString(key: SettingsKeys.traktLastSyncDate)
+        #expect(after == "2025-01-01T00:00:00Z")
+    }
+
+    @Test("cancelling sync stops further watchlist writes without surfacing an error")
+    func syncCancellationStopsFurtherWatchlistWrites() async throws {
+        let database = try await makeTempDatabase()
+        let settings = makeSettingsManager(database: database)
+        try await settings.setBool(key: SettingsKeys.traktSyncWatchlist, value: true)
+        try await settings.setBool(key: SettingsKeys.traktSyncHistory, value: false)
+        try await settings.setBool(key: SettingsKeys.traktSyncRatings, value: false)
+
+        let pageTracker = CancellationPageTracker()
+        let session = makeStubSession { request in
+            let url = try #require(request.url)
+            let path = url.path
+
+            if request.httpMethod == "POST" {
+                let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+                return (response, Data(#"{"added":{"movies":1,"shows":0,"episodes":0}}"#.utf8))
+            }
+
+            if path.hasSuffix("/sync/watchlist/movies") {
+                let page = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+                    .queryItems?
+                    .first(where: { $0.name == "page" })?
+                    .value
+                    .flatMap(Int.init) ?? 1
+                pageTracker.record(page)
+
+                let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+                if page == 1 {
+                    let body = "[" + (0..<50).map { index in
+                        """
+                        {"rank":\(index + 1),"movie":{"title":"Movie \(index)","year":2025,"ids":{"trakt":\(index + 1),"imdb":"tt\(String(format: "%07d", index))"}}}
+                        """
+                    }.joined(separator: ",") + "]"
+                    return (response, Data(body.utf8))
+                }
+
+                Thread.sleep(forTimeInterval: 0.25)
+                let body = """
+                [{"rank":51,"movie":{"title":"Late Page","year":2025,"ids":{"trakt":51,"imdb":"tt7654321"}}}]
+                """
+                return (response, Data(body.utf8))
+            }
+
+            let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (response, Data("[]".utf8))
+        }
+
+        let (orchestrator, service) = makeOrchestrator(database: database, settingsManager: settings, session: session)
+        await service.setTokens(access: "token", refresh: "refresh")
+
+        let syncTask = Task { await orchestrator.sync() }
+        let deadline = Date().addingTimeInterval(5)
+        while !pageTracker.hasSeen(2) && Date() < deadline {
+            try await Task.sleep(for: .milliseconds(25))
+        }
+
+        #expect(pageTracker.hasSeen(2))
+        syncTask.cancel()
+        let result = await syncTask.value
+
+        #expect(!result.hasErrors)
+        #expect(result.watchlistPulled == 0)
+        let entries = try await database.fetchLibraryEntries(listType: .watchlist)
+        #expect(entries.isEmpty)
     }
 
     @Test("empty remote returns zero counts with no errors")
@@ -808,6 +1321,14 @@ struct TraktSyncOrchestratorHistoryPullWatchHistoryTests {
         try await settings.setBool(key: SettingsKeys.traktSyncHistory, value: true)
         try await settings.setBool(key: SettingsKeys.traktSyncRatings, value: false)
 
+        let remoteWatchedAt = DateComponents(
+            calendar: Calendar(identifier: .gregorian),
+            timeZone: TimeZone(secondsFromGMT: 0),
+            year: 2025,
+            month: 6,
+            day: 15
+        ).date!
+
         // Pre-populate WatchHistory
         let existingHistory = WatchHistory(
             id: UUID().uuidString,
@@ -815,7 +1336,7 @@ struct TraktSyncOrchestratorHistoryPullWatchHistoryTests {
             title: "Arrival",
             progress: 7200,
             duration: 7200,
-            watchedAt: Date(),
+            watchedAt: remoteWatchedAt,
             isCompleted: true
         )
         try await database.saveWatchHistory(existingHistory)
@@ -833,6 +1354,31 @@ struct TraktSyncOrchestratorHistoryPullWatchHistoryTests {
         #expect(result.historyPulled == 0)
     }
 
+    @Test("pull history keeps distinct rewatches")
+    func pullHistoryKeepsDistinctRewatches() async throws {
+        let database = try await makeTempDatabase()
+        let settings = makeSettingsManager(database: database)
+        try await settings.setBool(key: SettingsKeys.traktSyncWatchlist, value: false)
+        try await settings.setBool(key: SettingsKeys.traktSyncHistory, value: true)
+        try await settings.setBool(key: SettingsKeys.traktSyncRatings, value: false)
+
+        let session = makeOrchestratorStubSession(
+            historyMovies: """
+            [{"id":1001,"watched_at":"2025-06-15T10:00:00Z","action":"watch","movie":{"title":"Arrival","year":2016,"ids":{"trakt":50,"imdb":"tt2543164"}}},
+             {"id":1002,"watched_at":"2025-06-16T10:00:00Z","action":"watch","movie":{"title":"Arrival","year":2016,"ids":{"trakt":50,"imdb":"tt2543164"}}}]
+            """
+        )
+        let (orchestrator, service) = makeOrchestrator(database: database, settingsManager: settings, session: session)
+        await service.setTokens(access: "token", refresh: "refresh")
+
+        let result = await orchestrator.sync()
+        let completedEntries = try await database.fetchCompletedWatchHistory(limit: 10)
+            .filter { $0.mediaId == "tt2543164" }
+
+        #expect(result.historyPulled == 2)
+        #expect(completedEntries.count == 2)
+    }
+
     @Test("pull history handles shows as well as movies")
     func pullHistoryHandlesShows() async throws {
         let database = try await makeTempDatabase()
@@ -843,7 +1389,7 @@ struct TraktSyncOrchestratorHistoryPullWatchHistoryTests {
 
         let session = makeOrchestratorStubSession(
             historyShows: """
-            [{"id":2001,"watched_at":"2025-03-10T14:00:00.000Z","action":"watch","show":{"title":"Breaking Bad","year":2008,"ids":{"trakt":10,"imdb":"tt0903747"}}}]
+            [{"id":2001,"watched_at":"2026-02-01T14:00:00.000Z","action":"watch","show":{"title":"Breaking Bad","year":2008,"ids":{"trakt":10,"imdb":"tt0903747"}}}]
             """
         )
         let (orchestrator, service) = makeOrchestrator(database: database, settingsManager: settings, session: session)
@@ -1022,6 +1568,14 @@ struct TraktSyncOrchestratorHistoryPushTests {
         try await settings.setBool(key: SettingsKeys.traktSyncHistory, value: true)
         try await settings.setBool(key: SettingsKeys.traktSyncRatings, value: false)
 
+        let remoteWatchedAt = DateComponents(
+            calendar: Calendar(identifier: .gregorian),
+            timeZone: TimeZone(secondsFromGMT: 0),
+            year: 2025,
+            month: 8,
+            day: 1
+        ).date!
+
         // Add completed local history that already exists on Trakt
         let history = WatchHistory(
             id: UUID().uuidString,
@@ -1029,7 +1583,7 @@ struct TraktSyncOrchestratorHistoryPushTests {
             title: "Already On Trakt",
             progress: 7200,
             duration: 7200,
-            watchedAt: Date(),
+            watchedAt: remoteWatchedAt,
             isCompleted: true
         )
         try await database.saveWatchHistory(history)
@@ -1046,6 +1600,7 @@ struct TraktSyncOrchestratorHistoryPushTests {
         let result = await orchestrator.sync()
 
         // Pull should be 0 (already exists locally), push should be 0 (already on remote)
+        #expect(result.historyPulled == 0)
         #expect(result.historyPushed == 0)
     }
 
@@ -1082,6 +1637,66 @@ struct TraktSyncOrchestratorHistoryPushTests {
         let result = await orchestrator.sync()
 
         #expect(result.historyPushed == 2)
+    }
+
+    @Test("push sends distinct rewatches for the same title")
+    func pushHistorySendsDistinctRewatches() async throws {
+        let database = try await makeTempDatabase()
+        let settings = makeSettingsManager(database: database)
+        try await settings.setBool(key: SettingsKeys.traktSyncWatchlist, value: false)
+        try await settings.setBool(key: SettingsKeys.traktSyncHistory, value: true)
+        try await settings.setBool(key: SettingsKeys.traktSyncRatings, value: false)
+
+        let watchedAtA = Date(timeIntervalSince1970: 1_720_000_000)
+        let watchedAtB = watchedAtA.addingTimeInterval(86_400)
+        try await database.saveWatchHistory(
+            WatchHistory(
+                id: UUID().uuidString,
+                mediaId: "tt1111222",
+                title: "Repeat Watch",
+                progress: 7200,
+                duration: 7200,
+                watchedAt: watchedAtA,
+                isCompleted: true
+            )
+        )
+        try await database.saveWatchHistory(
+            WatchHistory(
+                id: UUID().uuidString,
+                mediaId: "tt1111222",
+                title: "Repeat Watch",
+                progress: 7200,
+                duration: 7200,
+                watchedAt: watchedAtB,
+                isCompleted: true
+            )
+        )
+
+        final class PostState: @unchecked Sendable {
+            private let lock = NSLock()
+            private(set) var paths: [String] = []
+
+            func record(path: String) {
+                lock.lock()
+                paths.append(path)
+                lock.unlock()
+            }
+        }
+        let postState = PostState()
+
+        let session = makeOrchestratorStubSession(
+            postResponder: { request in
+                postState.record(path: request.url?.path ?? "")
+                return (200, #"{"added":{"movies":1,"shows":0,"episodes":0}}"#)
+            }
+        )
+        let (orchestrator, service) = makeOrchestrator(database: database, settingsManager: settings, session: session)
+        await service.setTokens(access: "token", refresh: "refresh")
+
+        let result = await orchestrator.sync()
+
+        #expect(result.historyPushed == 2)
+        #expect(postState.paths.filter { $0.hasSuffix("/sync/history") }.count == 2)
     }
 }
 
@@ -1171,6 +1786,68 @@ struct TraktSyncOrchestratorHistoryPaginationTests {
         #expect(allHistory.count == 60)
     }
 
+    @Test("default pagination continues past the old 20-page limit")
+    func defaultPaginationContinuesPastTwentyPages() async throws {
+        let database = try await makeTempDatabase()
+        let settings = makeSettingsManager(database: database)
+        try await settings.setBool(key: SettingsKeys.traktSyncWatchlist, value: false)
+        try await settings.setBool(key: SettingsKeys.traktSyncHistory, value: true)
+        try await settings.setBool(key: SettingsKeys.traktSyncRatings, value: false)
+
+        final class PageTracker: @unchecked Sendable {
+            var requestedPages: [Int] = []
+            let lock = NSLock()
+            func record(_ page: Int) { lock.lock(); requestedPages.append(page); lock.unlock() }
+            var pages: [Int] { lock.lock(); defer { lock.unlock() }; return requestedPages }
+        }
+        let pageTracker = PageTracker()
+
+        let session = makeStubSession { request in
+            let url = request.url!
+            let path = url.path
+            let query = url.query ?? ""
+
+            if request.httpMethod == "POST" {
+                let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+                return (response, Data(#"{"added":{"movies":1,"shows":0,"episodes":0}}"#.utf8))
+            }
+
+            if path.contains("/sync/history/movies") {
+                let pageParam = query.components(separatedBy: "&")
+                    .first(where: { $0.hasPrefix("page=") })
+                    .flatMap { $0.components(separatedBy: "=").last }
+                    .flatMap { Int($0) } ?? 1
+                pageTracker.record(pageParam)
+
+                let body: String
+                if pageParam <= 20 {
+                    body = generateHistoryMovieItems(count: 50, startIndex: (pageParam - 1) * 50)
+                } else if pageParam == 21 {
+                    body = generateHistoryMovieItems(count: 1, startIndex: 1000)
+                } else {
+                    body = "[]"
+                }
+
+                let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+                return (response, Data(body.utf8))
+            }
+
+            let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (response, Data("[]".utf8))
+        }
+
+        let (orchestrator, service) = makeOrchestrator(database: database, settingsManager: settings, session: session)
+        await service.setTokens(access: "token", refresh: "refresh")
+
+        let result = await orchestrator.sync()
+
+        #expect(result.historyPulled == 1001)
+        let moviePages = Set(pageTracker.pages)
+        #expect(moviePages.contains(20))
+        #expect(moviePages.contains(21))
+        #expect(!result.hasErrors)
+    }
+
     @Test("pagination stops when page has fewer than 50 items")
     func paginationStopsOnPartialPage() async throws {
         let database = try await makeTempDatabase()
@@ -1245,7 +1922,8 @@ struct TraktSyncOrchestratorHistoryPaginationTests {
         }
         let pageTracker = PageTracker()
 
-        // Always return 50 items (simulating an infinitely large history)
+        // Use a small cap (3 pages) to keep the test fast while verifying capping behavior.
+        let testMaxPages = 3
         let session = makeStubSession { request in
             let url = request.url!
             let path = url.path
@@ -1281,15 +1959,27 @@ struct TraktSyncOrchestratorHistoryPaginationTests {
             return (response, Data("[]".utf8))
         }
 
-        let (orchestrator, service) = makeOrchestrator(database: database, settingsManager: settings, session: session)
+        let (_, service) = makeOrchestrator(database: database, settingsManager: settings, session: session)
+        // Create orchestrator with reduced page cap for fast testing
+        let orchestrator = TraktSyncOrchestrator(
+            traktService: service,
+            database: database,
+            settingsManager: settings,
+            maxHistoryPages: testMaxPages
+        )
         await service.setTokens(access: "token", refresh: "refresh")
 
         let result = await orchestrator.sync()
 
-        // Should stop at maxHistoryPages (20) even though each page returns 50 items
-        #expect(pageTracker.maxPage <= TraktSyncOrchestrator.maxHistoryPages)
-        // 20 pages * 50 items = 1000 items max for movies
-        #expect(result.historyPulled == TraktSyncOrchestrator.maxHistoryPages * 50)
+        // Should stop at testMaxPages even though each page returns 50 items
+        #expect(pageTracker.maxPage <= testMaxPages)
+        #expect(pageTracker.maxPage > 1) // Multiple pages were fetched
+        // 3 pages * 50 items = 150 items max for movies
+        #expect(result.historyPulled == testMaxPages * 50)
+        #expect(result.errors.contains {
+            $0.localizedCaseInsensitiveContains("history")
+                && $0.localizedCaseInsensitiveContains("cap")
+        })
     }
 }
 
@@ -1321,7 +2011,7 @@ struct TraktSyncOrchestratorBidirectionalHistoryTests {
         // Remote: tt2222222 (not in local)
         let session = makeOrchestratorStubSession(
             historyMovies: """
-            [{"id":6001,"watched_at":"2025-03-01T10:00:00.000Z","action":"watch","movie":{"title":"Remote Only Movie","year":2025,"ids":{"trakt":1,"imdb":"tt2222222"}}}]
+            [{"id":6001,"watched_at":"2025-08-01T10:00:00.000Z","action":"watch","movie":{"title":"Remote Only Movie","year":2025,"ids":{"trakt":1,"imdb":"tt2222222"}}}]
             """,
             postResponder: { _ in
                 (200, #"{"added":{"movies":1,"shows":0,"episodes":0}}"#)
@@ -1374,5 +2064,186 @@ struct TraktSyncOrchestratorBidirectionalHistoryTests {
 
         #expect(result.historyPulled == 0)
         #expect(result.historyPushed == 0)
+    }
+}
+
+// MARK: - Cancellation Tests
+
+@Suite("TraktSyncOrchestrator - Cancellation", .serialized)
+struct TraktSyncOrchestratorCancellationTests {
+    private func generateWatchlistMovieItems(count: Int, startIndex: Int = 0) -> String {
+        let items = (0..<count).map { i in
+            let index = startIndex + i
+            let imdb = String(format: "tt%07d", index)
+            return """
+            {"rank":\(index + 1),"movie":{"title":"Movie \(index)","year":2025,"ids":{"trakt":\(index + 1),"imdb":"\(imdb)"}}}
+            """
+        }
+        return "[\(items.joined(separator: ","))]"
+    }
+
+    private func waitUntil(
+        timeoutMilliseconds: Int = 2_000,
+        pollIntervalMilliseconds: Int = 10,
+        condition: @escaping @Sendable () -> Bool
+    ) async -> Bool {
+        let attempts = max(timeoutMilliseconds / max(pollIntervalMilliseconds, 1), 1)
+        for _ in 0..<attempts {
+            if condition() { return true }
+            try? await Task.sleep(nanoseconds: UInt64(pollIntervalMilliseconds) * 1_000_000)
+        }
+        return condition()
+    }
+
+    @Test("cancellation prevents partially collected pull pages from being committed locally")
+    func cancellationPreventsPartiallyCollectedPullPagesFromBeingCommittedLocally() async throws {
+        let database = try await makeTempDatabase()
+        let settings = makeSettingsManager(database: database)
+        try await settings.setBool(key: SettingsKeys.traktSyncWatchlist, value: true)
+        try await settings.setBool(key: SettingsKeys.traktSyncHistory, value: false)
+        try await settings.setBool(key: SettingsKeys.traktSyncRatings, value: false)
+        try await settings.setString(key: SettingsKeys.traktLastSyncDate, value: "2025-01-01T00:00:00Z")
+
+        final class PageState: @unchecked Sendable {
+            private let lock = NSLock()
+            private var requestedPages: [Int] = []
+
+            func record(_ page: Int) {
+                lock.lock()
+                requestedPages.append(page)
+                lock.unlock()
+            }
+
+            func contains(_ page: Int) -> Bool {
+                lock.lock()
+                defer { lock.unlock() }
+                return requestedPages.contains(page)
+            }
+        }
+
+        let pageState = PageState()
+        let page1 = generateWatchlistMovieItems(count: 50, startIndex: 7000)
+        let page2 = generateWatchlistMovieItems(count: 50, startIndex: 7050)
+
+        let session = makeStubSession { request in
+            let url = try #require(request.url)
+            let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+
+            guard url.path.contains("/sync/watchlist/movies") else {
+                return (response, Data("[]".utf8))
+            }
+
+            let page = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+                .queryItems?
+                .first(where: { $0.name == "page" })?
+                .value
+                .flatMap(Int.init) ?? 1
+            pageState.record(page)
+
+            if page == 2 {
+                Thread.sleep(forTimeInterval: 0.2)
+            }
+
+            let body = page == 1 ? page1 : (page == 2 ? page2 : "[]")
+            return (response, Data(body.utf8))
+        }
+
+        let (orchestrator, service) = makeOrchestrator(
+            database: database,
+            settingsManager: settings,
+            session: session
+        )
+        await service.setTokens(access: "token", refresh: "refresh")
+
+        let syncTask = Task { await orchestrator.sync() }
+        let didReachSecondPage = await waitUntil { pageState.contains(2) }
+        #expect(didReachSecondPage)
+
+        syncTask.cancel()
+        let result = await syncTask.value
+
+        let entries = try await database.fetchLibraryEntries(listType: .watchlist)
+        let lastSyncDate = try await settings.getString(key: SettingsKeys.traktLastSyncDate)
+
+        #expect(result.watchlistPulled == 0)
+        #expect(entries.isEmpty)
+        #expect(!result.hasErrors)
+        #expect(lastSyncDate == "2025-01-01T00:00:00Z")
+    }
+
+    @Test("cancellation stops push loops before full completion")
+    func cancellationStopsPushLoopsBeforeFullCompletion() async throws {
+        let database = try await makeTempDatabase()
+        let settings = makeSettingsManager(database: database)
+        try await settings.setBool(key: SettingsKeys.traktSyncWatchlist, value: true)
+        try await settings.setBool(key: SettingsKeys.traktSyncHistory, value: false)
+        try await settings.setBool(key: SettingsKeys.traktSyncRatings, value: false)
+        try await settings.setString(key: SettingsKeys.traktLastSyncDate, value: "2025-01-01T00:00:00Z")
+
+        for index in 0..<40 {
+            try await database.addToLibrary(
+                UserLibraryEntry(
+                    id: UUID().uuidString,
+                    mediaId: String(format: "tt%07d", 8000 + index),
+                    folderId: LibraryFolder.systemFolderID(for: .watchlist),
+                    listType: .watchlist,
+                    addedAt: Date()
+                )
+            )
+        }
+
+        final class PostState: @unchecked Sendable {
+            private let lock = NSLock()
+            private var postCount = 0
+
+            func recordPost() {
+                lock.lock()
+                postCount += 1
+                lock.unlock()
+            }
+
+            var count: Int {
+                lock.lock()
+                defer { lock.unlock() }
+                return postCount
+            }
+        }
+
+        let postState = PostState()
+        let session = makeStubSession { request in
+            let url = try #require(request.url)
+            let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+
+            if request.httpMethod == "POST", url.path.hasSuffix("/sync/watchlist") {
+                postState.recordPost()
+                Thread.sleep(forTimeInterval: 0.03)
+                return (response, Data(#"{"added":{"movies":1,"shows":0,"episodes":0}}"#.utf8))
+            }
+
+            return (response, Data("[]".utf8))
+        }
+
+        let (orchestrator, service) = makeOrchestrator(
+            database: database,
+            settingsManager: settings,
+            session: session
+        )
+        await service.setTokens(access: "token", refresh: "refresh")
+
+        let syncTask = Task { await orchestrator.sync() }
+        let didStartPosting = await waitUntil { postState.count >= 3 }
+        #expect(didStartPosting)
+
+        syncTask.cancel()
+        let result = await syncTask.value
+
+        let lastSyncDate = try await settings.getString(key: SettingsKeys.traktLastSyncDate)
+
+        #expect(postState.count >= 3)
+        #expect(postState.count < 40)
+        #expect(result.watchlistPushed < 40)
+        #expect(result.watchlistPushed <= postState.count)
+        #expect(!result.hasErrors)
+        #expect(lastSyncDate == "2025-01-01T00:00:00Z")
     }
 }

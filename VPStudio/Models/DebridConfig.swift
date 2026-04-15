@@ -90,6 +90,72 @@ struct DebridConfig: Codable, Sendable, Identifiable, Equatable, FetchableRecord
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
+
+    /// EasyNews does not participate in the shared magnet resolve flow.
+    var supportsSharedMagnetResolveFlow: Bool {
+        serviceType != .easyNews
+    }
+}
+
+extension DebridConfig {
+    nonisolated static func secretKey(for id: String, serviceType: DebridServiceType) -> String {
+        SecretKey.debridToken(service: serviceType, configId: id)
+    }
+
+    nonisolated var secretKey: String {
+        Self.secretKey(for: id, serviceType: serviceType)
+    }
+
+    private var normalizedStoredToken: String? {
+        let storedToken = apiTokenRef.trimmingCharacters(in: .whitespacesAndNewlines)
+        return storedToken.isEmpty ? nil : storedToken
+    }
+
+    func resolvedToken(using secretStore: any SecretStore) async throws -> String? {
+        guard let storedToken = normalizedStoredToken else {
+            return nil
+        }
+
+        if let referenceKey = SecretReference.decode(storedToken) {
+            return try await secretStore.getSecret(for: referenceKey)
+        }
+
+        // Legacy plaintext rows are only readable after they pass through the
+        // current secret-store path; callers should not treat plaintext DB
+        // storage as a normal steady-state read format.
+        try await secretStore.setSecret(storedToken, for: secretKey)
+        return storedToken
+    }
+
+    func resolvedCopy(using secretStore: any SecretStore) async throws -> DebridConfig {
+        var copy = self
+        copy.apiTokenRef = try await resolvedToken(using: secretStore) ?? ""
+        return copy
+    }
+
+    func persistedCopy(using secretStore: any SecretStore) async throws -> (config: DebridConfig, changed: Bool) {
+        var copy = self
+        guard let normalizedToken = normalizedStoredToken else {
+            try? await secretStore.deleteSecret(for: secretKey)
+            copy.apiTokenRef = ""
+            return (copy, copy.apiTokenRef != apiTokenRef)
+        }
+
+        if let referenceKey = SecretReference.decode(normalizedToken) {
+            let encoded = SecretReference.encode(key: referenceKey)
+            copy.apiTokenRef = encoded
+            return (copy, encoded != apiTokenRef)
+        }
+
+        try await secretStore.setSecret(normalizedToken, for: secretKey)
+        let encoded = SecretReference.encode(key: secretKey)
+        copy.apiTokenRef = encoded
+        return (copy, true)
+    }
+
+    func deleteStoredSecret(using secretStore: any SecretStore) async throws {
+        try await secretStore.deleteSecret(for: secretKey)
+    }
 }
 
 struct IndexerConfig: Codable, Sendable, Identifiable, Equatable, FetchableRecord, PersistableRecord {
@@ -210,6 +276,61 @@ struct IndexerConfig: Codable, Sendable, Identifiable, Equatable, FetchableRecor
     }
 }
 
+extension IndexerConfig {
+    nonisolated static func secretKey(for id: String) -> String {
+        SecretKey.setting("indexer.\(id).api_key")
+    }
+
+    nonisolated var secretKey: String {
+        Self.secretKey(for: id)
+    }
+
+    func resolvedAPIKey(using secretStore: any SecretStore) async throws -> String? {
+        guard let storedAPIKey = apiKey?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !storedAPIKey.isEmpty else {
+            return nil
+        }
+
+        if let referenceKey = SecretReference.decode(storedAPIKey) {
+            return try await secretStore.getSecret(for: referenceKey)
+        }
+
+        return storedAPIKey
+    }
+
+    func resolvedCopy(using secretStore: any SecretStore) async throws -> IndexerConfig {
+        var copy = self
+        copy.apiKey = try await resolvedAPIKey(using: secretStore)
+        return copy
+    }
+
+    func persistedCopy(using secretStore: any SecretStore) async throws -> (config: IndexerConfig, changed: Bool) {
+        var copy = self
+        let normalizedAPIKey = apiKey?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard let normalizedAPIKey, !normalizedAPIKey.isEmpty else {
+            try? await secretStore.deleteSecret(for: secretKey)
+            copy.apiKey = nil
+            return (copy, apiKey != nil)
+        }
+
+        if let referenceKey = SecretReference.decode(normalizedAPIKey) {
+            let encoded = SecretReference.encode(key: referenceKey)
+            copy.apiKey = encoded
+            return (copy, encoded != apiKey)
+        }
+
+        try await secretStore.setSecret(normalizedAPIKey, for: secretKey)
+        let encoded = SecretReference.encode(key: secretKey)
+        copy.apiKey = encoded
+        return (copy, true)
+    }
+
+    func deleteStoredSecret(using secretStore: any SecretStore) async throws {
+        try await secretStore.deleteSecret(for: secretKey)
+    }
+}
+
 extension IndexerConfig.IndexerType {
     var displayName: String {
         switch self {
@@ -273,7 +394,7 @@ extension IndexerConfig.IndexerType {
 
     fileprivate var defaultAPIKeyTransport: IndexerConfig.APIKeyTransport {
         switch self {
-        case .prowlarr:
+        case .jackett, .prowlarr, .torznab:
             return .header
         default:
             return .query

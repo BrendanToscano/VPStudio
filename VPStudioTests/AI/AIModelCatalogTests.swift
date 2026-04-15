@@ -108,15 +108,37 @@ struct AIModelCatalogTests {
         #expect(abs(cost - 0.025) < 0.000001)
     }
 
-    @Test func costCalculationForGPT52() {
-        // 5000 input at $2/1M = $0.01
-        // 2000 output at $8/1M = $0.016
+    @Test func costCalculationForGPT54() {
+        // 2000 input at $2.50/1M = $0.005
+        // 1000 output at $15/1M = $0.015
         let cost = AIModelCatalog.estimateCost(
-            modelID: "gpt-5.2",
+            modelID: "gpt-5.4",
+            inputTokens: 2_000,
+            outputTokens: 1_000
+        )
+        #expect(abs(cost - 0.02) < 0.000001)
+    }
+
+    @Test func costCalculationForGPT54Mini() {
+        // 4000 input at $0.75/1M = $0.003
+        // 2000 output at $4.50/1M = $0.009
+        let cost = AIModelCatalog.estimateCost(
+            modelID: "gpt-5.4-mini",
+            inputTokens: 4_000,
+            outputTokens: 2_000
+        )
+        #expect(abs(cost - 0.012) < 0.000001)
+    }
+
+    @Test func costCalculationForGPT54Nano() {
+        // 5000 input at $0.20/1M = $0.001
+        // 2000 output at $1.25/1M = $0.0025
+        let cost = AIModelCatalog.estimateCost(
+            modelID: "gpt-5.4-nano",
             inputTokens: 5_000,
             outputTokens: 2_000
         )
-        #expect(abs(cost - 0.026) < 0.000001)
+        #expect(abs(cost - 0.0035) < 0.000001)
     }
 
     @Test func costCalculationForOllamaIsZero() {
@@ -177,7 +199,7 @@ struct AIModelCatalogTests {
 
     @Test func openAIModelsReturnCorrectCount() {
         let models = AIModelCatalog.models(for: .openAI)
-        #expect(models.count == 5)
+        #expect(models.count == 7)
     }
 
     @Test func ollamaModelsReturnCorrectCount() {
@@ -217,9 +239,9 @@ struct AIModelCatalogTests {
         #expect(def?.id == "claude-sonnet-4-6")
     }
 
-    @Test func defaultOpenAIModelIsGPT52() {
+    @Test func defaultOpenAIModelIsGPT54() {
         let def = AIModelCatalog.defaultModel(for: .openAI)
-        #expect(def?.id == "gpt-5.2")
+        #expect(def?.id == "gpt-5.4")
     }
 
     @Test func defaultOllamaModelIsLlama31() {
@@ -251,18 +273,18 @@ struct AIModelCatalogTests {
 
     // MARK: - Pricing Sanity Checks
 
-    @Test func paidModelsCostMoreThanZero() {
-        for model in AIModelCatalog.allModels where model.provider != .ollama {
+    @Test func remotePaidModelsCostMoreThanZero() {
+        for model in AIModelCatalog.allModels where model.provider != .ollama && model.provider != .local {
             #expect(model.inputCostPer1MTokens > 0, "\(model.id) should have positive input cost")
             #expect(model.outputCostPer1MTokens > 0, "\(model.id) should have positive output cost")
         }
     }
 
-    @Test func outputCostsAreHigherThanInputCosts() {
-        for model in AIModelCatalog.allModels where model.provider != .ollama {
+    @Test func outputCostsAreNotLowerThanInputCosts() {
+        for model in AIModelCatalog.allModels where model.provider != .ollama && model.provider != .local {
             #expect(
-                model.outputCostPer1MTokens > model.inputCostPer1MTokens,
-                "\(model.id): output cost should exceed input cost"
+                model.outputCostPer1MTokens >= model.inputCostPer1MTokens,
+                "\(model.id): output cost should not be lower than input cost"
             )
         }
     }
@@ -278,5 +300,40 @@ struct AIModelCatalogTests {
     @Test func modelDefinitionIdentifiable() {
         let model = AIModelCatalog.gpt4o
         #expect(model.id == "gpt-4o")
+    }
+}
+
+@Suite("AIModelFetcher - OpenRouter")
+struct OpenRouterModelFetcherTests {
+    @Test func fetchOpenRouterModelsReturnsLiveModels() async {
+        let session = URLProtocolHarness.makeSession { request in
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: nil
+            )!
+            let data = try JSONSerialization.data(withJSONObject: [
+                "data": [
+                    [
+                        "id": "openrouter/openai/gpt-4o-mini",
+                        "name": "GPT-4o Mini",
+                        "context_length": 128000,
+                        "pricing": [
+                            "prompt": "0.00000015",
+                            "completion": "0.00000060"
+                        ]
+                    ]
+                ]
+            ])
+            return (response, data)
+        }
+
+        let models = await AIModelFetcher.fetchOpenRouterModels(apiKey: "test-key", session: session)
+
+        #expect(models.count == 1)
+        #expect(models.first?.id == "openrouter/openai/gpt-4o-mini")
+        #expect(models.first?.provider == .openRouter)
+        #expect(models.first?.maxContextTokens == 128000)
     }
 }

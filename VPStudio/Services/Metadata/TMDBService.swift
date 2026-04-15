@@ -1,13 +1,42 @@
 import Foundation
 
 actor TMDBService: MetadataProvider {
+    private static let maximumRateLimitAttempts = 3
+    private static let initialBackoffNanoseconds: UInt64 = 500_000_000
+    private static let maximumBackoffNanoseconds: UInt64 = 4_000_000_000
+
+    private static let defaultSession: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 30
+        configuration.timeoutIntervalForResource = 90
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.urlCache = nil
+        configuration.httpCookieStorage = nil
+        configuration.httpShouldSetCookies = false
+        configuration.urlCredentialStorage = nil
+        return URLSession(configuration: configuration)
+    }()
+
     private let apiKey: String
     private let baseURL = "https://api.themoviedb.org/3"
     private let session: URLSession
+    private let sleeper: @Sendable (UInt64) async throws -> Void
 
-    init(apiKey: String, session: URLSession = .shared) {
+    private enum Authentication {
+        case bearerToken(String)
+        case apiKeyQuery(String)
+    }
+
+    init(
+        apiKey: String,
+        session: URLSession? = nil,
+        sleeper: @escaping @Sendable (UInt64) async throws -> Void = { nanoseconds in
+            try await Task.sleep(nanoseconds: nanoseconds)
+        }
+    ) {
         self.apiKey = apiKey
-        self.session = session
+        self.session = session ?? Self.defaultSession
+        self.sleeper = sleeper
     }
 
     func search(query: String, type: MediaType?, page: Int = 1) async throws -> MetadataSearchResult {
@@ -17,8 +46,8 @@ actor TMDBService: MetadataProvider {
     func search(query: String, type: MediaType?, page: Int = 1, year: Int? = nil, language: String? = nil) async throws -> MetadataSearchResult {
         let path = type.map { "/search/\($0.tmdbPath)" } ?? "/search/multi"
         var params = ["query": query, "page": String(page), "include_adult": "false", "language": language ?? "en-US"]
-        if let year {
-            params["year"] = String(year)
+        if let year, let type {
+            params[type.tmdbSearchYearParameterName] = String(year)
         }
         let response: TMDBPagedResponse<TMDBSearchResult> = try await request(path: path, params: params)
         return MetadataSearchResult(
@@ -65,7 +94,7 @@ actor TMDBService: MetadataProvider {
 
     func discover(type: MediaType, filters: DiscoverFilters) async throws -> MetadataSearchResult {
         var params: [String: String] = [
-            "page": String(filters.page), "sort_by": filters.sortBy.rawValue,
+            "page": String(filters.page), "sort_by": filters.sortBy.tmdbValue(for: type),
             "language": filters.language ?? "en-US", "include_adult": "false",
         ]
         if let g = filters.genreId { params["with_genres"] = String(g) }
@@ -123,24 +152,132 @@ actor TMDBService: MetadataProvider {
 
     private func request<T: Decodable>(path: String, params: [String: String]) async throws -> T {
         guard var components = URLComponents(string: baseURL + path) else { throw TMDBError.invalidURL(path) }
+        guard let authentication = authenticationMode() else { throw TMDBError.unauthorized }
+
         components.queryItems = params.map { URLQueryItem(name: $0.key, value: $0.value) }
-            + [URLQueryItem(name: "api_key", value: apiKey)]
+        if case .apiKeyQuery(let apiKey) = authentication {
+            components.queryItems?.append(URLQueryItem(name: "api_key", value: apiKey))
+        }
 
         guard let url = components.url else { throw TMDBError.invalidURL(path) }
-        let (data, response) = try await session.data(from: url)
-        guard let http = response as? HTTPURLResponse else { throw TMDBError.invalidResponse }
-
-        switch http.statusCode {
-        case 200...299: break
-        case 401: throw TMDBError.unauthorized
-        case 404: throw TMDBError.notFound(path)
-        case 429: throw TMDBError.rateLimited
-        default: throw TMDBError.httpError(http.statusCode, String(data: data, encoding: .utf8) ?? "")
+        var request = URLRequest(url: url)
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.httpShouldHandleCookies = false
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        if case .bearerToken(let token) = authentication {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        } else {
+            // Legacy v3 API keys must ride in the query string for compatibility.
+            // Mark those requests as non-cacheable so local/remote intermediaries
+            // are less likely to retain full URLs containing the credential.
+            request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
+            request.setValue("no-cache", forHTTPHeaderField: "Pragma")
         }
+
+        let responseData = try await responseData(for: request, path: path)
 
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
-        return try decoder.decode(T.self, from: data)
+        return try decoder.decode(T.self, from: responseData)
+    }
+
+    private func responseData(for request: URLRequest, path: String, attempt: Int = 0) async throws -> Data {
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw TMDBError.invalidResponse }
+
+        switch http.statusCode {
+        case 200...299:
+            return data
+        case 401:
+            throw TMDBError.unauthorized
+        case 404:
+            throw TMDBError.notFound(path)
+        case 429:
+            guard attempt < Self.maximumRateLimitAttempts - 1 else {
+                throw TMDBError.rateLimited
+            }
+
+            let delay = Self.retryDelayNanoseconds(
+                from: http.value(forHTTPHeaderField: "Retry-After"),
+                attempt: attempt
+            )
+            try await sleeper(delay)
+            return try await responseData(for: request, path: path, attempt: attempt + 1)
+        default:
+            throw TMDBError.httpError(http.statusCode, String(data: data, encoding: .utf8) ?? "")
+        }
+    }
+
+    private func authenticationMode() -> Authentication? {
+        let trimmedCredential = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedCredential.isEmpty else { return nil }
+
+        if trimmedCredential.lowercased().hasPrefix("bearer ") {
+            let token = trimmedCredential.dropFirst("bearer ".count).trimmingCharacters(in: .whitespacesAndNewlines)
+            return token.isEmpty ? nil : .bearerToken(token)
+        }
+
+        if Self.looksLikeReadAccessToken(trimmedCredential) {
+            return .bearerToken(trimmedCredential)
+        }
+
+        return .apiKeyQuery(trimmedCredential)
+    }
+
+    private static func looksLikeReadAccessToken(_ credential: String) -> Bool {
+        let allowedJWTCharacters = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
+        let segments = credential.split(separator: ".", omittingEmptySubsequences: false)
+        guard segments.count == 3 else { return false }
+
+        return segments.allSatisfy { segment in
+            !segment.isEmpty && segment.unicodeScalars.allSatisfy { allowedJWTCharacters.contains($0) }
+        }
+    }
+
+    private static func retryDelayNanoseconds(from retryAfter: String?, attempt: Int) -> UInt64 {
+        let exponentialDelay = min(
+            maximumBackoffNanoseconds,
+            initialBackoffNanoseconds * UInt64(1 << min(attempt, 3))
+        )
+
+        guard let parsedDelay = retryAfterDelay(from: retryAfter) else {
+            return exponentialDelay
+        }
+
+        let retryAfterNanoseconds = UInt64((parsedDelay * 1_000_000_000).rounded())
+        return min(maximumBackoffNanoseconds, max(exponentialDelay, retryAfterNanoseconds))
+    }
+
+    private static func retryAfterDelay(from headerValue: String?) -> TimeInterval? {
+        guard let rawHeader = headerValue?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !rawHeader.isEmpty else {
+            return nil
+        }
+
+        if let retryAfterSeconds = TimeInterval(rawHeader), retryAfterSeconds > 0 {
+            return retryAfterSeconds
+        }
+
+        for format in [
+            "EEE',' dd MMM yyyy HH':'mm':'ss zzz",
+            "EEEE',' dd-MMM-yy HH':'mm':'ss zzz",
+            "EEE MMM d HH':'mm':'ss yyyy",
+        ] {
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.timeZone = TimeZone(secondsFromGMT: 0)
+            formatter.dateFormat = format
+
+            if let date = formatter.date(from: rawHeader) {
+                let delay = date.timeIntervalSinceNow
+                if delay > 0 {
+                    return delay
+                }
+                return nil
+            }
+        }
+
+        return nil
     }
 
     private func extractTMDBID(from id: String) -> String? {

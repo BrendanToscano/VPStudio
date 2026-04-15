@@ -16,6 +16,17 @@ private func makeTemporaryDatabase(named fileName: String) async throws -> (Data
 @Suite(.serialized)
 struct DatabaseMediaCacheTests {
 
+    @Test func inMemoryDatabaseFallbackSupportsRoundTripPersistence() async throws {
+        let db = try DatabaseManager(inMemoryNamed: "database-fallback-round-trip")
+        try await db.migrate()
+
+        let item = MediaItem(id: "memory-item", type: .movie, title: "In Memory", year: 2026)
+        try await db.saveMediaItem(item)
+
+        let fetched = try await db.fetchMediaItem(id: "memory-item")
+        #expect(fetched?.title == "In Memory")
+    }
+
     @Test func saveAndFetchMediaItem() async throws {
         let (db, tempDir) = try await makeTemporaryDatabase(named: "media-cache.sqlite")
         defer { try? FileManager.default.removeItem(at: tempDir) }
@@ -56,6 +67,33 @@ struct DatabaseMediaCacheTests {
         let fetched = try await db.fetchMediaItem(id: "movie-1")
         #expect(fetched?.title == "Dune: Part Two")
         #expect(fetched?.year == 2024)
+    }
+
+    @Test func fetchMediaItemsResolvingAliasesMatchesTMDBBackedItems() async throws {
+        let (db, tempDir) = try await makeTemporaryDatabase(named: "media-cache-alias.sqlite")
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let canonical = MediaItem(
+            id: "tt1160419",
+            type: .movie,
+            title: "Dune",
+            year: 2021,
+            posterPath: "/poster.jpg",
+            tmdbId: 438631,
+            lastFetched: Date()
+        )
+        try await db.saveMediaItem(canonical)
+
+        let resolved = try await db.fetchMediaItemsResolvingAliases(ids: [
+            "movie-tmdb-438631",
+            "tt1160419",
+            "missing"
+        ])
+
+        #expect(resolved["tt1160419"]?.title == "Dune")
+        #expect(resolved["movie-tmdb-438631"]?.title == "Dune")
+        #expect(resolved["movie-tmdb-438631"]?.tmdbId == 438631)
+        #expect(resolved["missing"] == nil)
     }
 }
 
@@ -105,6 +143,101 @@ struct DatabaseWatchHistoryTests {
         let results = try await db.fetchWatchHistory(limit: 3)
         #expect(results.count == 3)
     }
+
+    @Test func completedRewatchesAppendWhileResumeCheckpointStaysMutable() async throws {
+        let (db, tempDir) = try await makeTemporaryDatabase(named: "watch-history-rewatches.sqlite")
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let mediaId = "tt7654321"
+        let t0 = Date(timeIntervalSince1970: 1_700_000_000)
+        let t1 = t0.addingTimeInterval(60)
+        let t2 = t1.addingTimeInterval(60)
+        let t3 = t2.addingTimeInterval(60)
+
+        try await db.saveWatchHistory(
+            WatchHistory(
+                id: "\(mediaId)-progress",
+                mediaId: mediaId,
+                title: "Movie",
+                progress: 120,
+                duration: 7200,
+                streamURL: "https://cdn.example.com/secret.mkv",
+                watchedAt: t0,
+                isCompleted: false
+            )
+        )
+        try await db.saveWatchHistory(
+            WatchHistory(
+                id: "\(mediaId)-watched",
+                mediaId: mediaId,
+                title: "Movie",
+                progress: 7200,
+                duration: 7200,
+                watchedAt: t1,
+                isCompleted: true
+            )
+        )
+        try await db.saveWatchHistory(
+            WatchHistory(
+                id: "\(mediaId)-watched",
+                mediaId: mediaId,
+                title: "Movie",
+                progress: 7200,
+                duration: 7200,
+                watchedAt: t2,
+                isCompleted: true
+            )
+        )
+        try await db.saveWatchHistory(
+            WatchHistory(
+                id: "\(mediaId)-progress",
+                mediaId: mediaId,
+                title: "Movie",
+                progress: 1800,
+                duration: 7200,
+                watchedAt: t3,
+                isCompleted: false
+            )
+        )
+
+        let entries = try await db.fetchWatchHistory(limit: 10).filter { $0.mediaId == mediaId }
+        let completedEntries = entries.filter { $0.isCompleted }
+        let checkpointEntries = entries.filter { !$0.isCompleted }
+
+        #expect(completedEntries.count == 2)
+        #expect(checkpointEntries.count == 1)
+        #expect(checkpointEntries.first?.id == "resume::\(mediaId)::movie")
+        #expect(checkpointEntries.first?.progress == 1800)
+        #expect(checkpointEntries.first?.streamURL == nil)
+        #expect(completedEntries.allSatisfy { $0.id != "\(mediaId)-watched" })
+    }
+
+    @Test func saveWatchHistoryNormalizesUnsafePersistedState() async throws {
+        let (db, tempDir) = try await makeTemporaryDatabase(named: "watch-history-normalization.sqlite")
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        try await db.saveWatchHistory(
+            WatchHistory(
+                id: "unsafe-watch-history",
+                mediaId: "movie-unsafe",
+                title: "Unsafe",
+                progress: 400,
+                duration: 120,
+                quality: "   ",
+                debridService: "  realdebrid  ",
+                streamURL: "  https://cdn.example.com/private-token.m3u8  ",
+                watchedAt: Date(),
+                isCompleted: false
+            )
+        )
+
+        let stored = try #require(try await db.fetchWatchHistory(limit: 10).first)
+        #expect(stored.progress == 120)
+        #expect(stored.duration == 120)
+        #expect(stored.quality == nil)
+        #expect(stored.debridService == "realdebrid")
+        #expect(stored.streamURL == nil)
+    }
 }
 
 // MARK: - Database Retention Policy Tests
@@ -120,11 +253,12 @@ struct DatabaseRetentionPolicyTests {
         let oneDay: TimeInterval = 24 * 60 * 60
 
         let entries = [
-            WatchHistory(id: "wh-expired-1", mediaId: "movie-1", title: "Expired 1", progress: 0, duration: 100, watchedAt: now.addingTimeInterval(-40 * oneDay), isCompleted: false),
-            WatchHistory(id: "wh-expired-2", mediaId: "movie-2", title: "Expired 2", progress: 0, duration: 100, watchedAt: now.addingTimeInterval(-15 * oneDay), isCompleted: false),
-            WatchHistory(id: "wh-older", mediaId: "movie-3", title: "Older", progress: 0, duration: 100, watchedAt: now.addingTimeInterval(-6 * oneDay), isCompleted: false),
-            WatchHistory(id: "wh-newer", mediaId: "movie-4", title: "Newer", progress: 0, duration: 100, watchedAt: now.addingTimeInterval(-2 * 60 * 60), isCompleted: false),
-            WatchHistory(id: "wh-newest", mediaId: "movie-5", title: "Newest", progress: 0, duration: 100, watchedAt: now.addingTimeInterval(-1 * 60 * 60), isCompleted: false),
+            WatchHistory(id: "wh-expired-1", mediaId: "movie-1", title: "Expired 1", progress: 100, duration: 100, watchedAt: now.addingTimeInterval(-40 * oneDay), isCompleted: true),
+            WatchHistory(id: "wh-expired-2", mediaId: "movie-2", title: "Expired 2", progress: 100, duration: 100, watchedAt: now.addingTimeInterval(-15 * oneDay), isCompleted: true),
+            WatchHistory(id: "wh-older", mediaId: "movie-3", title: "Older", progress: 100, duration: 100, watchedAt: now.addingTimeInterval(-6 * oneDay), isCompleted: true),
+            WatchHistory(id: "wh-newer", mediaId: "movie-4", title: "Newer", progress: 100, duration: 100, watchedAt: now.addingTimeInterval(-2 * 60 * 60), isCompleted: true),
+            WatchHistory(id: "wh-newest", mediaId: "movie-5", title: "Newest", progress: 100, duration: 100, watchedAt: now.addingTimeInterval(-1 * 60 * 60), isCompleted: true),
+            WatchHistory(id: "resume::movie-6::movie", mediaId: "movie-6", title: "Resume", progress: 40, duration: 100, watchedAt: now.addingTimeInterval(-200 * oneDay), isCompleted: false),
         ]
 
         for entry in entries {
@@ -139,7 +273,7 @@ struct DatabaseRetentionPolicyTests {
         #expect(deleted == 3)
 
         let retained = try await db.fetchWatchHistory(limit: 10)
-        #expect(retained.map(\.id) == ["wh-newest", "wh-newer"])
+        #expect(retained.map(\.id) == ["wh-newest", "wh-newer", "resume::movie-6::movie"])
     }
 
     @Test func tasteEventsRetentionAppliesTTLAndCapForScopedUser() async throws {
@@ -179,7 +313,7 @@ struct DatabaseRetentionPolicyTests {
         #expect(secondaryRetained.map(\.id) == ["evt-secondary-newest", "evt-secondary-expired"])
     }
 
-    @Test func saveWatchHistoryAutomaticallyPrunesExpiredEntries() async throws {
+    @Test func retentionSweepPrunesExpiredEntries() async throws {
         let (db, tempDir) = try await makeTemporaryDatabase(named: "watch-history-auto-retention.sqlite")
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
@@ -207,8 +341,14 @@ struct DatabaseRetentionPolicyTests {
         try await db.saveWatchHistory(stale)
         try await db.saveWatchHistory(fresh)
 
+        // Retention is now deferred to explicit sweep (not inline on save)
+        let beforeSweep = try await db.fetchWatchHistory(limit: 10)
+        #expect(beforeSweep.count == 2)
+
+        _ = try await db.runRetentionSweepIfNeeded(interval: 0)
+
         let retained = try await db.fetchWatchHistory(limit: 10)
-        #expect(retained.map(\.id) == [fresh.id])
+        #expect(retained.map(\.id) == [fresh.id, stale.id])
     }
 
     @Test func saveTasteEventAutomaticallyPrunesExpiredEntriesForUser() async throws {
@@ -300,6 +440,24 @@ struct DatabaseDownloadTaskTests {
         #expect(fetched?.fileName == "movie.mkv")
     }
 
+    @Test func saveAndFetchDownloadTaskWithNilStreamURL() async throws {
+        let (db, tempDir) = try await makeTemporaryDatabase(named: "downloads-null-stream-url.sqlite")
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let task = DownloadTask(
+            id: "dl-null",
+            mediaId: "movie-null",
+            streamURL: nil,
+            fileName: "movie-null.mkv",
+            status: .queued
+        )
+        try await db.saveDownloadTask(task)
+
+        let fetched = try await db.fetchDownloadTask(id: "dl-null")
+        #expect(fetched != nil)
+        #expect(fetched?.persistedStreamURL == nil)
+    }
+
     @Test func updateDownloadTaskStatus() async throws {
         let (db, tempDir) = try await makeTemporaryDatabase(named: "downloads-status.sqlite")
         defer { try? FileManager.default.removeItem(at: tempDir) }
@@ -317,6 +475,29 @@ struct DatabaseDownloadTaskTests {
         #expect(failed?.errorMessage == "Network error")
     }
 
+    @Test func completingDownloadTaskClearsSensitivePersistedState() async throws {
+        let (db, tempDir) = try await makeTemporaryDatabase(named: "downloads-complete-sanitization.sqlite")
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let task = DownloadTask(
+            id: "dl-complete",
+            mediaId: "m-complete",
+            streamURL: "https://signed.example.com/private.mkv?token=secret",
+            fileName: "private.mkv",
+            status: .downloading,
+            progress: 0.4,
+            resumeDataBase64: Data("resume".utf8).base64EncodedString()
+        )
+        try await db.saveDownloadTask(task)
+
+        try await db.updateDownloadTaskStatus(id: task.id, status: .completed)
+        let updated = try #require(try await db.fetchDownloadTask(id: task.id))
+        #expect(updated.status == .completed)
+        #expect(updated.progress == 1)
+        #expect(updated.persistedStreamURL == nil)
+        #expect(updated.resumeDataBase64 == nil)
+    }
+
     @Test func updateDownloadTaskProgress() async throws {
         let (db, tempDir) = try await makeTemporaryDatabase(named: "downloads-progress.sqlite")
         defer { try? FileManager.default.removeItem(at: tempDir) }
@@ -329,6 +510,38 @@ struct DatabaseDownloadTaskTests {
         #expect(abs((updated?.progress ?? 0) - 0.5) < 0.001)
         #expect(updated?.bytesWritten == 500_000)
         #expect(updated?.totalBytes == 1_000_000)
+    }
+
+    @Test func updateDownloadTaskProgressIgnoresTerminalTasks() async throws {
+        let (db, tempDir) = try await makeTemporaryDatabase(named: "downloads-progress-terminal-guard.sqlite")
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let task = DownloadTask(
+            id: "dl-terminal",
+            mediaId: "m-terminal",
+            streamURL: "https://x.com/final.mkv",
+            fileName: "final.mkv",
+            status: .completed,
+            progress: 1,
+            bytesWritten: 1_000,
+            totalBytes: 1_000,
+            destinationPath: "/downloads/final.mkv"
+        )
+        try await db.saveDownloadTask(task)
+
+        try await db.updateDownloadTaskProgress(
+            id: task.id,
+            progress: 0.5,
+            bytesWritten: 500,
+            totalBytes: 1_000,
+            destinationPath: "/downloads/late-write.mkv"
+        )
+
+        let updated = try #require(try await db.fetchDownloadTask(id: task.id))
+        #expect(updated.progress == 1)
+        #expect(updated.bytesWritten == 1_000)
+        #expect(updated.totalBytes == 1_000)
+        #expect(updated.destinationPath == "/downloads/final.mkv")
     }
 
     @Test func deleteDownloadTask() async throws {
@@ -360,6 +573,41 @@ struct DatabaseDownloadTaskTests {
         let tasks = try await db.fetchDownloadTasks()
         #expect(tasks.count == 3)
         #expect(tasks[0].id == "dl-2") // most recently updated first
+    }
+
+    @Test func clearDownloadTaskStreamURLRedactsStoredLink() async throws {
+        let (db, tempDir) = try await makeTemporaryDatabase(named: "downloads-redact-url.sqlite")
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let task = DownloadTask(
+            id: "dl-redact",
+            mediaId: "m-redact",
+            streamURL: "https://signed.example.com/tokenized.mkv",
+            fileName: "tokenized.mkv"
+        )
+        try await db.saveDownloadTask(task)
+        try await db.clearDownloadTaskStreamURL(id: task.id)
+
+        let updated = try await db.fetchDownloadTask(id: task.id)
+        #expect(updated?.persistedStreamURL == nil)
+        #expect(updated?.streamURL == "")
+    }
+
+    @Test func updateDownloadTaskResumeDataDropsInvalidBase64() async throws {
+        let (db, tempDir) = try await makeTemporaryDatabase(named: "downloads-invalid-resume-data.sqlite")
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let task = DownloadTask(
+            id: "dl-invalid-resume",
+            mediaId: "m-invalid-resume",
+            streamURL: "https://signed.example.com/video.mkv",
+            fileName: "video.mkv"
+        )
+        try await db.saveDownloadTask(task)
+
+        try await db.updateDownloadTaskResumeData(id: task.id, resumeDataBase64: "not-base64")
+        let updated = try #require(try await db.fetchDownloadTask(id: task.id))
+        #expect(updated.resumeDataBase64 == nil)
     }
 }
 
@@ -868,6 +1116,21 @@ struct SettingsManagerTests {
 
         // Database should have a keychain reference, not the raw value
         let raw = try await db.getSetting(key: SettingsKeys.tmdbApiKey)
+        #expect(raw?.hasPrefix("keychain:") == true)
+    }
+
+    @Test func simklRefreshTokenStoresInSecretStore() async throws {
+        let (db, tempDir) = try await makeTemporaryDatabase(named: "settings-simkl-refresh-secret.sqlite")
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let secretStore = TestSecretStore()
+        let settings = SettingsManager(database: db, secretStore: secretStore)
+
+        try await settings.setString(key: SettingsKeys.simklRefreshToken, value: "refresh-token-123")
+        let value = try await settings.getString(key: SettingsKeys.simklRefreshToken)
+        #expect(value == "refresh-token-123")
+
+        let raw = try await db.getSetting(key: SettingsKeys.simklRefreshToken)
         #expect(raw?.hasPrefix("keychain:") == true)
     }
 

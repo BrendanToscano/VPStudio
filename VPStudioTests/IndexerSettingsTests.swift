@@ -4,6 +4,26 @@ import Testing
 
 @Suite(.serialized)
 struct IndexerSettingsTests {
+    private actor InMemorySecretStore: SecretStore {
+        private var secrets: [String: String] = [:]
+
+        func setSecret(_ secret: String, for key: String) async throws {
+            secrets[key] = secret
+        }
+
+        func getSecret(for key: String) async throws -> String? {
+            secrets[key]
+        }
+
+        func deleteSecret(for key: String) async throws {
+            secrets[key] = nil
+        }
+
+        func deleteAllSecrets() async throws {
+            secrets.removeAll()
+        }
+    }
+
     @Test func addEditDeleteToggleAndPriorityPersistence() async throws {
         let (database, rootDir) = try await makeDatabase(named: "indexer-settings-crud.sqlite")
         defer { try? FileManager.default.removeItem(at: rootDir) }
@@ -96,6 +116,59 @@ struct IndexerSettingsTests {
         let names = await manager.configuredIndexerNames()
         // Only the 3 active-by-default indexers should be loaded
         #expect(names == ["Stremio Torrentio", "YTS", "APiBay"])
+    }
+
+    @Test func plaintextApiKeyMigratesToKeychainReferenceAndResolvesForRuntimeUse() async throws {
+        let (database, rootDir) = try await makeDatabase(named: "indexer-settings-secret-migration.sqlite")
+        defer { try? FileManager.default.removeItem(at: rootDir) }
+
+        let secretStore = InMemorySecretStore()
+        let config = makeTorznab(id: "secret-migrate", name: "Secret", priority: 0, isActive: true)
+        var plaintext = config
+        plaintext.apiKey = "  super-secret-key  "
+
+        try await database.saveIndexerConfig(plaintext)
+
+        let manager = IndexerManager(database: database, secretStore: secretStore)
+        try await manager.initialize()
+
+        let stored = try await database.fetchAllIndexerConfigs()
+        #expect(stored.first?.apiKey?.hasPrefix("keychain:") == true)
+
+        let expectedKey = IndexerConfig.secretKey(for: config.id)
+        let storedSecret = try await secretStore.getSecret(for: expectedKey)
+        #expect(storedSecret == "super-secret-key")
+
+        let storedConfig = try #require(stored.first)
+        let runtimeKey = try await storedConfig.resolvedAPIKey(using: secretStore)
+        #expect(runtimeKey == "super-secret-key")
+    }
+
+    @Test func persistedCopyClearsOrPersistsSecretBackedKeys() async throws {
+        let secretStore = InMemorySecretStore()
+        var config = makeTorznab(id: "persist-copy", name: "Persist", priority: 0, isActive: true)
+        config.apiKey = "secret-value"
+
+        let persisted = try await config.persistedCopy(using: secretStore)
+        #expect(persisted.changed)
+        #expect(persisted.config.apiKey?.hasPrefix("keychain:") == true)
+        let persistedSecret = try await secretStore.getSecret(for: IndexerConfig.secretKey(for: config.id))
+        #expect(persistedSecret == "secret-value")
+
+        let resolved = try await persisted.config.resolvedCopy(using: secretStore)
+        #expect(resolved.apiKey == "secret-value")
+    }
+
+    @Test func deleteStoredSecretRemovesSecretFromStore() async throws {
+        let secretStore = InMemorySecretStore()
+        let config = makeTorznab(id: "delete-secret", name: "Delete", priority: 0, isActive: true)
+        let key = IndexerConfig.secretKey(for: config.id)
+        try await secretStore.setSecret("secret-value", for: key)
+
+        try await config.deleteStoredSecret(using: secretStore)
+
+        let remaining = try await secretStore.getSecret(for: key)
+        #expect(remaining == nil)
     }
 
     private func makeDatabase(named fileName: String) async throws -> (DatabaseManager, URL) {

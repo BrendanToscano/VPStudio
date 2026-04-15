@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import VPStudio
 
@@ -304,6 +305,30 @@ struct DebridResolverStateTests {
         state.appendStreamIfNeeded(s1)
         state.appendStreamIfNeeded(s2)
         #expect(state.streams.count == 2)
+    }
+
+    @Test @MainActor
+    func appendStreamIfNeededKeepsDistinctResolvedURLsForSameReleaseMetadata() {
+        let state = DebridResolverState()
+        let primary = Fixtures.stream(
+            url: "https://cdn.example.com/files/stream-a.mkv?token=one",
+            fileName: "Movie.2026.1080p.WEB-DL.mkv"
+        )
+        let alternate = Fixtures.stream(
+            url: "https://cdn.example.com/files/stream-b.mkv?token=two",
+            fileName: "Movie.2026.1080p.WEB-DL.mkv"
+        )
+        let refreshedPrimary = Fixtures.stream(
+            url: "https://cdn.example.com/files/stream-a.mkv?token=three",
+            fileName: "Movie.2026.1080p.WEB-DL.mkv"
+        )
+
+        state.appendStreamIfNeeded(primary)
+        state.appendStreamIfNeeded(alternate)
+        state.appendStreamIfNeeded(refreshedPrimary)
+
+        #expect(state.streams.count == 2)
+        #expect(state.streams.map(\.streamURL.path).sorted() == ["/files/stream-a.mkv", "/files/stream-b.mkv"])
     }
 
     @Test @MainActor

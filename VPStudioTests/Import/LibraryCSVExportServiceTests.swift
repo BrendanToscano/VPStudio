@@ -30,6 +30,16 @@ struct CSVExportEscapeTests {
     @Test func carriageReturnTriggersQuoting() {
         #expect(LibraryCSVExportService.escapeCSV("A\rB") == "\"A\rB\"")
     }
+
+    @Test func formulaPrefixIsNeutralized() {
+        #expect(LibraryCSVExportService.escapeCSV("=SUM(A1:A2)") == "'=SUM(A1:A2)")
+        #expect(LibraryCSVExportService.escapeCSV("+cmd") == "'+cmd")
+        #expect(LibraryCSVExportService.escapeCSV("@lookup") == "'@lookup")
+    }
+
+    @Test func formulaPrefixIsNeutralizedBeforeQuoting() {
+        #expect(LibraryCSVExportService.escapeCSV("=SUM(A1,A2)") == "\"'=SUM(A1,A2)\"")
+    }
 }
 
 // MARK: - Export Summary Tests
@@ -189,7 +199,7 @@ struct CSVExportIntegrationTests {
         #expect(summary.folderNames.contains("Horror Picks"))
 
         let files = try FileManager.default.contentsOfDirectory(at: dirURL, includingPropertiesForKeys: nil)
-        let horrorFile = files.first(where: { $0.lastPathComponent == "Horror Picks.csv" })
+        let horrorFile = files.first(where: { $0.lastPathComponent == "Watchlist - Horror Picks.csv" })
         #expect(horrorFile != nil)
 
         if let horrorFile {
@@ -259,5 +269,105 @@ struct CSVExportIntegrationTests {
         let service = LibraryCSVExportService(database: db)
         let (csv, _) = try await service.exportFolder(listType: .watchlist, folderId: nil)
         #expect(csv.contains("\r\n"))
+    }
+
+    @Test func historyExportOnlyIncludesCompletedEntries() async throws {
+        let db = try await makeTempDatabase()
+
+        try await db.saveWatchHistory(
+            WatchHistory(
+                id: "resume-entry",
+                mediaId: "tt0100001",
+                title: "Incomplete Movie",
+                progress: 1200,
+                duration: 7200,
+                watchedAt: Date(timeIntervalSince1970: 1_700_000_000),
+                isCompleted: false
+            )
+        )
+        try await db.saveWatchHistory(
+            WatchHistory(
+                id: "completed-entry",
+                mediaId: "tt0100002",
+                title: "Completed Movie",
+                progress: 7200,
+                duration: 7200,
+                watchedAt: Date(timeIntervalSince1970: 1_700_086_400),
+                isCompleted: true
+            )
+        )
+
+        let service = LibraryCSVExportService(database: db)
+        let (csv, count) = try await service.exportFolder(listType: .history, folderId: nil)
+
+        #expect(count == 1)
+        #expect(csv.contains("Completed Movie"))
+        #expect(!csv.contains("Incomplete Movie"))
+    }
+
+    @Test func exportAllDisambiguatesCollidingFolderNames() async throws {
+        let db = try await makeTempDatabase()
+
+        let customFolder = try await db.createLibraryFolder(name: "Favorites", listType: .watchlist)
+
+        let watchlistItem = MediaItem(id: "tt0200001", type: .movie, title: "Custom Folder Item", year: 2024, genres: [])
+        let favoritesItem = MediaItem(id: "tt0200002", type: .movie, title: "System Favorites Item", year: 2024, genres: [])
+        try await db.saveMediaItem(watchlistItem)
+        try await db.saveMediaItem(favoritesItem)
+
+        try await db.addToLibrary(
+            UserLibraryEntry(
+                id: "tt0200001-watchlist-custom",
+                mediaId: "tt0200001",
+                folderId: customFolder.id,
+                listType: .watchlist,
+                addedAt: Date()
+            )
+        )
+        try await db.addToLibrary(
+            UserLibraryEntry(
+                id: "tt0200002-favorites-system",
+                mediaId: "tt0200002",
+                folderId: LibraryFolder.systemFolderID(for: .favorites),
+                listType: .favorites,
+                addedAt: Date()
+            )
+        )
+
+        let service = LibraryCSVExportService(database: db)
+        let (dirURL, _) = try await service.exportAll()
+        defer { try? FileManager.default.removeItem(at: dirURL) }
+
+        let files = try FileManager.default.contentsOfDirectory(at: dirURL, includingPropertiesForKeys: nil)
+        let fileNames = Set(files.map(\.lastPathComponent))
+
+        #expect(fileNames.contains("Favorites.csv"))
+        #expect(fileNames.contains("Watchlist - Favorites.csv"))
+    }
+
+    @Test func importedHistoryDateRoundTripsWithoutDayShift() async throws {
+        let db = try await makeTempDatabase()
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("history-import-\(UUID().uuidString).csv")
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+
+        let csv = """
+        Const,Date Rated,Title,Title Type
+        tt0111161,2025-02-14,The Shawshank Redemption,movie
+        """
+        try csv.write(to: fileURL, atomically: true, encoding: .utf8)
+
+        let importService = LibraryCSVImportService(database: db)
+        let summary = try await importService.importCSV(
+            from: fileURL,
+            options: .init(destination: .history, importRatings: false, promoteLikedRatingsToFavorites: false)
+        )
+        #expect(summary.historyImported == 1)
+
+        let exportService = LibraryCSVExportService(database: db)
+        let (historyCSV, count) = try await exportService.exportFolder(listType: .history, folderId: nil)
+
+        #expect(count == 1)
+        #expect(historyCSV.contains("2025-02-14"))
     }
 }

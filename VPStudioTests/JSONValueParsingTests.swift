@@ -49,7 +49,7 @@ struct JSONValueParsingTests {
     func extractInfoHashFromValidMagnetURI() {
         let magnet = "magnet:?xt=urn:btih:ABCDEF1234567890ABCDEF1234567890ABCDEF12&dn=Test"
         let hash = JSONValueParsing.extractInfoHash(from: magnet)
-        #expect(hash == "ABCDEF1234567890ABCDEF1234567890ABCDEF12")
+        #expect(hash == "abcdef1234567890abcdef1234567890abcdef12")
     }
 
     @Test
@@ -57,5 +57,19 @@ struct JSONValueParsingTests {
         #expect(JSONValueParsing.extractInfoHash(from: "not a magnet link") == nil)
         #expect(JSONValueParsing.extractInfoHash(from: nil) == nil)
         #expect(JSONValueParsing.extractInfoHash(from: "") == nil)
+    }
+
+    @Test
+    func extractInfoHashFromURLPathFallback() {
+        let torrentURL = "https://torrentio.strem.fun/resolve/realdebrid/0123456789ABCDEF0123456789ABCDEF01234567/magic.mkv"
+        let hash = JSONValueParsing.extractInfoHash(from: torrentURL)
+        #expect(hash == "0123456789abcdef0123456789abcdef01234567")
+    }
+
+    @Test
+    func extractInfoHashFromQueryFallback() {
+        let torrentURL = "https://cdn.example.com/stream?source=rd&hash=ABCDEF1234567890ABCDEF1234567890ABCDEF12&quality=1080p"
+        let hash = JSONValueParsing.extractInfoHash(from: torrentURL)
+        #expect(hash == "abcdef1234567890abcdef1234567890abcdef12")
     }
 }

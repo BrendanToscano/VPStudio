@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 import Testing
 @testable import VPStudio
 
@@ -239,16 +240,30 @@ struct SearchViewModelExplorePhaseTests {
         #expect(viewModel.explorePhase == .results)
     }
 
-    @Test func phaseIsResultsWhenGenreIsSelected() {
+    @Test func phaseIsEmptyWhenGenreIsSelectedWithoutResults() async throws {
         let viewModel = SearchViewModel(metadataService: PhaseTestMetadataStub())
-        viewModel.selectedGenre = Genre(id: 28, name: "Action")
-        #expect(viewModel.explorePhase == .results)
+        viewModel.selectGenre(Genre(id: 28, name: "Action"))
+
+        try await Self.waitUntil { viewModel.explorePhase == .empty }
+        #expect(viewModel.explorePhase == .empty)
+        #expect(viewModel.emptyStateQuery == "Action")
     }
 
-    @Test func phaseIsEmptyWhenQueryExistsButNoResults() {
+    @Test func phaseIsEmptyWhenMoodCardIsSelectedWithoutResults() async throws {
+        let viewModel = SearchViewModel(metadataService: PhaseTestMetadataStub())
+        let newReleasesCard = ExploreGenreCatalog.cards.first(where: { $0.id == "new" })!
+
+        viewModel.selectMoodCard(newReleasesCard)
+
+        try await Self.waitUntil { viewModel.explorePhase == .empty }
+        #expect(viewModel.explorePhase == .empty)
+        #expect(viewModel.emptyStateQuery == "New Releases")
+    }
+
+    @Test func phaseStaysIdleWhenQueryExistsButSearchHasNotStarted() {
         let viewModel = SearchViewModel(metadataService: PhaseTestMetadataStub())
         viewModel.query = "no match query"
-        #expect(viewModel.explorePhase == .empty)
+        #expect(viewModel.explorePhase == .idle)
     }
 
     @Test func phaseIsIdleWhenQueryIsEmptyAndNoResults() {
@@ -261,6 +276,49 @@ struct SearchViewModelExplorePhaseTests {
     @Test func phaseIsIdleWhenQueryIsWhitespaceOnly() {
         let viewModel = SearchViewModel(metadataService: PhaseTestMetadataStub())
         viewModel.query = "   "
+        #expect(viewModel.explorePhase == .idle)
+    }
+
+    @Test func phaseIsEmptyAfterSubmittedSearchReturnsNoResults() async throws {
+        let viewModel = SearchViewModel(metadataService: PhaseTestMetadataStub())
+        viewModel.query = "no match query"
+        viewModel.search()
+
+        try await Self.waitUntil { viewModel.explorePhase == .empty }
+        #expect(viewModel.explorePhase == .empty)
+    }
+
+    @Test func phaseIsErrorAfterSearchAttemptWithoutConfiguration() {
+        let viewModel = SearchViewModel()
+        viewModel.query = "no key query"
+        viewModel.search()
+
+        #expect(viewModel.hasAttemptedTextSearch == true)
+        #expect(viewModel.submittedQuery == "no key query")
+        #expect(viewModel.error == .tmdbSetupRequired(feature: "Search"))
+        #expect(viewModel.explorePhase == .error)
+    }
+
+    @Test func queryEditAfterUnconfiguredAttemptReturnsPhaseToIdleUntilNextSearch() {
+        let viewModel = SearchViewModel()
+        viewModel.query = "first query"
+        viewModel.search()
+
+        #expect(viewModel.explorePhase == .error)
+
+        viewModel.query = "second query"
+        #expect(viewModel.hasAttemptedTextSearch == false)
+        #expect(viewModel.error == nil)
+        #expect(viewModel.explorePhase == .idle)
+    }
+
+    @Test func queryEditAfterEmptySearchReturnsPhaseToIdleUntilNextSearch() async throws {
+        let viewModel = SearchViewModel(metadataService: PhaseTestMetadataStub())
+        viewModel.query = "first query"
+        viewModel.search()
+        try await Self.waitUntil { viewModel.explorePhase == .empty }
+
+        viewModel.query = "second query"
         #expect(viewModel.explorePhase == .idle)
     }
 
@@ -317,11 +375,10 @@ struct SearchViewModelExplorePhaseTests {
 
     // MARK: - primaryLanguage Computed Property
 
-    @Test func primaryLanguageReturnsFirstSortedLanguage() {
+    @Test func primaryLanguageReturnsPreferredLanguageWhenMultipleLanguagesAreSelected() {
         let viewModel = SearchViewModel()
         viewModel.languageFilters = ["fr-FR", "en-US"]
-        // Sorted: ["en-US", "fr-FR"], first = "en-US"
-        #expect(viewModel.primaryLanguage == "en-US")
+        #expect(viewModel.primaryLanguage == "fr-FR")
     }
 
     @Test func primaryLanguageReturnsSingleLanguage() {
@@ -550,28 +607,52 @@ struct SearchViewModelExplorePhaseTests {
         #expect(viewModel.languageFilters == ["en-US"])
     }
 
+
+    private final class MetadataFactoryCapture: @unchecked Sendable {
+        private let lock = NSLock()
+        private var callCountValue = 0
+        private var lastKeyValue: String?
+
+        func record(key: String) {
+            lock.lock()
+            callCountValue += 1
+            lastKeyValue = key
+            lock.unlock()
+        }
+
+        func callCount() -> Int {
+            lock.lock(); defer { lock.unlock() }
+            return callCountValue
+        }
+
+        func lastKey() -> String? {
+            lock.lock(); defer { lock.unlock() }
+            return lastKeyValue
+        }
+    }
+
     // MARK: - Configure
 
     @Test func configureWithSameKeyDoesNotRecreateService() async throws {
-        var factoryCallCount = 0
+        let capture = MetadataFactoryCapture()
         let viewModel = SearchViewModel(metadataServiceFactory: { key in
-            factoryCallCount += 1
+            capture.record(key: key)
             return PhaseTestMetadataStub()
         })
         viewModel.configure(apiKey: "my-key")
-        let firstCount = factoryCallCount
+        let firstCount = capture.callCount()
         viewModel.configure(apiKey: "my-key")
-        #expect(factoryCallCount == firstCount, "Factory should not be called again for same key")
+        #expect(capture.callCount() == firstCount, "Factory should not be called again for same key")
     }
 
     @Test func configureTrimsApiKey() async throws {
-        var receivedKey: String?
+        let capture = MetadataFactoryCapture()
         let viewModel = SearchViewModel(metadataServiceFactory: { key in
-            receivedKey = key
+            capture.record(key: key)
             return PhaseTestMetadataStub()
         })
         viewModel.configure(apiKey: "  my-key  ")
-        #expect(receivedKey == "my-key")
+        #expect(capture.lastKey() == "my-key")
     }
 
     // MARK: - Apply Language Filters
@@ -580,6 +661,15 @@ struct SearchViewModelExplorePhaseTests {
         let viewModel = SearchViewModel(metadataService: PhaseTestMetadataStub())
         viewModel.applyLanguageFilters(["ja-JP", "ko-KR"])
         #expect(viewModel.languageFilters == ["ja-JP", "ko-KR"])
+    }
+
+    @Test func applyLanguageFiltersReplacesExistingSelection() {
+        let viewModel = SearchViewModel(metadataService: PhaseTestMetadataStub())
+        viewModel.languageFilters = ["fr-FR"]
+        viewModel.applyLanguageFilters(["ja-JP"])
+
+        #expect(viewModel.languageFilters == ["ja-JP"])
+        #expect(viewModel.primaryLanguage == "ja-JP")
     }
 
     @Test func applyLanguageFiltersToEmptySet() {

@@ -2,7 +2,7 @@
 
 A visionOS media app for Apple Vision Pro. Browse, search, save, download, and watch content in immersive environments.
 
-Built with Swift 6, SwiftUI, RealityKit, GRDB, and KSPlayer. Targets visionOS 26+.
+Built with Swift, SwiftUI, RealityKit, GRDB, and KSPlayer. Targets visionOS 26+.
 
 ---
 
@@ -10,7 +10,7 @@ Built with Swift 6, SwiftUI, RealityKit, GRDB, and KSPlayer. Targets visionOS 26
 
 VPStudio handles the full media workflow on Vision Pro: metadata from TMDB, stream resolution through debrid services, codec-aware playback with dual engines (AVPlayer / KSPlayer), subtitle fetching, downloads with real progress tracking, library management with folders and CSV import, and immersive HDRI environments with a head-tracked cinema screen.
 
-It also syncs to Trakt and Simkl, and includes an AI assistant (Anthropic, OpenAI, or Ollama) that generates recommendations from watch history and ratings.
+It syncs to Trakt, and includes an AI assistant (Anthropic, OpenAI, Gemini, OpenRouter, or Ollama) that generates recommendations from watch history and ratings. Simkl is cleanup-only in this build: settings remain visible for reviewing or clearing saved authorization, but Simkl sync and scrobbling are unavailable.
 
 ## Features
 
@@ -18,10 +18,44 @@ It also syncs to Trakt and Simkl, and includes an AI assistant (Anthropic, OpenA
 - **Search** - TMDB full-text search with genre/year/rating filters and mood-based AI picks.
 - **Library** - Watchlist, favorites, history, downloads. Folder organization. CSV import.
 - **Player** - Dual-engine with automatic codec selection. Cinematic transport controls. Lifecycle-safe teardown.
-- **Immersive** (Under Construction) - HDRI skybox environments via RealityKit. Head-tracked cinema screen. Custom environment import. (Environment selection is currently broken.)
+- **Immersive** (Under Construction) - HDRI skybox environments via RealityKit. Head-tracked cinema screen. Custom environment import. (Environment selection remains unstable.)
 - **Downloads** - Real byte-level progress via URLSessionDownloadDelegate. Offline playback.
-- **Settings** - Debrid providers (RealDebrid, TorBox, AllDebrid, Premiumize, Offcloud, DebridLink, EasyNews), TMDB, Trakt, Simkl, OpenSubtitles, AI providers. Setup wizard. Health dashboard.
+- **Settings** - Debrid providers (RealDebrid, TorBox, AllDebrid, Premiumize, Offcloud, DebridLink, EasyNews), TMDB, Trakt, Simkl cleanup-only surface (sync unavailable in this build), OpenSubtitles, AI providers. Setup wizard. Health dashboard.
 - **AI** - Personalized analysis with predicted ratings and verdicts. Taste profile from watch history, ratings, and favorites.
+
+## Release Gallery
+
+### v2
+
+Current release preview:
+
+| Discover | Explore |
+| --- | --- |
+| ![VPStudio v2 Discover](.github/pr-assets/v2/discover.png) | ![VPStudio v2 Explore](.github/pr-assets/v2/explore.png) |
+
+| Detail | AI Detail |
+| --- | --- |
+| ![VPStudio v2 Detail](.github/pr-assets/v2/detail-watch.png) | ![VPStudio v2 AI Detail](.github/pr-assets/v2/detail-ai.png) |
+
+| Discover AI | Settings |
+| --- | --- |
+| ![VPStudio v2 Discover AI](.github/pr-assets/v2/discover-ai.png) | ![VPStudio v2 Settings](.github/pr-assets/v2/settings.png) |
+
+| Library |
+| --- |
+| ![VPStudio v2 Library](.github/pr-assets/v2/library.png) |
+
+### v1
+
+Archive preview:
+
+| Search | Library |
+| --- | --- |
+| ![VPStudio v1 Search](.github/readme-assets/v1/search.png) | ![VPStudio v1 Library](.github/readme-assets/v1/library.png) |
+
+| Downloads | Settings |
+| --- | --- |
+| ![VPStudio v1 Downloads](.github/readme-assets/v1/downloads.png) | ![VPStudio v1 Settings](.github/readme-assets/v1/settings.png) |
 
 ## Setup
 
@@ -55,10 +89,10 @@ Select `VPStudio` scheme -> `Apple Vision Pro Simulator` (or your device) -> `Cm
 
 On first launch you can either:
 
-- `Explore Now` (no setup required), or
+- `Browse Library` (local sections only until TMDB is configured), or
 - `Run Setup` for full configuration.
 
-For full streaming behavior, configure at least a TMDB API key and one debrid provider token. Trakt, Simkl, AI, and subtitles are optional.
+For full streaming behavior, configure at least a TMDB API key and one debrid provider token. Trakt, AI, and subtitles are optional. Simkl is cleanup-only in this build: settings remain visible for clearing saved authorization, but Simkl sync and scrobbling are unavailable.
 
 ### Cost and account notes
 
@@ -66,7 +100,8 @@ For full streaming behavior, configure at least a TMDB API key and one debrid pr
 - TMDB API keys are free for personal/development use.
 - Debrid providers are typically paid subscriptions.
 - Hosted AI providers (OpenAI/Anthropic) are paid; local Ollama can be run without API billing.
-- Trakt/Simkl sync requires your own account credentials (but mostly free), configured in Settings.
+- Trakt sync requires your own account credentials (but mostly free), configured in Settings.
+- Simkl is cleanup-only in this build: settings remain visible for credential cleanup, but Simkl sync and scrobbling are unavailable.
 
 ### Troubleshooting
 
@@ -98,7 +133,7 @@ VPStudio/
     Indexers/    -> torrent indexers
     Metadata/    -> TMDB
     Subtitles/   -> OpenSubtitles
-    Sync/        -> Trakt, Simkl
+    Sync/        -> Trakt, Simkl service code
   ViewModels/    -> feature state (Detail, Discover, Search, Downloads)
   Views/
     Immersive/   -> RealityKit environments

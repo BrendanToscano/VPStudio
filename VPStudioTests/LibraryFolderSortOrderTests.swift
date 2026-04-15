@@ -99,8 +99,8 @@ struct LibraryFolderSortOrderTests {
 
         let watchA = try await db.createLibraryFolder(name: "Watch-A", listType: .watchlist)
         let watchB = try await db.createLibraryFolder(name: "Watch-B", listType: .watchlist)
-        let favA = try await db.createLibraryFolder(name: "Fav-A", listType: .favorites)
-        let favB = try await db.createLibraryFolder(name: "Fav-B", listType: .favorites)
+        _ = try await db.createLibraryFolder(name: "Fav-A", listType: .favorites)
+        _ = try await db.createLibraryFolder(name: "Fav-B", listType: .favorites)
 
         // Reorder only watchlist folders
         try await db.reorderLibraryFolders(

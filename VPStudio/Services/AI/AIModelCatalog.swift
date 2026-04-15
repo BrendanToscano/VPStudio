@@ -70,14 +70,34 @@ enum AIModelCatalog {
 
     // MARK: OpenAI Models
 
-    static let gpt52 = AIModelDefinition(
-        id: "gpt-5.2",
-        displayName: "GPT-5.2",
+    static let gpt54 = AIModelDefinition(
+        id: "gpt-5.4",
+        displayName: "GPT-5.4",
         provider: .openAI,
-        inputCostPer1MTokens: 2.0,
-        outputCostPer1MTokens: 8.0,
-        maxContextTokens: 128_000,
+        inputCostPer1MTokens: 2.50,
+        outputCostPer1MTokens: 15.0,
+        maxContextTokens: 1_050_000,
         isDefault: true
+    )
+
+    static let gpt54Mini = AIModelDefinition(
+        id: "gpt-5.4-mini",
+        displayName: "GPT-5.4 Mini",
+        provider: .openAI,
+        inputCostPer1MTokens: 0.75,
+        outputCostPer1MTokens: 4.50,
+        maxContextTokens: 400_000,
+        isDefault: false
+    )
+
+    static let gpt54Nano = AIModelDefinition(
+        id: "gpt-5.4-nano",
+        displayName: "GPT-5.4 Nano",
+        provider: .openAI,
+        inputCostPer1MTokens: 0.20,
+        outputCostPer1MTokens: 1.25,
+        maxContextTokens: 400_000,
+        isDefault: false
     )
 
     static let gpt5 = AIModelDefinition(
@@ -152,12 +172,132 @@ enum AIModelCatalog {
         isDefault: false
     )
 
+    // MARK: Gemini Models
+
+    static let gemini25Flash = AIModelDefinition(
+        id: "gemini-2.5-flash",
+        displayName: "Gemini 2.5 Flash",
+        provider: .gemini,
+        inputCostPer1MTokens: 0.15,
+        outputCostPer1MTokens: 0.60,
+        maxContextTokens: 1_000_000,
+        isDefault: true
+    )
+
+    static let gemini25Pro = AIModelDefinition(
+        id: "gemini-2.5-pro",
+        displayName: "Gemini 2.5 Pro",
+        provider: .gemini,
+        inputCostPer1MTokens: 1.25,
+        outputCostPer1MTokens: 10.0,
+        maxContextTokens: 1_000_000,
+        isDefault: false
+    )
+
+    // MARK: OpenRouter Models
+
+    static let openRouterGeminiFlashLite = AIModelDefinition(
+        id: "openrouter/google/gemini-2.5-flash-lite-preview",
+        displayName: "Gemini 2.5 Flash Lite (OpenRouter)",
+        provider: .openRouter,
+        inputCostPer1MTokens: 0.10,
+        outputCostPer1MTokens: 0.40,
+        maxContextTokens: 100_000,
+        isDefault: true
+    )
+
+    static let openRouterClaudeHaiku = AIModelDefinition(
+        id: "openrouter/anthropic/claude-3.5-haiku",
+        displayName: "Claude 3.5 Haiku (OpenRouter)",
+        provider: .openRouter,
+        inputCostPer1MTokens: 0.80,
+        outputCostPer1MTokens: 4.0,
+        maxContextTokens: 200_000,
+        isDefault: false
+    )
+
+    static let openRouterGPT4oMini = AIModelDefinition(
+        id: "openrouter/openai/gpt-4o-mini",
+        displayName: "GPT-4o Mini (OpenRouter)",
+        provider: .openRouter,
+        inputCostPer1MTokens: 0.15,
+        outputCostPer1MTokens: 0.60,
+        maxContextTokens: 128_000,
+        isDefault: false
+    )
+
+    static let openRouterLlama3 = AIModelDefinition(
+        id: "openrouter/meta-llama/llama-3.1-8b-instruct",
+        displayName: "Llama 3.1 8B (OpenRouter)",
+        provider: .openRouter,
+        inputCostPer1MTokens: 0.04,
+        outputCostPer1MTokens: 0.04,
+        maxContextTokens: 128_000,
+        isDefault: false
+    )
+
+    static let openRouterMistralNemo = AIModelDefinition(
+        id: "openrouter/mistralai/mistral-nemo",
+        displayName: "Mistral Nemo (OpenRouter)",
+        provider: .openRouter,
+        inputCostPer1MTokens: 0.15,
+        outputCostPer1MTokens: 0.15,
+        maxContextTokens: 128_000,
+        isDefault: false
+    )
+
+    static let openRouterQwen = AIModelDefinition(
+        id: "openrouter/qwen/qwen-2.5-72b-instruct",
+        displayName: "Qwen 2.5 72B (OpenRouter)",
+        provider: .openRouter,
+        inputCostPer1MTokens: 0.90,
+        outputCostPer1MTokens: 0.90,
+        maxContextTokens: 32_000,
+        isDefault: false
+    )
+
+    // MARK: Local (On-Device CoreML) Models
+
+    static let localSmolLM2 = AIModelDefinition(
+        id: "apple/SmolLM2-360M-Instruct-CoreML",
+        displayName: "SmolLM2 360M (On-Device)",
+        provider: .local,
+        inputCostPer1MTokens: 0,
+        outputCostPer1MTokens: 0,
+        maxContextTokens: 2_048,
+        isDefault: true
+    )
+
+    static let localPhi3Mini = AIModelDefinition(
+        id: "apple/Phi-3-mini-128k-instruct-CoreML",
+        displayName: "Phi-3 Mini (On-Device)",
+        provider: .local,
+        inputCostPer1MTokens: 0,
+        outputCostPer1MTokens: 0,
+        maxContextTokens: 4_096,
+        isDefault: false
+    )
+
+    static let localOpenELM3B = AIModelDefinition(
+        id: "apple/OpenELM-3B-Instruct-CoreML",
+        displayName: "OpenELM 3B (On-Device)",
+        provider: .local,
+        inputCostPer1MTokens: 0,
+        outputCostPer1MTokens: 0,
+        maxContextTokens: 2_048,
+        isDefault: false
+    )
+
     // MARK: All Models
 
     static let allModels: [AIModelDefinition] = [
         claudeOpus46, claudeSonnet46, claudeOpus4, claudeSonnet4, claudeHaiku35,
-        gpt52, gpt5, gpt4o, gpt4oMini, o1,
+        gpt54, gpt54Mini, gpt54Nano, gpt5, gpt4o, gpt4oMini, o1,
         llama31, llama32, mistral,
+        gemini25Flash, gemini25Pro,
+        openRouterGeminiFlashLite, openRouterClaudeHaiku, openRouterGPT4oMini,
+        openRouterLlama3, openRouterMistralNemo, openRouterQwen,
+        localSmolLM2, localPhi3Mini, localOpenELM3B,
     ]
 
     // MARK: Lookup
@@ -264,6 +404,7 @@ enum AIModelFetcher {
     /// Fetches locally installed models from an Ollama instance.
     static func fetchOllamaModels(baseURL: String) async -> [AIModelDefinition] {
         let endpoint = baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard AIOllamaEndpointPolicy.isAllowedBaseURL(endpoint) else { return [] }
         guard let url = URL(string: "\(endpoint)/api/tags") else { return [] }
         var request = URLRequest(url: url)
         request.timeoutInterval = 10
@@ -290,6 +431,91 @@ enum AIModelFetcher {
         .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
     }
 
+    /// Fetches available models from the OpenRouter API.
+    static func fetchOpenRouterModels(
+        apiKey: String,
+        session: URLSession = .shared
+    ) async -> [AIModelDefinition] {
+        let trimmedAPIKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedAPIKey.isEmpty else { return [] }
+
+        var request = URLRequest(url: URL(string: "https://openrouter.ai/api/v1/models")!)
+        request.timeoutInterval = 15
+        request.setValue("Bearer \(trimmedAPIKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+
+        guard let (data, response) = try? await session.data(for: request),
+              let http = response as? HTTPURLResponse, http.statusCode == 200 else { return [] }
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let items = json["data"] as? [[String: Any]] else { return [] }
+
+        return items.compactMap { item -> AIModelDefinition? in
+            guard let id = item["id"] as? String, !id.isEmpty else { return nil }
+            let catalogMatch = AIModelCatalog.model(byID: id)
+            let displayName = (item["name"] as? String)
+                ?? catalogMatch?.displayName
+                ?? formatModelID(id)
+            let pricing = item["pricing"] as? [String: Any]
+            let inputCost = catalogMatch?.inputCostPer1MTokens
+                ?? scaledOpenRouterPrice(from: pricing?["prompt"])
+                ?? 0
+            let outputCost = catalogMatch?.outputCostPer1MTokens
+                ?? scaledOpenRouterPrice(from: pricing?["completion"])
+                ?? 0
+            let contextLength = (item["context_length"] as? Int)
+                ?? catalogMatch?.maxContextTokens
+                ?? 128_000
+
+            return AIModelDefinition(
+                id: id,
+                displayName: displayName,
+                provider: .openRouter,
+                inputCostPer1MTokens: inputCost,
+                outputCostPer1MTokens: outputCost,
+                maxContextTokens: contextLength,
+                isDefault: catalogMatch?.isDefault ?? false
+            )
+        }
+        .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+    }
+
+    /// Fetches available models from the Google Gemini API.
+    static func fetchGeminiModels(apiKey: String) async -> [AIModelDefinition] {
+        let trimmedAPIKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedAPIKey.isEmpty else { return [] }
+        var components = URLComponents(string: "https://generativelanguage.googleapis.com")
+        components?.path = "/v1beta/models"
+        guard let url = components?.url else { return [] }
+        var request = URLRequest(url: url)
+        request.setValue(trimmedAPIKey, forHTTPHeaderField: "x-goog-api-key")
+        request.timeoutInterval = 15
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.httpShouldHandleCookies = false
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              let http = response as? HTTPURLResponse, http.statusCode == 200 else { return [] }
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let items = json["models"] as? [[String: Any]] else { return [] }
+
+        return items.compactMap { item -> AIModelDefinition? in
+            guard let name = item["name"] as? String else { return nil }
+            // name is "models/gemini-2.5-flash" — extract the model ID
+            let id = name.hasPrefix("models/") ? String(name.dropFirst(7)) : name
+            guard id.lowercased().contains("gemini") else { return nil }
+            let displayName = item["displayName"] as? String
+            let catalogMatch = AIModelCatalog.model(byID: id)
+            return AIModelDefinition(
+                id: id,
+                displayName: catalogMatch?.displayName ?? displayName ?? formatModelID(id),
+                provider: .gemini,
+                inputCostPer1MTokens: catalogMatch?.inputCostPer1MTokens ?? 0,
+                outputCostPer1MTokens: catalogMatch?.outputCostPer1MTokens ?? 0,
+                maxContextTokens: catalogMatch?.maxContextTokens ?? 1_000_000,
+                isDefault: catalogMatch?.isDefault ?? false
+            )
+        }
+        .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+    }
+
     /// Formats a raw model ID into a human-readable display name.
     private static func formatModelID(_ id: String) -> String {
         id.replacingOccurrences(of: "-", with: " ")
@@ -297,5 +523,15 @@ enum AIModelFetcher {
           .split(separator: " ")
           .map { $0.prefix(1).uppercased() + $0.dropFirst() }
           .joined(separator: " ")
+    }
+
+    private static func scaledOpenRouterPrice(from value: Any?) -> Double? {
+        if let string = value as? String, let parsed = Double(string) {
+            return parsed * 1_000_000
+        }
+        if let number = value as? NSNumber {
+            return number.doubleValue * 1_000_000
+        }
+        return nil
     }
 }

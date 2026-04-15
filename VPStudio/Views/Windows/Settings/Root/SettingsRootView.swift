@@ -14,12 +14,22 @@ struct SettingsView: View {
     @State private var isRefreshingStatuses = false
     @State private var destinationStatuses: [SettingsDestination: SettingsDestinationStatus] = [:]
     @State private var isShowingResetSheet = false
+    @State private var didTriggerQAAutoReset = false
 
     @AppStorage("settings.last_destination") private var lastDestinationRawValue = ""
     @AppStorage("settings.search_query") private var persistedSearchQuery = ""
+    @AppStorage(VPMenuBackgroundIntensityPolicy.appStorageKey)
+    private var menuBackgroundIntensityRaw = VPMenuBackgroundIntensityPolicy.defaultValue
 
     private var filteredGroups: [SettingsDestinationGroup] {
         SettingsNavigationCatalog.groups(matching: query)
+    }
+
+    private var menuBackgroundIntensity: Binding<Double> {
+        Binding(
+            get: { SettingsAppearancePolicy.normalizedMenuBackgroundIntensity(menuBackgroundIntensityRaw) },
+            set: { menuBackgroundIntensityRaw = SettingsAppearancePolicy.normalizedMenuBackgroundIntensity($0) }
+        )
     }
 
     private var recentDestination: SettingsDestination? {
@@ -46,6 +56,12 @@ struct SettingsView: View {
         SettingsHealthPolicy.configurationProgress(configured: configuredCount, total: totalCount)
     }
 
+    private var healthTint: Color {
+        if healthProgress >= 0.75 { return .green }
+        if healthProgress >= 0.45 { return .orange }
+        return .yellow
+    }
+
     var body: some View {
         List {
             Section {
@@ -70,7 +86,7 @@ struct SettingsView: View {
                         }
                     }
 
-                    GlassProgressBar(progress: healthProgress, tint: .vpRed)
+                    GlassProgressBar(progress: healthProgress, tint: healthTint)
                 }
                 .padding(.vertical, 4)
             }
@@ -107,6 +123,25 @@ struct SettingsView: View {
                         )
                     }
                 }
+            }
+
+            Section("Appearance") {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Label("Menu Background Intensity", systemImage: "circle.lefthalf.filled")
+                        Spacer()
+                        Text(SettingsAppearancePolicy.menuBackgroundIntensityLabel(for: menuBackgroundIntensity.wrappedValue))
+                            .font(.caption)
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Slider(value: menuBackgroundIntensity, in: VPMenuBackgroundIntensityPolicy.range)
+                        .accessibilityLabel("Menu background intensity")
+                        .accessibilityValue(SettingsAppearancePolicy.menuBackgroundIntensityLabel(for: menuBackgroundIntensity.wrappedValue))
+                        .accessibilityHint("Adjusts the strength of the cinematic menu background.")
+                }
+                .padding(.vertical, 4)
             }
 
             Section("Quick Actions") {
@@ -146,6 +181,11 @@ struct SettingsView: View {
                     .foregroundStyle(.tertiary)
             }
         }
+        .scrollContentBackground(.hidden)
+        .background {
+            VPMenuBackground()
+                .ignoresSafeArea()
+        }
         .navigationTitle("Settings")
         .sheet(isPresented: $isShowingResetSheet) {
             ResetDataView()
@@ -158,19 +198,49 @@ struct SettingsView: View {
                     )
                 }
         }
-        .searchable(text: $query, prompt: "Search settings")
+        .searchable(text: $query, prompt: "Search settings, providers, AI, downloads")
         .task {
             if !didLoadInitialSearch {
                 query = persistedSearchQuery
                 didLoadInitialSearch = true
             }
             await refreshStatuses()
+            if QARuntimeOptions.autoOpenResetSheet, !didTriggerQAAutoReset {
+                didTriggerQAAutoReset = true
+                isShowingResetSheet = true
+            }
         }
         .refreshable {
             await refreshStatuses()
         }
         .onChange(of: query) { _, newValue in
             persistedSearchQuery = newValue
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .tmdbApiKeyDidChange)) { _ in
+            Task { await refreshStatuses() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .indexersDidChange)) { _ in
+            Task { await refreshStatuses() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .environmentsDidChange)) { _ in
+            Task { await refreshStatuses() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .localModelsDidChange)) { _ in
+            Task { await refreshStatuses() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .openSubtitlesDidChange)) { _ in
+            Task { await refreshStatuses() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .settingsDidChange)) { _ in
+            Task { await refreshStatuses() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .appDidResetAllData)) { _ in
+            query = ""
+            persistedSearchQuery = ""
+            lastDestinationRawValue = ""
+            didLoadInitialSearch = false
+            isShowingResetSheet = false
+            Task { await refreshStatuses() }
         }
     }
 
@@ -195,18 +265,28 @@ struct SettingsView: View {
             IndexerSettingsView()
         case .metadata:
             MetadataSettingsView()
-        case .player:
-            PlayerSettingsView()
-        case .subtitles:
-            SubtitleSettingsView()
-        case .environments:
-            EnvironmentSettingsView()
         case .ai:
             AISettingsView()
         case .trakt:
             TraktSettingsView()
         case .simkl:
             SimklSettingsView()
+        case .imdbImport:
+            IMDbImportSettingsView()
+        case .player:
+            PlayerSettingsView()
+        case .subtitles:
+            SubtitleSettingsView()
+        case .environments:
+            EnvironmentSettingsView()
+        case .library:
+            LibraryView()
+        case .downloads:
+            DownloadsView()
+        case .resetData:
+            ResetDataView()
+        case .testMode:
+            TestModeView()
         }
     }
 
@@ -275,17 +355,20 @@ struct SettingsView: View {
 
         snapshot.hasOpenAIKey = await hasNonEmptyString(for: SettingsKeys.openAIApiKey)
         snapshot.hasAnthropicKey = await hasNonEmptyString(for: SettingsKeys.anthropicApiKey)
+        snapshot.hasGeminiKey = await hasNonEmptyString(for: SettingsKeys.geminiApiKey)
         snapshot.hasOllamaEndpoint = await hasNonEmptyString(
             for: SettingsKeys.ollamaEndpoint,
             fallback: "http://localhost:11434"
         )
-
+        snapshot.hasOpenRouterKey = await hasNonEmptyString(for: SettingsKeys.openRouterApiKey)
         let userTraktClient = try? await appState.settingsManager.getString(key: SettingsKeys.traktClientId)
         let userTraktSecret = try? await appState.settingsManager.getString(key: SettingsKeys.traktClientSecret)
         snapshot.hasTraktCredentials = TraktDefaults.resolvedCredentials(
             userClientId: userTraktClient,
             userClientSecret: userTraktSecret
         ) != nil
+        let hasTraktAccessToken = await hasNonEmptyString(for: SettingsKeys.traktAccessToken)
+        snapshot.hasTraktConnection = snapshot.hasTraktCredentials && hasTraktAccessToken
 
         let hasSimklClient = await hasNonEmptyString(for: SettingsKeys.simklClientId)
         let hasSimklToken = await hasNonEmptyString(for: SettingsKeys.simklAccessToken)

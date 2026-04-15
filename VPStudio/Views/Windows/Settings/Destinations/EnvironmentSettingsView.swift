@@ -11,8 +11,14 @@ struct EnvironmentSettingsView: View {
     @State private var installingPresetIDs: Set<String> = []
     @State private var autoOpenEnvironment = true
     @State private var assetLoadTask: Task<Void, Never>?
+    @State private var pendingDeletion: PendingDeletion?
 
     private let onlinePresets = EnvironmentCatalogManager.onlinePresets
+
+    private struct PendingDeletion: Identifiable {
+        let id: String
+        let name: String
+    }
 
     var body: some View {
         List {
@@ -77,7 +83,7 @@ struct EnvironmentSettingsView: View {
             await coalescedLoadAssets()
         }
         .onChange(of: autoOpenEnvironment) { _, newValue in
-            Task { try? await appState.settingsManager.setBool(key: SettingsKeys.autoOpenEnvironment, value: newValue) }
+            saveAutoOpenEnvironment(newValue)
         }
         .onReceive(NotificationCenter.default.publisher(for: .environmentsDidChange)) { _ in
             scheduleAssetLoad()
@@ -120,6 +126,22 @@ struct EnvironmentSettingsView: View {
             Button("OK", role: .cancel) {}
         } message: {
             Text(environmentError ?? "Unknown error")
+        }
+        .confirmationDialog(
+            "Delete Imported Environment?",
+            isPresented: Binding(
+                get: { pendingDeletion != nil },
+                set: { if !$0 { pendingDeletion = nil } }
+            ),
+            titleVisibility: .visible,
+            presenting: pendingDeletion
+        ) { deletion in
+            Button("Delete", role: .destructive) {
+                Task { await deleteImportedEnvironment(id: deletion.id) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { deletion in
+            Text("Delete \(deletion.name)? This removes the imported environment from disk.")
         }
     }
 
@@ -233,14 +255,7 @@ struct EnvironmentSettingsView: View {
 
                 if asset.sourceType == .imported {
                     Button(role: .destructive) {
-                        Task {
-                            do {
-                                try await appState.environmentCatalogManager.deleteAsset(id: asset.id)
-                                await coalescedLoadAssets()
-                            } catch {
-                                environmentError = error.localizedDescription
-                            }
-                        }
+                        pendingDeletion = PendingDeletion(id: asset.id, name: asset.name)
                     } label: {
                         Label("Delete", systemImage: "trash")
                     }
@@ -278,6 +293,16 @@ struct EnvironmentSettingsView: View {
     }
 
     @MainActor
+    private func deleteImportedEnvironment(id: String) async {
+        do {
+            try await appState.environmentCatalogManager.deleteAsset(id: id)
+            await coalescedLoadAssets()
+        } catch {
+            environmentError = error.localizedDescription
+        }
+    }
+
+    @MainActor
     private func scheduleAssetLoad() {
         assetLoadTask?.cancel()
         assetLoadTask = Task { await loadAssets() }
@@ -299,6 +324,21 @@ struct EnvironmentSettingsView: View {
         } catch {
             guard !Task.isCancelled else { return }
             environmentError = error.localizedDescription
+        }
+    }
+
+    private func saveAutoOpenEnvironment(_ value: Bool) {
+        Task {
+            do {
+                try await appState.settingsManager.setBool(key: SettingsKeys.autoOpenEnvironment, value: value)
+                await MainActor.run {
+                    environmentError = nil
+                }
+            } catch {
+                await MainActor.run {
+                    environmentError = error.localizedDescription
+                }
+            }
         }
     }
 }

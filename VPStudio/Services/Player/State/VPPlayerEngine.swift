@@ -34,6 +34,7 @@ final class VPPlayerEngine {
     var subtitleTracks: [TrackInfo] = []
     var selectedAudioTrack: Int = 0
     var selectedSubtitleTrack: Int = -1
+    var subtitlesEnabled: Bool = false
 
     // MARK: - Subtitle Display
 
@@ -44,6 +45,12 @@ final class VPPlayerEngine {
     var videoSize: CGSize = .zero
     var fps: Double = 0
     var videoBitrate: Int64 = 0
+
+    // MARK: - HDR Metadata
+
+    /// Mastering-display and content-light-level metadata extracted from the
+    /// active video track.  `nil` until the first video track is inspected.
+    var hdrMetadata: HDRDisplayMetadata?
 
     // MARK: - Dim Passthrough (visionOS)
 
@@ -96,9 +103,9 @@ final class VPPlayerEngine {
 
     // MARK: - Stereo Mode Detection
 
-    /// Infers and sets `stereoMode` from a media title or filename.
-    func updateStereoMode(from title: String) {
-        stereoMode = SpatialVideoTitleDetector.stereoMode(fromTitle: title)
+    /// Infers and sets `stereoMode` from a media title or filename and optional codec hint.
+    func updateStereoMode(from title: String, codecHint: String? = nil) {
+        stereoMode = SpatialVideoTitleDetector.stereoMode(fromTitle: title, codecHint: codecHint)
     }
 
     // MARK: - Track Selection
@@ -107,14 +114,57 @@ final class VPPlayerEngine {
         selectedAudioTrack = index
     }
 
+    func loadAudioTracks(_ tracks: [TrackInfo], selectedTrackID: Int? = nil) {
+        audioTracks = tracks
+
+        guard let firstTrack = tracks.first else {
+            selectedAudioTrack = 0
+            return
+        }
+
+        if let selectedTrackID, tracks.contains(where: { $0.id == selectedTrackID }) {
+            selectedAudioTrack = selectedTrackID
+        } else if !tracks.contains(where: { $0.id == selectedAudioTrack }) {
+            selectedAudioTrack = firstTrack.id
+        }
+    }
+
     func selectSubtitleTrack(_ index: Int) {
         guard index >= -1, index < subtitleTracks.count else { return }
         selectedSubtitleTrack = index
         if index == -1 {
+            subtitlesEnabled = false
             currentSubtitleText = nil
         } else {
+            subtitlesEnabled = true
             updateSubtitleText(at: currentTime)
         }
+    }
+
+    /// Clears session-scoped playback state when a stream ends, is canceled,
+    /// or is being replaced by a different stream.
+    func resetSessionState() {
+        currentTitle = nil
+        currentTime = 0
+        duration = 0
+        bufferedPercent = 0
+        isPlaying = false
+        isBuffering = true
+        audioTracks = []
+        subtitleTracks = []
+        selectedAudioTrack = 0
+        selectedSubtitleTrack = -1
+        subtitlesEnabled = false
+        currentSubtitleText = nil
+        videoSize = .zero
+        fps = 0
+        videoBitrate = 0
+        hdrMetadata = nil
+        stereoMode = .mono
+        chapters = []
+        error = nil
+        externalSubtitles = []
+        parsedSubtitleCues = [:]
     }
 
     // MARK: - Playback Rate
@@ -180,16 +230,15 @@ final class VPPlayerEngine {
     // MARK: - External Subtitles
 
     func loadExternalSubtitles(_ subtitles: [Subtitle]) {
-        externalSubtitles = subtitles
+        let renderableSubtitles = subtitles.filter { $0.isSupportedSubtitle }
+        externalSubtitles = renderableSubtitles
         parsedSubtitleCues = [:]
-        subtitleTracks = subtitles.enumerated().map { offset, subtitle in
+        subtitleTracks = renderableSubtitles.enumerated().map { offset, subtitle in
             if let subtitleURL = subtitle.downloadURL,
                subtitleURL.isFileURL,
-               let content = try? String(contentsOf: subtitleURL, encoding: .utf8) {
-                let cues = SubtitleParser.parse(content: content, format: subtitle.format)
-                if !cues.isEmpty {
-                    parsedSubtitleCues[offset] = cues
-                }
+               let cues = loadSubtitleCues(from: subtitleURL, format: subtitle.format),
+               !cues.isEmpty {
+                parsedSubtitleCues[offset] = cues
             }
 
             return TrackInfo(
@@ -202,11 +251,45 @@ final class VPPlayerEngine {
 
         if subtitleTracks.isEmpty {
             selectedSubtitleTrack = -1
+            subtitlesEnabled = false
             currentSubtitleText = nil
         } else if selectedSubtitleTrack < 0 || selectedSubtitleTrack >= subtitleTracks.count {
             selectedSubtitleTrack = subtitleTracks[0].id
+            subtitlesEnabled = true
+            updateSubtitleText(at: currentTime)
+        } else {
+            subtitlesEnabled = true
             updateSubtitleText(at: currentTime)
         }
+    }
+
+    private func loadSubtitleCues(from subtitleURL: URL, format: SubtitleFormat) -> [SubtitleParser.SubtitleCue]? {
+        guard let data = try? Data(contentsOf: subtitleURL) else {
+            return nil
+        }
+
+        // Try the encodings we actually see in subtitle files before giving up.
+        let candidateEncodings: [String.Encoding] = [
+            .utf8,
+            .utf16,
+            .utf16LittleEndian,
+            .utf16BigEndian,
+            .windowsCP1252,
+            .isoLatin1,
+        ]
+
+        for encoding in candidateEncodings {
+            guard let content = String(data: data, encoding: encoding) else {
+                continue
+            }
+
+            let cues = SubtitleParser.parse(content: content, format: format)
+            if !cues.isEmpty || content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return cues
+            }
+        }
+
+        return nil
     }
 
     func updateSubtitleText(at time: TimeInterval) {

@@ -110,6 +110,14 @@ struct SubtitleParserSRTTests {
         #expect(cues[0].text == "Hello")
         #expect(cues[1].text == "World")
     }
+
+    @Test func stripsUTF8BOMFromStartOfContent() {
+        let content = "\u{feff}1\n00:00:01,000 --> 00:00:02,000\nBOM cue\n"
+
+        let cues = SubtitleParser.parseSRT(content)
+        #expect(cues.count == 1)
+        #expect(cues[0].text == "BOM cue")
+    }
 }
 
 // MARK: - VTT Parsing Tests

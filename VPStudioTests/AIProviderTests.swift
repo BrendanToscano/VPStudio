@@ -85,6 +85,105 @@ struct AIAssistantManagerParsingTests {
             else { Issue.record("Unexpected AIError: \(error)") }
         } catch { Issue.record("Unexpected error: \(error)") }
     }
+
+    @Test func askUsesSavedDefaultProviderWhenItIsConfigured() async throws {
+        let (manager, database, tempDir) = try await makeManager()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        try await database.setSetting(key: SettingsKeys.defaultAIProvider, value: AIProviderKind.openAI.rawValue)
+
+        await manager.registerProvider(
+            kind: .anthropic,
+            provider: StubAIProvider(
+                providerKind: .anthropic,
+                result: .success(
+                    AIProviderResponse(
+                        provider: .anthropic,
+                        content: "anthropic",
+                        model: "stub",
+                        inputTokens: 1,
+                        outputTokens: 1
+                    )
+                )
+            )
+        )
+        await manager.registerProvider(
+            kind: .openAI,
+            provider: StubAIProvider(
+                providerKind: .openAI,
+                result: .success(
+                    AIProviderResponse(
+                        provider: .openAI,
+                        content: "openai",
+                        model: "stub",
+                        inputTokens: 1,
+                        outputTokens: 1
+                    )
+                )
+            )
+        )
+
+        let response = try await manager.ask(prompt: "test")
+        #expect(response.provider == .openAI)
+    }
+
+    @Test func askFallsBackDeterministicallyWhenSavedDefaultIsUnavailable() async throws {
+        let (manager, database, tempDir) = try await makeManager()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        try await database.setSetting(key: SettingsKeys.defaultAIProvider, value: AIProviderKind.ollama.rawValue)
+
+        await manager.registerProvider(
+            kind: .openAI,
+            provider: StubAIProvider(
+                providerKind: .openAI,
+                result: .success(
+                    AIProviderResponse(
+                        provider: .openAI,
+                        content: "openai",
+                        model: "stub",
+                        inputTokens: 1,
+                        outputTokens: 1
+                    )
+                )
+            )
+        )
+        await manager.registerProvider(
+            kind: .gemini,
+            provider: StubAIProvider(
+                providerKind: .gemini,
+                result: .success(
+                    AIProviderResponse(
+                        provider: .gemini,
+                        content: "gemini",
+                        model: "stub",
+                        inputTokens: 1,
+                        outputTokens: 1
+                    )
+                )
+            )
+        )
+
+        let response = try await manager.ask(prompt: "test")
+        #expect(response.provider == .openAI)
+    }
+
+    @Test func resolvedModelIDPrefersAnthropicCatalogDefaultWhenPresent() {
+        #expect(
+            AIAssistantManager.resolvedModelID(
+                provider: .anthropic,
+                catalogDefault: AIModelCatalog.claudeSonnet46.id,
+                configuredModel: nil
+            ) == AIModelCatalog.claudeSonnet46.id
+        )
+        #expect(
+            AIAssistantManager.resolvedModelID(
+                provider: .anthropic,
+                catalogDefault: nil,
+                configuredModel: nil
+            ) == AIModelCatalog.claudeSonnet46.id
+        )
+    }
 }
 
 // MARK: - AIError Tests
@@ -194,6 +293,95 @@ struct AIProviderInitTests {
     }
 }
 
+// MARK: - AIOllamaEndpointPolicy Tests
+
+@Suite("AIOllamaEndpointPolicy")
+struct AIOllamaEndpointPolicyTests {
+
+    @Test func allowsLocalhostAndBlocksRemotePlaintext() {
+        #expect(AIOllamaEndpointPolicy.warningMessage(for: "http://localhost:11434") == nil)
+        #expect(AIOllamaEndpointPolicy.warningMessage(for: "http://127.0.0.1:11434") == nil)
+        #expect(AIOllamaEndpointPolicy.warningMessage(for: "http://[::1]:11434") == nil)
+        #expect(AIOllamaEndpointPolicy.warningMessage(for: "http://example.com:11434") != nil)
+    }
+}
+
+// MARK: - AIAssistantManager Ollama Configuration Tests
+
+@Suite("AIAssistantManager - Ollama Configuration")
+struct AIAssistantManagerOllamaConfigurationTests {
+
+    private func makeManager() async throws -> (AIAssistantManager, DatabaseManager, URL) {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        let dbURL = tempDir.appendingPathComponent("ai-ollama-config-test.sqlite")
+        let database = try DatabaseManager(path: dbURL.path)
+        try await database.migrate()
+        let manager = AIAssistantManager(database: database)
+        return (manager, database, tempDir)
+    }
+
+    @Test func rejectsInsecurePlainHttpOllamaEndpoint() async throws {
+        let (manager, _, tempDir) = try await makeManager()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        await manager.configure(
+            provider: .ollama,
+            apiKey: "",
+            baseURL: "http://example.com:11434",
+            model: "llama3.1"
+        )
+
+        #expect(await manager.hasConfiguredProvider == false)
+    }
+
+    @Test func acceptsLocalhostOllamaEndpoint() async throws {
+        let (manager, _, tempDir) = try await makeManager()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        await manager.configure(
+            provider: .ollama,
+            apiKey: "",
+            baseURL: "http://localhost:11434",
+            model: "llama3.1"
+        )
+
+        #expect(await manager.hasConfiguredProvider == true)
+    }
+}
+
+// MARK: - OllamaProvider Tests
+
+@Suite("OllamaProvider")
+struct OllamaProviderTests {
+
+    private func makeProvider(session: URLSession, sleep: @escaping AIHTTPSleep = { _ in }) -> OllamaProvider {
+        OllamaProvider(baseURL: "http://localhost:11434", model: "llama3.1", session: session, sleep: sleep)
+    }
+
+    @Test func rateLimitedOnRepeated429() async throws {
+        let session = URLProtocolHarness.makeSession { request in
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 429,
+                httpVersion: nil,
+                headerFields: ["Retry-After": "0"]
+            )!
+            let data = Data(#"{"error":"rate limited"}"#.utf8)
+            return (response, data)
+        }
+        let provider = makeProvider(session: session)
+
+        do {
+            _ = try await provider.complete(system: "s", userMessage: "u")
+            Issue.record("Expected AIError.rateLimited")
+        } catch let error as AIError {
+            if case .rateLimited = error { /* OK */ }
+            else { Issue.record("Expected rateLimited, got \(error)") }
+        }
+    }
+}
+
 // MARK: - AIProviderResponse Tests
 
 @Suite("AIProviderResponse")
@@ -206,6 +394,250 @@ struct AIProviderResponseTests {
         #expect(r.model == "claude-sonnet-4-20250514")
         #expect(r.inputTokens == 100)
         #expect(r.outputTokens == 200)
+    }
+}
+
+// MARK: - Provider Transport Hardening Tests
+
+@Suite("AI Provider Transport Hardening")
+struct AIProviderTransportHardeningTests {
+    private final class ResponseSequence: @unchecked Sendable {
+        private let lock = NSLock()
+        private var responses: [(Int, [String: String]?, Data)]
+        private var requestCount = 0
+
+        init(_ responses: [(Int, [String: String]?, Data)]) {
+            self.responses = responses
+        }
+
+        func next(for request: URLRequest) -> (HTTPURLResponse, Data) {
+            lock.lock()
+            defer { lock.unlock() }
+            requestCount += 1
+            let entry = responses.isEmpty ? (500, nil, Data()) : responses.removeFirst()
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: entry.0,
+                httpVersion: nil,
+                headerFields: entry.1
+            )!
+            return (response, entry.2)
+        }
+
+        func totalRequests() -> Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return requestCount
+        }
+    }
+
+    private final class SleepRecorder: @unchecked Sendable {
+        private let lock = NSLock()
+        private var values: [TimeInterval] = []
+
+        func record(_ delay: TimeInterval) {
+            lock.lock()
+            values.append(delay)
+            lock.unlock()
+        }
+
+        func allValues() -> [TimeInterval] {
+            lock.lock()
+            defer { lock.unlock() }
+            return values
+        }
+    }
+
+    private func makeSession(sequence: ResponseSequence) -> URLSession {
+        URLProtocolHarness.makeSession { request in
+            sequence.next(for: request)
+        }
+    }
+
+    private func openAIResponseJSON(content: String) -> Data {
+        let json: [String: Any] = [
+            "output_text": content,
+            "usage": [
+                "input_tokens": 12,
+                "output_tokens": 4
+            ]
+        ]
+        return try! JSONSerialization.data(withJSONObject: json)
+    }
+
+    private func anthropicResponseJSON(content: String) -> Data {
+        let json: [String: Any] = [
+            "content": [["text": content]],
+            "usage": [
+                "input_tokens": 7,
+                "output_tokens": 3
+            ]
+        ]
+        return try! JSONSerialization.data(withJSONObject: json)
+    }
+
+    private func openRouterResponseJSON(content: String) -> Data {
+        let json: [String: Any] = [
+            "choices": [
+                ["message": ["content": content]]
+            ],
+            "usage": [
+                "prompt_tokens": 9,
+                "completion_tokens": 2
+            ]
+        ]
+        return try! JSONSerialization.data(withJSONObject: json)
+    }
+
+    private func ollamaResponseJSON(content: String) -> Data {
+        let json: [String: Any] = [
+            "message": ["content": content]
+        ]
+        return try! JSONSerialization.data(withJSONObject: json)
+    }
+
+    @Test func openAIRetriesRateLimitUsingRetryAfterHeader() async throws {
+        let sequence = ResponseSequence([
+            (429, ["Retry-After": "0"], Data("{\"error\":\"slow down\"}".utf8)),
+            (200, nil, openAIResponseJSON(content: "ok-openai"))
+        ])
+        let sleepRecorder = SleepRecorder()
+        let provider = OpenAIProvider(
+            apiKey: "test-key",
+            session: makeSession(sequence: sequence),
+            sleep: { delay in sleepRecorder.record(delay) }
+        )
+
+        let response = try await provider.complete(system: "sys", userMessage: "msg")
+
+        #expect(response.content == "ok-openai")
+        #expect(sequence.totalRequests() == 2)
+        #expect(sleepRecorder.allValues() == [0])
+    }
+
+    @Test func anthropicRetriesRateLimitBeforeSucceeding() async throws {
+        let sequence = ResponseSequence([
+            (429, nil, Data("{\"error\":\"rate limited\"}".utf8)),
+            (200, nil, anthropicResponseJSON(content: "ok-claude"))
+        ])
+        let sleepRecorder = SleepRecorder()
+        let provider = AnthropicProvider(
+            apiKey: "test-key",
+            session: makeSession(sequence: sequence),
+            sleep: { delay in sleepRecorder.record(delay) }
+        )
+
+        let response = try await provider.complete(system: "sys", userMessage: "msg")
+
+        #expect(response.content == "ok-claude")
+        #expect(sequence.totalRequests() == 2)
+        #expect(sleepRecorder.allValues() == [1])
+    }
+
+    @Test func openRouterThrowsDedicatedRateLimitedErrorAfterRetryBudget() async throws {
+        let sequence = ResponseSequence([
+            (429, nil, Data("{\"error\":\"first limit\"}".utf8)),
+            (429, nil, Data("{\"error\":\"second limit\"}".utf8))
+        ])
+        let sleepRecorder = SleepRecorder()
+        let provider = OpenRouterProvider(
+            apiKey: "test-key",
+            session: makeSession(sequence: sequence),
+            sleep: { delay in sleepRecorder.record(delay) }
+        )
+
+        do {
+            _ = try await provider.complete(system: "sys", userMessage: "msg")
+            Issue.record("Expected AIError.rateLimited")
+        } catch let error as AIError {
+            if case .rateLimited = error {
+                #expect(sequence.totalRequests() == 2)
+                #expect(sleepRecorder.allValues() == [1])
+            } else {
+                Issue.record("Unexpected AIError: \(error)")
+            }
+        }
+    }
+
+    @Test func ollamaThrowsDedicatedRateLimitedErrorAfterRetryBudget() async throws {
+        let sequence = ResponseSequence([
+            (429, ["Retry-After": "0"], Data("{\"error\":\"first limit\"}".utf8)),
+            (429, ["Retry-After": "0"], Data("{\"error\":\"second limit\"}".utf8))
+        ])
+        let sleepRecorder = SleepRecorder()
+        let provider = OllamaProvider(
+            session: makeSession(sequence: sequence),
+            sleep: { delay in sleepRecorder.record(delay) }
+        )
+
+        do {
+            _ = try await provider.complete(system: "sys", userMessage: "msg")
+            Issue.record("Expected AIError.rateLimited")
+        } catch let error as AIError {
+            if case .rateLimited = error {
+                #expect(sequence.totalRequests() == 2)
+                #expect(sleepRecorder.allValues() == [0])
+            } else {
+                Issue.record("Unexpected AIError: \(error)")
+            }
+        }
+    }
+}
+
+// MARK: - AI Manager Hardening Tests
+
+@Suite("AIAssistantManager Hardening")
+struct AIAssistantManagerHardeningTests {
+    private func makeTempDirectory() throws -> URL {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        return tempDir
+    }
+
+    @Test func usagePersistenceFailuresAreRecordedWithoutBreakingRequests() async throws {
+        let tempDir = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let database = try DatabaseManager(path: tempDir.appendingPathComponent("ai-usage.sqlite").path)
+        let manager = AIAssistantManager(database: database)
+
+        await manager.registerProvider(
+            kind: .openAI,
+            provider: StubAIProvider(
+                providerKind: .openAI,
+                result: .success(
+                    AIProviderResponse(
+                        provider: .openAI,
+                        content: "ok",
+                        model: "gpt-5.4",
+                        inputTokens: 10,
+                        outputTokens: 5
+                    )
+                )
+            )
+        )
+
+        let response = try await manager.ask(prompt: "hello", provider: .openAI)
+        let usageError = await manager.lastUsagePersistenceErrorMessage
+
+        #expect(response.content == "ok")
+        #expect(usageError?.isEmpty == false)
+    }
+
+    @Test func managerRejectsRemotePlaintextOllamaEndpoints() async throws {
+        let tempDir = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let database = try DatabaseManager(path: tempDir.appendingPathComponent("ai-manager.sqlite").path)
+        try await database.migrate()
+        let manager = AIAssistantManager(database: database)
+
+        await manager.configure(provider: .ollama, apiKey: "", baseURL: "http://example.com:11434", model: "llama3.1")
+
+        #expect(await manager.hasConfiguredProvider == false)
+        #expect(AIOllamaEndpointPolicy.warningMessage(for: "http://example.com:11434") != nil)
+        #expect(AIOllamaEndpointPolicy.warningMessage(for: "http://localhost:11434") == nil)
     }
 }
 

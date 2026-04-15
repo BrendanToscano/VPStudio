@@ -23,17 +23,30 @@ enum JSONValueParsing {
         return nil
     }
 
-    /// Extract a BitTorrent info-hash from a magnet URI.
-    /// Returns `nil` if the URI is not a valid magnet link or lacks the `xt` parameter.
+    /// Extract a BitTorrent info-hash from a magnet URI or resolve URL.
+    /// Returns `nil` when no 40-hex hash can be resolved.
     static func extractInfoHash(from magnetURI: String?) -> String? {
-        guard let magnetURI,
-              let components = URLComponents(string: magnetURI),
-              let xt = components.queryItems?.first(where: { $0.name.lowercased() == "xt" })?.value else {
-            return nil
+        guard let magnetURI else { return nil }
+
+        if let components = URLComponents(string: magnetURI),
+           let xt = components.queryItems?.first(where: { $0.name.lowercased() == "xt" })?.value,
+           xt.lowercased().hasPrefix("urn:btih:") {
+            return String(xt.dropFirst("urn:btih:".count)).lowercased()
         }
 
-        let prefix = "urn:btih:"
-        guard xt.lowercased().hasPrefix(prefix) else { return nil }
-        return String(xt.dropFirst(prefix.count))
+        return extractInfoHashFromTorrentURL(magnetURI)
+    }
+
+    private static func extractInfoHashFromTorrentURL(_ value: String) -> String? {
+        let pattern = "(?i)(?:[/?#&=])([0-9a-f]{40})(?:[/?#&=]|$)"
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+
+        let range = NSRange(value.startIndex..<value.endIndex, in: value)
+        guard let match = regex.firstMatch(in: value, range: range),
+              match.numberOfRanges > 1,
+              let matchRange = Range(match.range(at: 1), in: value) else {
+            return nil
+        }
+        return String(value[matchRange]).lowercased()
     }
 }

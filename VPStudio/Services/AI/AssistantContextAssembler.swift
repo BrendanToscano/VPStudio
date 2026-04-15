@@ -312,3 +312,33 @@ actor AssistantContextAssembler {
         }
     }
 }
+
+// MARK: - Prompt Budget Policy
+
+/// Pure prompt-budget helper shared by the AI runtime and tests.
+enum AssistantPromptBudgetPolicy {
+    /// Heuristic token estimate that is conservative enough for prompt trimming.
+    static func estimatedTokenCount(for text: String) -> Int {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return 0 }
+        return max(1, (trimmed.utf8.count + 3) / 4)
+    }
+
+    /// Builds a prompt from ordered parts while staying within the provided token budget.
+    /// Parts are kept in order and dropped once the next part would overflow the budget.
+    static func composePrompt(from parts: [String], budgetTokens: Int) -> String {
+        guard budgetTokens > 0 else { return "" }
+
+        var remainingBudget = budgetTokens
+        var keptParts: [String] = []
+
+        for part in parts {
+            let cost = estimatedTokenCount(for: part)
+            guard cost <= remainingBudget else { break }
+            keptParts.append(part)
+            remainingBudget -= cost
+        }
+
+        return keptParts.joined(separator: "\n")
+    }
+}

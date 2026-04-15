@@ -4,7 +4,7 @@ import Testing
 
 @Suite("Player Capability And Ranking")
 struct PlayerCapabilityTests {
-    @Test func rankingPrefersCachedWhenEnabled() {
+    @Test func rankingKeepsHigherResolutionAboveCachedLowerResolution() {
         var cached1080 = makeTorrent(
             hash: "cached",
             title: "Movie.1080p.WEB-DL.AAC",
@@ -40,7 +40,7 @@ struct PlayerCapabilityTests {
             hdrPreference: .dolbyVision
         )
 
-        #expect(rankedCached.first?.infoHash == cached1080.infoHash)
+         #expect(rankedCached.first?.infoHash == uncached4K.infoHash)
         #expect(rankedQuality.first?.infoHash == uncached4K.infoHash)
 
         cached1080.isCached = true

@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 import Testing
 @testable import VPStudio
 
@@ -191,6 +192,20 @@ struct SearchViewModelFilterTests {
         try await Task.sleep(for: .milliseconds(150))
         #expect(viewModel.genres.isEmpty)
         #expect(viewModel.error == nil)
+    }
+
+    @Test
+    @MainActor
+    func clearAllFiltersClearsStaleBrowseErrorState() {
+        let viewModel = SearchViewModel()
+        viewModel.selectedGenre = Genre(id: 28, name: "Action")
+        viewModel.error = .unknown("Genre browse failed")
+
+        viewModel.clearAllFilters()
+
+        #expect(viewModel.selectedGenre == nil)
+        #expect(viewModel.error == nil)
+        #expect(viewModel.explorePhase == .idle)
     }
 
     // MARK: - Genre Selection → Discover
@@ -669,5 +684,94 @@ struct SearchViewModelFilterTests {
         #expect(lastFilters?.sortBy == .releaseDateDesc)
         #expect(lastFilters?.year == 2025)
         #expect(lastFilters?.page == 1)
+    }
+
+    @Test
+    @MainActor
+    func applyFilterDraftBatchesTextSearchFilterChangesIntoSingleRequery() async throws {
+        let stub = FilterTestMetadataStub()
+        await stub.setSearchResults([
+            1: MetadataSearchResult(items: [Fixtures.mediaPreview(id: "search-initial")], page: 1, totalPages: 1, totalResults: 1)
+        ])
+
+        let viewModel = SearchViewModel(metadataService: stub)
+        viewModel.query = "inception"
+        viewModel.search()
+        try await Self.waitUntil { !viewModel.results.isEmpty }
+
+        let initialSearchCount = await stub.getSearchCallCount()
+        #expect(initialSearchCount == 1)
+
+        let draft = SearchFilterDraft(
+            sortOption: .releaseDateDesc,
+            selectedYear: 2024,
+            selectedLanguages: ["fr-FR"],
+            selectedGenre: nil
+        )
+        viewModel.applyFilterDraft(draft)
+
+        try await Self.waitUntil {
+            !viewModel.isSearching &&
+                viewModel.sortOption == .releaseDateDesc &&
+                viewModel.yearFilter == 2024 &&
+                viewModel.languageFilters == ["fr-FR"]
+        }
+
+        let finalSearchCount = await stub.getSearchCallCount()
+        #expect(finalSearchCount == 2)
+        #expect(viewModel.sortOption == .releaseDateDesc)
+        #expect(viewModel.yearFilter == 2024)
+        #expect(viewModel.yearRangePreset == .recent)
+        #expect(viewModel.languageFilters == ["fr-FR"])
+    }
+
+    @Test
+    @MainActor
+    func applyFilterDraftClearsSpecialMoodContextBeforeManualGenreBrowse() async throws {
+        let stub = FilterTestMetadataStub()
+        await stub.setDiscoverResults([
+            1: MetadataSearchResult(items: [Fixtures.mediaPreview(id: "discover-1")], page: 1, totalPages: 1, totalResults: 1)
+        ])
+
+        let viewModel = SearchViewModel(metadataService: stub)
+        let newReleasesCard = ExploreMoodCard(
+            id: "new",
+            title: "New Releases",
+            subtitle: "JUST DROPPED",
+            symbol: "flame.fill",
+            color: .red,
+            movieGenreId: -1,
+            tvGenreId: -1
+        )
+
+        viewModel.selectMoodCard(newReleasesCard)
+        try await Self.waitUntil { !viewModel.results.isEmpty }
+
+        let initialDiscoverCount = await stub.getDiscoverCallCount()
+        #expect(initialDiscoverCount == 1)
+        #expect(viewModel.activeMoodCard?.id == "new")
+
+        let draft = SearchFilterDraft(
+            sortOption: .ratingDesc,
+            selectedYear: 2023,
+            selectedLanguages: ["es-ES"],
+            selectedGenre: Genre(id: 28, name: "Action")
+        )
+        viewModel.applyFilterDraft(draft)
+
+        try await Self.waitUntil {
+            !viewModel.isSearching &&
+                viewModel.selectedGenre?.id == 28 &&
+                viewModel.activeMoodCard == nil
+        }
+
+        let finalDiscoverCount = await stub.getDiscoverCallCount()
+        #expect(finalDiscoverCount == 2)
+        let lastFilters = await stub.getLastDiscoverFilters()
+        #expect(lastFilters?.genreId == 28)
+        #expect(lastFilters?.sortBy == .ratingDesc)
+        #expect(lastFilters?.year == 2023)
+        #expect(lastFilters?.releaseDateGte == nil)
+        #expect(lastFilters?.releaseDateLte == DiscoverFilters.todayString())
     }
 }

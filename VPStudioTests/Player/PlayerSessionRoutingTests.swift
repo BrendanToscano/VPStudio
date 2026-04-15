@@ -77,6 +77,75 @@ struct PlayerSessionRoutingTests {
         #expect(request.availableStreams.count == 2)
     }
 
+    @MainActor
+    @Test func streamPoolKeepsDistinctResolvedURLsForSameReleaseMetadata() {
+        let appState = AppState(testHooks: .init())
+        let viewModel = DetailViewModel(appState: appState)
+
+        let primary = makeStream(
+            url: "https://cdn.example.com/files/stream-a.mkv?token=one",
+            name: "Movie.2026.1080p.WEB-DL.mkv"
+        )
+        let alternate = makeStream(
+            url: "https://cdn.example.com/files/stream-b.mkv?token=two",
+            name: "Movie.2026.1080p.WEB-DL.mkv"
+        )
+        let refreshedPrimary = makeStream(
+            url: "https://cdn.example.com/files/stream-a.mkv?token=refreshed",
+            name: "Movie.2026.1080p.WEB-DL.mkv"
+        )
+        viewModel.streams = [alternate, refreshedPrimary]
+
+        let preview = MediaPreview(
+            id: "movie-1",
+            type: .movie,
+            title: "Movie",
+            year: 2026,
+            posterPath: nil,
+            imdbRating: nil,
+            tmdbId: 1
+        )
+
+        let request = viewModel.makePlayerSessionRequest(stream: primary, preview: preview)
+
+        #expect(request.availableStreams.count == 2)
+        #expect(request.availableStreams.first?.id == primary.id)
+        #expect(request.availableStreams.map(\.streamURL.path).sorted() == ["/files/stream-a.mkv", "/files/stream-b.mkv"])
+    }
+
+    @MainActor
+    @Test func explicitStreamOverrideIsUsedForQAPlaybackQueues() {
+        let appState = AppState(testHooks: .init())
+        let viewModel = DetailViewModel(appState: appState)
+
+        let primary = makeStream(
+            url: "https://cdn.example.com/files/stream-a.mkv?token=one",
+            name: "Movie.2026.1080p.WEB-DL.mkv"
+        )
+        let fallback = makeStream(
+            url: "https://cdn.example.com/files/stream-b.mkv?token=two",
+            name: "Movie.2026.1080p.WEB-DL.mkv"
+        )
+        let preview = MediaPreview(
+            id: "movie-1",
+            type: .movie,
+            title: "Movie",
+            year: 2026,
+            posterPath: nil,
+            imdbRating: nil,
+            tmdbId: 1
+        )
+
+        let request = viewModel.makePlayerSessionRequest(
+            stream: primary,
+            preview: preview,
+            availableStreams: [fallback]
+        )
+
+        #expect(request.availableStreams.map(\.id) == [primary.id, fallback.id])
+        #expect(request.availableStreams.map(\.streamURL.path) == ["/files/stream-a.mkv", "/files/stream-b.mkv"])
+    }
+
     private func makeStream(url: String, name: String) -> StreamInfo {
         StreamInfo(
             streamURL: URL(string: url)!,

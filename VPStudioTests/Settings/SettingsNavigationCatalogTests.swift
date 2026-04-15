@@ -29,11 +29,26 @@ struct SettingsNavigationCatalogTests {
     }
 
     @Test
-    func imdbCsvImportQueryFindsAIDestination() {
+    func imdbCsvImportQueryFindsImportDestination() {
         let groups = SettingsNavigationCatalog.groups(matching: "imdb csv import")
         let flattened = groups.flatMap(\.destinations)
 
-        #expect(flattened == [.ai])
+        #expect(flattened == [.imdbImport])
+    }
+
+    @Test
+    func simklCleanupSurfaceDoesNotMatchSyncQueries() {
+        let flattened = SettingsNavigationCatalog.groups(matching: "simkl watchlist").flatMap(\.destinations)
+
+        #expect(flattened.isEmpty)
+    }
+
+    @Test
+    func simklDestinationSummaryHighlightsCleanupOnlyAvailability() {
+        let summary = SettingsDestination.simkl.summary
+
+        #expect(summary.contains("cleanup-only"))
+        #expect(summary.contains("unavailable"))
     }
 
     @Test
@@ -58,7 +73,7 @@ struct SettingsNavigationCatalogTests {
     @Test
     func essentialDestinationsContainsOnlyServicesThatRequireSetup() {
         let essential = SettingsNavigationCatalog.essentialDestinations
-        let expectedEssential: Set<SettingsDestination> = [.debrid, .indexers, .metadata, .ai, .trakt, .simkl]
+        let expectedEssential: Set<SettingsDestination> = [.debrid, .indexers, .metadata, .ai, .trakt]
 
         #expect(Set(essential) == expectedEssential)
     }
@@ -73,8 +88,8 @@ struct SettingsNavigationCatalogTests {
     }
 
     @Test
-    func essentialDestinationsCountIsSix() {
-        #expect(SettingsNavigationCatalog.essentialDestinations.count == 6)
+    func essentialDestinationsCountIsFive() {
+        #expect(SettingsNavigationCatalog.essentialDestinations.count == 5)
     }
 
     @Test
@@ -85,7 +100,7 @@ struct SettingsNavigationCatalogTests {
         #expect(SettingsDestination.metadata.isEssential == true)
         #expect(SettingsDestination.ai.isEssential == true)
         #expect(SettingsDestination.trakt.isEssential == true)
-        #expect(SettingsDestination.simkl.isEssential == true)
+        #expect(SettingsDestination.simkl.isEssential == false)
 
         // Non-essential: work with defaults
         #expect(SettingsDestination.player.isEssential == false)

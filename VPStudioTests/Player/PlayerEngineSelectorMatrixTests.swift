@@ -47,6 +47,11 @@ struct PlayerEngineSelectorMatrixTests {
         #expect(Set(compatibility) == Set(PlayerEngineKind.allCases))
         #expect(performance == [.avPlayer, .ksPlayer])
 
+        #if os(visionOS)
+        // visionOS keeps AVPlayer first in all selector modes for stability/power.
+        #expect(compatibility == [.avPlayer, .ksPlayer])
+        #expect(adaptive == [.avPlayer, .ksPlayer])
+        #else
         // Compatibility mode ALWAYS uses KSPlayer first, regardless of stream profile.
         #expect(compatibility == [.ksPlayer, .avPlayer])
 
@@ -62,5 +67,6 @@ struct PlayerEngineSelectorMatrixTests {
         } else {
             #expect(adaptive == [.ksPlayer, .avPlayer])
         }
+        #endif
     }
 }

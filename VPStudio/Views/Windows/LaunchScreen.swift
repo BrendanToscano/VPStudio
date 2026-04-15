@@ -3,6 +3,7 @@ import SwiftUI
 /// Full-screen splash shown while `AppState.bootstrap()` runs.
 /// Fades out once `isBootstrapping` becomes false.
 struct LaunchScreen: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var logoScale: CGFloat = 0.82
     @State private var logoOpacity: Double = 0
     @State private var glowOpacity: Double = 0
@@ -25,7 +26,7 @@ struct LaunchScreen: View {
                 endRadius: 380
             )
             .ignoresSafeArea()
-            .animation(.easeOut(duration: 1.4), value: glowOpacity)
+            .animation(reduceMotion ? nil : .easeOut(duration: 1.4), value: glowOpacity)
 
             VStack(spacing: 0) {
                 Spacer()
@@ -100,10 +101,8 @@ struct LaunchScreen: View {
                 // ── Loading indicator ────────────────────────────────────────
                 HStack(spacing: 7) {
                     ForEach(0..<3) { i in
-                        let phase = dotsPhase - Double(i) * 0.4
-                        let bright = (sin(phase * .pi * 2) + 1) / 2
                         Circle()
-                            .fill(.white.opacity(0.25 + bright * 0.55))
+                            .fill(.white.opacity(0.25 + dotBrightness(for: i) * 0.55))
                             .frame(width: 5, height: 5)
                     }
                 }
@@ -112,6 +111,14 @@ struct LaunchScreen: View {
             }
         }
         .onAppear {
+            guard !reduceMotion else {
+                logoScale = 1.0
+                logoOpacity = 1.0
+                glowOpacity = 1.0
+                taglineOpacity = 1.0
+                dotsPhase = 0
+                return
+            }
             // Stagger animations for a cinematic feel
             withAnimation(.spring(response: 0.7, dampingFraction: 0.72).delay(0.1)) {
                 logoScale = 1.0
@@ -129,5 +136,14 @@ struct LaunchScreen: View {
                 dotsPhase = 1.0
             }
         }
+    }
+
+    private func dotBrightness(for index: Int) -> Double {
+        if reduceMotion {
+            return 0.45 - (Double(index) * 0.08)
+        }
+
+        let phase = dotsPhase - Double(index) * 0.4
+        return (sin(phase * .pi * 2) + 1) / 2
     }
 }

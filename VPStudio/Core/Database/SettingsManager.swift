@@ -8,11 +8,15 @@ actor SettingsManager {
         SettingsKeys.openSubtitlesApiKey,
         SettingsKeys.openAIApiKey,
         SettingsKeys.anthropicApiKey,
+        SettingsKeys.openRouterApiKey,
         SettingsKeys.traktClientId,
         SettingsKeys.traktClientSecret,
         SettingsKeys.traktAccessToken,
         SettingsKeys.traktRefreshToken,
+        SettingsKeys.simklClientId,
         SettingsKeys.simklAccessToken,
+        SettingsKeys.simklRefreshToken,
+        SettingsKeys.geminiApiKey,
     ]
 
     private var migratingKeys: Set<String> = []
@@ -115,6 +119,7 @@ enum SettingsKeys {
     nonisolated static let tmdbApiKey = "tmdb_api_key"
     nonisolated static let preferredQuality = "preferred_quality"
     nonisolated static let subtitleLanguage = "subtitle_language"
+    nonisolated static let audioLanguage = "audio_language"
     nonisolated static let subtitleFontSize = "subtitle_font_size"
     nonisolated static let subtitleAutoSearch = "subtitle_auto_search"
     nonisolated static let openSubtitlesApiKey = "opensubtitles_api_key"
@@ -130,12 +135,18 @@ enum SettingsKeys {
 
     nonisolated static let openAIApiKey = "openai_api_key"
     nonisolated static let anthropicApiKey = "anthropic_api_key"
+    nonisolated static let openRouterApiKey = "openrouter_api_key"
     nonisolated static let openAIModelPreset = "openai_model_preset"
     nonisolated static let anthropicModelPreset = "anthropic_model_preset"
+    nonisolated static let openRouterModelPreset = "openrouter_model_preset"
+    nonisolated static let geminiApiKey = "gemini_api_key"
+    nonisolated static let geminiModelPreset = "gemini_model_preset"
     nonisolated static let ollamaEndpoint = "ollama_endpoint"
     nonisolated static let ollamaModelPreset = "ollama_model_preset"
     nonisolated static let defaultAIProvider = "default_ai_provider"
     nonisolated static let aiCompareMode = "ai_compare_mode"
+    nonisolated static let localModelEnabled = "local_model_enabled"
+    nonisolated static let localModelPreset = "local_model_preset"
 
     nonisolated static let traktClientId = "trakt_client_id"
     nonisolated static let traktClientSecret = "trakt_client_secret"
@@ -149,6 +160,7 @@ enum SettingsKeys {
     nonisolated static let traktSyncFolders = "trakt_sync_folders"
     nonisolated static let simklClientId = "simkl_client_id"
     nonisolated static let simklAccessToken = "simkl_access_token"
+    nonisolated static let simklRefreshToken = "simkl_refresh_token"
 
     nonisolated static let lastSelectedTab = "last_selected_tab"
     nonisolated static let personalizationEnabled = "personalization_enabled"

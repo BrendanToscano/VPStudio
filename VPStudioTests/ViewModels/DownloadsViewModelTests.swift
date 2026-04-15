@@ -209,19 +209,64 @@ struct DownloadsViewModelTests {
 
         #expect(vm.tasks.isEmpty)
         #expect(vm.groups.isEmpty)
+        #expect(vm.rootError == nil)
         #expect(vm.errorMessage == nil)
     }
 
     @Test
     @MainActor
-    func loadErrorSetsErrorMessage() async {
+    func loadErrorSetsTypedRootError() async {
         let appState = AppState()
         let manager = FailingDownloadManager(error: NSError(domain: "test", code: 42, userInfo: [NSLocalizedDescriptionKey: "load-failed"]))
 
         let vm = DownloadsViewModel(appState: appState, downloadManager: manager)
         await vm.load()
 
+        #expect(vm.rootError == .unknown("load-failed"))
         #expect(vm.errorMessage == "load-failed")
+    }
+
+    @Test
+    @MainActor
+    func loadFailureRetainsExistingContent() async {
+        let appState = AppState()
+        let manager = FailingDownloadManager(error: NSError(domain: "test", code: 43, userInfo: [NSLocalizedDescriptionKey: "refresh-failed"]))
+        let retainedTask = DownloadTask(mediaId: "tt100", streamURL: "https://cdn.example.com/1.mkv", fileName: "1.mkv", mediaTitle: "Retained")
+
+        let vm = DownloadsViewModel(appState: appState, downloadManager: manager)
+        vm.tasks = [retainedTask]
+        vm.groups = [
+            DownloadMediaGroup(
+                mediaId: retainedTask.mediaId,
+                mediaTitle: retainedTask.mediaTitle,
+                mediaType: retainedTask.mediaType,
+                posterPath: retainedTask.posterPath,
+                tasks: [retainedTask]
+            )
+        ]
+
+        await vm.load()
+
+        #expect(vm.tasks.map(\.id) == [retainedTask.id])
+        #expect(vm.groups.map(\.mediaId) == [retainedTask.mediaId])
+        #expect(vm.rootError == .unknown("refresh-failed"))
+    }
+
+    @Test
+    @MainActor
+    func successfulLoadClearsPriorRootError() async {
+        let appState = AppState()
+        let stubManager = StubDownloadManager()
+        let task = DownloadTask(mediaId: "tt100", streamURL: "https://cdn.example.com/1.mkv", fileName: "1.mkv")
+        await stubManager.setDownloads([task])
+
+        let vm = DownloadsViewModel(appState: appState, downloadManager: stubManager)
+        vm.rootError = .unknown("stale-error")
+
+        await vm.load()
+
+        #expect(vm.rootError == nil)
+        #expect(vm.tasks.map(\.id) == [task.id])
     }
 
     // MARK: - Cancel
@@ -268,9 +313,13 @@ struct DownloadsViewModelTests {
         await stubManager.setRetryError(NSError(domain: "test", code: 1, userInfo: [NSLocalizedDescriptionKey: "retry-error"]))
 
         let vm = DownloadsViewModel(appState: appState, downloadManager: stubManager)
+        await vm.load()
         await vm.retry(task)
 
+        #expect(vm.rootError == .unknown("retry-error"))
         #expect(vm.errorMessage == "retry-error")
+        #expect(vm.tasks.map(\.id) == [task.id])
+        #expect(vm.tasks.first?.status == .failed)
     }
 
     // MARK: - Remove Single
@@ -302,9 +351,13 @@ struct DownloadsViewModelTests {
         await stubManager.setRemoveError(NSError(domain: "test", code: 1, userInfo: [NSLocalizedDescriptionKey: "remove-error"]))
 
         let vm = DownloadsViewModel(appState: appState, downloadManager: stubManager)
+        await vm.load()
         await vm.remove(task)
 
+        #expect(vm.rootError == .unknown("remove-error"))
         #expect(vm.errorMessage == "remove-error")
+        #expect(vm.tasks.map(\.id) == [task.id])
+        #expect(vm.groups.map(\.mediaId) == [task.mediaId])
     }
 
     // MARK: - Remove All (Group Delete)
@@ -339,9 +392,13 @@ struct DownloadsViewModelTests {
         await stubManager.setRemoveError(NSError(domain: "test", code: 1, userInfo: [NSLocalizedDescriptionKey: "remove-all-error"]))
 
         let vm = DownloadsViewModel(appState: appState, downloadManager: stubManager)
+        await vm.load()
         await vm.removeAll(mediaId: "tt100")
 
+        #expect(vm.rootError == .unknown("remove-all-error"))
         #expect(vm.errorMessage == "remove-all-error")
+        #expect(vm.tasks.map(\.id) == [task.id])
+        #expect(vm.groups.map(\.mediaId) == [task.mediaId])
     }
 
     // MARK: - Play File

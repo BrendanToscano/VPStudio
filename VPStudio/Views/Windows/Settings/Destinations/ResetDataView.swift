@@ -8,6 +8,7 @@ struct ResetDataView: View {
     @State private var confirmationText = ""
     @State private var isResetting = false
     @State private var resetError: String?
+    @State private var didRunQAAutoReset = false
 
     private enum ResetStep: Int, CaseIterable {
         case warning = 0
@@ -47,6 +48,27 @@ struct ResetDataView: View {
                 )
         }
         .clipShape(RoundedRectangle(cornerRadius: 20))
+        .onAppear {
+            guard QARuntimeOptions.autoExecuteReset else { return }
+            guard !didRunQAAutoReset else { return }
+            didRunQAAutoReset = true
+
+            Task {
+                try? await Task.sleep(for: .milliseconds(250))
+                await MainActor.run {
+                    step = .secondConfirmation
+                }
+                try? await Task.sleep(for: .milliseconds(250))
+                await MainActor.run {
+                    step = .finalConfirmation
+                    confirmationText = "RESET"
+                }
+                try? await Task.sleep(for: .milliseconds(250))
+                await MainActor.run {
+                    executeReset()
+                }
+            }
+        }
     }
 
     // MARK: - Step Router

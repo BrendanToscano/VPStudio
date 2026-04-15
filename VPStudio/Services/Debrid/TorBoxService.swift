@@ -5,6 +5,7 @@ actor TorBoxService: DebridServiceProtocol {
     private let apiToken: String
     private let baseURL = "https://api.torbox.app/v1/api"
     private let session: URLSession
+    private var selectedFileIDsByTorrent: [String: Set<Int>] = [:]
 
     init(apiToken: String, session: URLSession = .shared) {
         self.apiToken = apiToken
@@ -50,14 +51,159 @@ actor TorBoxService: DebridServiceProtocol {
     }
 
     func addMagnet(hash: String) async throws -> String {
-        let magnet = "magnet:?xt=urn:btih:\(hash)"
+        let normalizedHash = try DebridHashValidator.validatedInfoHash(hash)
+        let magnet = "magnet:?xt=urn:btih:\(normalizedHash)"
         let body = "magnet=\(magnet.addingPercentEncoding(withAllowedCharacters: Self.formEncodingAllowed) ?? magnet)"
         let response: TBResponse<TBCreateResponse> = try await request(method: "POST", path: "/torrents/createtorrent", body: body)
         guard let id = response.data?.torrentId else { throw DebridError.invalidHash(hash) }
         return String(id)
     }
 
-    func selectFiles(torrentId: String, fileIds: [Int]) async throws {}
+    func selectFiles(torrentId: String, fileIds: [Int]) async throws {
+        if fileIds.isEmpty {
+            selectedFileIDsByTorrent.removeValue(forKey: torrentId)
+            return
+        }
+        selectedFileIDsByTorrent[torrentId] = Set(fileIds)
+    }
+
+    func selectMatchingEpisodeFile(
+        torrentId: String,
+        seasonNumber: Int,
+        episodeNumber: Int
+    ) async throws -> Bool {
+        let response: TBResponse<TBTorrentInfo> = try await request(
+            method: "GET",
+            path: "/torrents/mylist",
+            queryItems: [URLQueryItem(name: "id", value: torrentId)]
+        )
+        guard let torrent = response.data,
+              let files = torrent.files else {
+            return false
+        }
+        return try await selectMatchingEpisodeFile(
+            torrentId: torrentId,
+            seasonNumber: seasonNumber,
+            episodeNumber: episodeNumber,
+            resolvedFileNameHint: nil,
+            resolvedFileSizeHint: nil,
+            files: files
+        )
+    }
+
+    func selectMatchingEpisodeFile(
+        torrentId: String,
+        seasonNumber: Int,
+        episodeNumber: Int,
+        resolvedFileNameHint: String?,
+        resolvedFileSizeHint: Int64?
+    ) async throws -> Bool {
+        let response: TBResponse<TBTorrentInfo> = try await request(
+            method: "GET",
+            path: "/torrents/mylist",
+            queryItems: [URLQueryItem(name: "id", value: torrentId)]
+        )
+        guard let torrent = response.data,
+              let files = torrent.files else {
+            return false
+        }
+        return try await selectMatchingEpisodeFile(
+            torrentId: torrentId,
+            seasonNumber: seasonNumber,
+            episodeNumber: episodeNumber,
+            resolvedFileNameHint: resolvedFileNameHint,
+            resolvedFileSizeHint: resolvedFileSizeHint,
+            files: files
+        )
+    }
+
+    func cleanupRemoteTransfer(torrentId: String) async throws {
+        selectedFileIDsByTorrent.removeValue(forKey: torrentId)
+
+        guard let url = URL(string: baseURL + "/torrents/controltorrent") else {
+            throw DebridError.networkError("Invalid request URL")
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 30
+        request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(
+            withJSONObject: ["torrent_id": torrentId, "operation": "delete"]
+        )
+
+        let (data, http) = try await DebridHTTPExecutor.data(for: request, session: session)
+        switch http.statusCode {
+        case 200...299:
+            return
+        case 401, 403:
+            throw DebridError.unauthorized
+        case 429:
+            throw DebridError.rateLimited
+        default:
+            let message = String(data: data, encoding: .utf8) ?? ""
+            throw DebridError.httpError(http.statusCode, message)
+        }
+    }
+
+    private func selectMatchingEpisodeFile(
+        torrentId: String,
+        seasonNumber: Int,
+        episodeNumber: Int,
+        resolvedFileNameHint: String?,
+        resolvedFileSizeHint: Int64?,
+        files: [TBFile]
+    ) async throws -> Bool {
+        if let exactMatch = bestExactMatch(
+            in: files,
+            resolvedFileNameHint: resolvedFileNameHint,
+            resolvedFileSizeHint: resolvedFileSizeHint
+        ),
+           let fileId = exactMatch.id {
+            try await selectFiles(torrentId: torrentId, fileIds: [fileId])
+            return true
+        }
+
+        let matches = files.filter { file in
+            guard let name = file.name else { return false }
+            return EpisodeTokenMatcher.matches(title: name, season: seasonNumber, episode: episodeNumber)
+        }
+
+        if let bestMatch = matches.max(by: { ($0.size ?? 0) < ($1.size ?? 0) }),
+           let fileId = bestMatch.id {
+            try await selectFiles(torrentId: torrentId, fileIds: [fileId])
+            return true
+        }
+
+        if files.count == 1, let fileId = files.first?.id {
+            try await selectFiles(torrentId: torrentId, fileIds: [fileId])
+            return true
+        }
+
+        return false
+    }
+
+    private func bestExactMatch(
+        in files: [TBFile],
+        resolvedFileNameHint: String?,
+        resolvedFileSizeHint: Int64?
+    ) -> TBFile? {
+        guard let normalizedHint = Self.normalizedFileName(resolvedFileNameHint) else {
+            return nil
+        }
+
+        let matches = files.filter { file in
+            Self.normalizedFileName(file.name) == normalizedHint
+        }
+        guard !matches.isEmpty else { return nil }
+
+        if let resolvedFileSizeHint,
+           let exactSize = matches.first(where: { $0.size == resolvedFileSizeHint }) {
+            return exactSize
+        }
+
+        return matches.max(by: { ($0.size ?? 0) < ($1.size ?? 0) })
+    }
 
     func getStreamURL(torrentId: String) async throws -> StreamInfo {
         let response: TBResponse<TBTorrentInfo> = try await request(
@@ -68,12 +214,19 @@ actor TorBoxService: DebridServiceProtocol {
         guard let torrent = response.data else { throw DebridError.torrentNotFound(torrentId) }
         guard torrent.downloadFinished == true else { throw DebridError.fileNotReady("downloading") }
 
-        // Pick largest file (most likely the video) instead of hardcoding file_id=0
+        // Prefer explicitly selected files (episode-specific), fallback to largest file.
         let fileId: String
+        let selectedIDs = selectedFileIDsByTorrent[torrentId] ?? []
         if let files = torrent.files,
-           let largest = files.max(by: { ($0.size ?? 0) < ($1.size ?? 0) }),
-           let id = largest.id
-        {
+           let selected = files.first(where: { file in
+               guard let id = file.id else { return false }
+               return selectedIDs.contains(id)
+           }),
+           let id = selected.id {
+            fileId = String(id)
+        } else if let files = torrent.files,
+                  let largest = files.max(by: { ($0.size ?? 0) < ($1.size ?? 0) }),
+                  let id = largest.id {
             fileId = String(id)
         } else {
             fileId = "0"
@@ -91,6 +244,7 @@ actor TorBoxService: DebridServiceProtocol {
             throw DebridError.networkError("No download link")
         }
 
+        selectedFileIDsByTorrent.removeValue(forKey: torrentId)
         let fileName = torrent.name ?? "Unknown"
         return StreamInfo(
             streamURL: url,
@@ -139,11 +293,7 @@ actor TorBoxService: DebridServiceProtocol {
             request.httpBody = Data(body.utf8)
             request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
         }
-        let (data, response) = try await session.data(for: request)
-
-        guard let http = response as? HTTPURLResponse else {
-            throw DebridError.networkError("Invalid response")
-        }
+        let (data, http) = try await DebridHTTPExecutor.data(for: request, session: session)
 
         switch http.statusCode {
         case 200...299:
@@ -158,6 +308,13 @@ actor TorBoxService: DebridServiceProtocol {
         }
 
         return try JSONDecoder().decode(T.self, from: data)
+    }
+
+    private static func normalizedFileName(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        return URL(fileURLWithPath: trimmed).lastPathComponent.lowercased()
     }
 }
 

@@ -1,5 +1,6 @@
 import Foundation
 import ImageIO
+import os
 #if os(visionOS)
 import RealityKit
 #endif
@@ -26,6 +27,13 @@ enum EnvironmentCatalogError: LocalizedError {
 
 actor EnvironmentCatalogManager {
     typealias RemoteDataFetcher = @Sendable (URL) async throws -> (Data, URLResponse)
+    private static let logger = Logger(subsystem: "com.vpstudio", category: "environment-catalog")
+    private static let defaultRemoteSession: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 30
+        configuration.timeoutIntervalForResource = 300
+        return URLSession(configuration: configuration)
+    }()
 
     private let database: DatabaseManager
     private let fileManager: FileManager
@@ -39,39 +47,67 @@ actor EnvironmentCatalogManager {
 
     private static let curatedDefaults: [EnvironmentAsset] = []
 
-    /// Validated URL from a hardcoded string — crashes with a descriptive message instead of bare `!`
-    private static func presetURL(_ string: String) -> URL {
+    /// Validated URL from a hardcoded string.
+    private static func presetURL(_ string: String) -> URL? {
         guard let url = URL(string: string) else {
-            preconditionFailure("Invalid hardcoded preset URL: \(string)")
+            logger.error("Invalid hardcoded preset URL: \(string, privacy: .public)")
+            return nil
         }
         return url
     }
 
+    private static func preset(
+        id: String,
+        name: String,
+        description: String,
+        provider: CuratedEnvironmentProvider,
+        downloadURLString: String,
+        sourceAttributionURL: String,
+        licenseName: String,
+        defaultHdriYawOffset: Float? = nil
+    ) -> CuratedEnvironmentPreset? {
+        guard let downloadURL = presetURL(downloadURLString) else { return nil }
+        return CuratedEnvironmentPreset(
+            id: id,
+            name: name,
+            description: description,
+            provider: provider,
+            downloadURL: downloadURL,
+            sourceAttributionURL: sourceAttributionURL,
+            licenseName: licenseName,
+            defaultHdriYawOffset: defaultHdriYawOffset
+        )
+    }
+
     private static let curatedRemotePresets: [CuratedEnvironmentPreset] = [
-        CuratedEnvironmentPreset(
+        preset(
             id: "polyhaven-pretville-cinema",
             name: "Pretville Cinema",
             description: "Vintage cinema interior with warm projection lighting. CC0 HDRI panorama.",
             provider: .polyHaven,
-            downloadURL: presetURL("https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/4k/pretville_cinema_4k.hdr"),
+            downloadURLString: "https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/4k/pretville_cinema_4k.hdr",
             sourceAttributionURL: "https://polyhaven.com/a/pretville_cinema",
             licenseName: "CC0 1.0 Universal"
         ),
-        CuratedEnvironmentPreset(
+        preset(
             id: "polyhaven-cinema-hall",
             name: "Cinema Hall",
             description: "Grand cinema auditorium with atmospheric house lights. CC0 HDRI panorama.",
             provider: .polyHaven,
-            downloadURL: presetURL("https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/4k/cinema_hall_4k.hdr"),
+            downloadURLString: "https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/4k/cinema_hall_4k.hdr",
             sourceAttributionURL: "https://polyhaven.com/a/cinema_hall",
             licenseName: "CC0 1.0 Universal"
         ),
-    ]
+    ].compactMap { $0 }
 
     private static let builtInImmersiveSpaces: Set<String> = []
 
     nonisolated static var onlinePresets: [CuratedEnvironmentPreset] {
         curatedRemotePresets
+    }
+
+    private static func defaultRemoteDataFetcher(url: URL) async throws -> (Data, URLResponse) {
+        try await defaultRemoteSession.data(from: url)
     }
 
     init(
@@ -84,9 +120,7 @@ actor EnvironmentCatalogManager {
         self.database = database
         self.fileManager = fileManager
         self.assetValidator = assetValidator ?? Self.defaultAssetValidator
-        self.remoteDataFetcher = remoteDataFetcher ?? { url in
-            try await URLSession.shared.data(from: url)
-        }
+        self.remoteDataFetcher = remoteDataFetcher ?? Self.defaultRemoteDataFetcher
 
         if let environmentsDirectory {
             self.environmentsDirectory = environmentsDirectory
@@ -158,11 +192,12 @@ actor EnvironmentCatalogManager {
             guard Self.hdriExtensions.contains(ext) else { continue }
             let fileURL = URL(fileURLWithPath: asset.assetPath)
             guard fileManager.fileExists(atPath: fileURL.path) else { continue }
-            if let yaw = await HDRIOrientationAnalyzer.detectScreenYaw(at: fileURL) {
-                var updated = asset
-                updated.hdriYawOffset = yaw
-                try await database.saveEnvironmentAsset(updated)
-            }
+            let resolvedYawOffset = Self.resolveHdriYawOffset(
+                from: await HDRIOrientationAnalyzer.detectScreenYaw(at: fileURL)
+            )
+            var updated = asset
+            updated.hdriYawOffset = resolvedYawOffset
+            try await database.saveEnvironmentAsset(updated)
         }
 
         notifyEnvironmentsChanged()
@@ -306,7 +341,9 @@ actor EnvironmentCatalogManager {
         // Auto-detect yaw for HDRI files when no explicit offset was provided.
         let resolvedYawOffset: Float?
         if hdriYawOffset == nil, Self.hdriExtensions.contains(ext) {
-            resolvedYawOffset = await HDRIOrientationAnalyzer.detectScreenYaw(at: targetURL)
+            resolvedYawOffset = Self.resolveHdriYawOffset(
+                from: await HDRIOrientationAnalyzer.detectScreenYaw(at: targetURL)
+            )
         } else {
             resolvedYawOffset = hdriYawOffset
         }
@@ -422,6 +459,10 @@ actor EnvironmentCatalogManager {
         #else
         return true
         #endif
+    }
+
+    static func resolveHdriYawOffset(from detectedYaw: Float?) -> Float {
+        detectedYaw ?? 0
     }
 
     private static func validateExtension(_ ext: String) throws {

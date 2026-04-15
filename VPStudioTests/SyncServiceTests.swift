@@ -91,6 +91,21 @@ private func makeStubSession(
     return URLSession(configuration: config)
 }
 
+private func queryValue(named name: String, in url: URL?) -> String? {
+    URLComponents(url: url ?? URL(string: "https://invalid.example")!, resolvingAgainstBaseURL: false)?
+        .queryItems?
+        .first(where: { $0.name == name })?
+        .value
+}
+
+private func formBodyValue(named name: String, in request: URLRequest) -> String? {
+    let body = request.httpBody ?? Data()
+    return URLComponents(string: "https://example.invalid?\(String(decoding: body, as: UTF8.self))")?
+        .queryItems?
+        .first(where: { $0.name == name })?
+        .value
+}
+
 // MARK: - TraktSyncService Tests
 
 @Suite("TraktSyncService - OAuth")
@@ -103,6 +118,9 @@ struct TraktOAuthTests {
         #expect(url!.absoluteString.contains("my-client-id"))
         #expect(url!.absoluteString.contains("response_type=code"))
         #expect(url!.absoluteString.contains("redirect_uri=urn"))
+        #expect(queryValue(named: "state", in: url)?.isEmpty == false)
+        #expect(queryValue(named: "code_challenge", in: url)?.isEmpty == false)
+        #expect(queryValue(named: "code_challenge_method", in: url) == "S256")
     }
 
     @Test func getAuthorizationURLHostIsTrakt() async {
@@ -128,6 +146,7 @@ struct TraktOAuthTests {
         }
 
         let service = TraktSyncService(clientId: "client", clientSecret: "secret", session: session)
+        _ = await service.getAuthorizationURL()
         try await service.exchangeCode("auth-code-123")
         let tokens = await service.currentTokens()
         #expect(tokens.access == "access-abc")
@@ -161,12 +180,43 @@ struct TraktOAuthTests {
         }
 
         let service = TraktSyncService(clientId: "my-client", clientSecret: "my-secret", session: session)
+        _ = await service.getAuthorizationURL()
         try await service.exchangeCode("the-code")
 
         #expect(state.capturedBody?["code"] as? String == "the-code")
         #expect(state.capturedBody?["client_id"] as? String == "my-client")
         #expect(state.capturedBody?["client_secret"] as? String == "my-secret")
         #expect(state.capturedBody?["grant_type"] as? String == "authorization_code")
+        #expect((state.capturedBody?["code_verifier"] as? String)?.isEmpty == false)
+    }
+
+    @Test func exchangeCodeThrowsWhenNoAuthorizationSessionExists() async {
+        let service = TraktSyncService(clientId: "client", clientSecret: "secret")
+
+        do {
+            try await service.exchangeCode("the-code")
+            Issue.record("Expected TraktError.authorizationSessionMissing")
+        } catch let error as TraktError {
+            if case .authorizationSessionMissing = error { /* OK */ }
+            else { Issue.record("Unexpected TraktError: \(error)") }
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+    }
+
+    @Test func exchangeCodeRejectsMismatchedReturnedState() async {
+        let service = TraktSyncService(clientId: "client", clientSecret: "secret")
+        _ = await service.getAuthorizationURL()
+
+        do {
+            try await service.exchangeCode("the-code", returnedState: "wrong-state")
+            Issue.record("Expected TraktError.authorizationStateMismatch")
+        } catch let error as TraktError {
+            if case .authorizationStateMismatch = error { /* OK */ }
+            else { Issue.record("Unexpected TraktError: \(error)") }
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
     }
 }
 
@@ -755,7 +805,7 @@ struct TraktModelTests {
 
 // MARK: - SimklSyncService Tests
 
-@Suite("SimklSyncService - OAuth")
+@Suite("SimklSyncService - OAuth", .serialized)
 struct SimklOAuthTests {
 
     @Test func getAuthorizationURLContainsClientId() async {
@@ -764,12 +814,85 @@ struct SimklOAuthTests {
         #expect(url != nil)
         #expect(url!.absoluteString.contains("simkl-client-id"))
         #expect(url!.absoluteString.contains("response_type=code"))
+        #expect(queryValue(named: "state", in: url)?.isEmpty == false)
+        #expect(queryValue(named: "code_challenge", in: url)?.isEmpty == false)
+        #expect(queryValue(named: "code_challenge_method", in: url) == "S256")
     }
 
     @Test func getAuthorizationURLHostIsSimkl() async {
         let service = SimklSyncService(clientId: "client")
         let url = await service.getAuthorizationURL()
         #expect(url?.host == "simkl.com")
+    }
+
+    @Test func exchangeAuthorizationCodeUsesPendingSessionAcrossInstances() async throws {
+        final class RequestState: @unchecked Sendable {
+            var capturedRequest: URLRequest?
+        }
+        let state = RequestState()
+
+        let session = makeStubSession { request in
+            state.capturedRequest = request
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            let payload = #"{"access_token":"simkl-access","refresh_token":"simkl-refresh","token_type":"Bearer"}"#
+            return (response, Data(payload.utf8))
+        }
+
+        let opener = SimklSyncService(clientId: "simkl-client")
+        let url = await opener.getAuthorizationURL()
+        let expectedState = queryValue(named: "state", in: url)
+        #expect(expectedState?.isEmpty == false)
+
+        let exchanger = SimklSyncService(clientId: "simkl-client", clientSecret: "simkl-secret", session: session)
+        let response = try await exchanger.exchangeAuthorizationCode("auth-code", returnedState: expectedState)
+
+        #expect(response.accessToken == "simkl-access")
+        #expect(formBodyValue(named: "code_verifier", in: state.capturedRequest!)?.isEmpty == false)
+        #expect(formBodyValue(named: "grant_type", in: state.capturedRequest!) == "authorization_code")
+    }
+
+    @Test func exchangeAuthorizationCodeRejectsMissingAuthorizationSession() async {
+        let service = SimklSyncService(clientId: "simkl-client", clientSecret: "simkl-secret")
+
+        do {
+            _ = try await service.exchangeAuthorizationCode("auth-code")
+            Issue.record("Expected SimklError.authorizationSessionMissing")
+        } catch let error as SimklError {
+            if case .authorizationSessionMissing = error { /* OK */ }
+            else { Issue.record("Unexpected SimklError: \(error)") }
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+    }
+
+    @Test func exchangeAuthorizationCodeRejectsMismatchedReturnedState() async {
+        let service = SimklSyncService(clientId: "simkl-client", clientSecret: "simkl-secret")
+        _ = await service.getAuthorizationURL()
+
+        do {
+            _ = try await service.exchangeAuthorizationCode("auth-code", returnedState: "wrong-state")
+            Issue.record("Expected SimklError.authorizationStateMismatch")
+        } catch let error as SimklError {
+            if case .authorizationStateMismatch = error { /* OK */ }
+            else { Issue.record("Unexpected SimklError: \(error)") }
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+    }
+
+    @Test func exchangeAuthorizationCodeRejectsMissingReturnedStateWhenSessionExists() async {
+        let service = SimklSyncService(clientId: "simkl-client", clientSecret: "simkl-secret")
+        _ = await service.getAuthorizationURL()
+
+        do {
+            _ = try await service.exchangeAuthorizationCode("auth-code")
+            Issue.record("Expected SimklError.authorizationStateMissing")
+        } catch let error as SimklError {
+            if case .authorizationStateMissing = error { /* OK */ }
+            else { Issue.record("Unexpected SimklError: \(error)") }
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
     }
 }
 
@@ -841,6 +964,60 @@ struct SimklAPICallTests {
         #expect(resp.movies?[0].status == "plantowatch")
         #expect(resp.movies?[0].movie?.ids.imdb == "tt9218128")
         #expect(resp.shows?.isEmpty == true)
+    }
+
+    @Test func getWatchlistRefreshesExpiredAccessTokenUsingRefreshToken() async throws {
+        final class RequestState: @unchecked Sendable {
+            var authorizationHeaders: [String] = []
+            var refreshTokenRequests = 0
+        }
+        let state = RequestState()
+
+        final class CallbackState: @unchecked Sendable {
+            var refreshedAccess: String?
+            var refreshedRefresh: String?
+        }
+        let callbackState = CallbackState()
+
+        let session = makeStubSession { request in
+            let url = request.url!
+            let path = url.path
+
+            if path.hasSuffix("/oauth/token") {
+                state.refreshTokenRequests += 1
+                let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+                let body = #"{"access_token":"refreshed-access","refresh_token":"refreshed-refresh","token_type":"Bearer"}"#
+                return (response, Data(body.utf8))
+            }
+
+            state.authorizationHeaders.append(request.value(forHTTPHeaderField: "Authorization") ?? "")
+            if state.authorizationHeaders.count == 1 {
+                let response = HTTPURLResponse(url: url, statusCode: 401, httpVersion: nil, headerFields: nil)!
+                return (response, Data())
+            }
+
+            let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (response, Data(#"{"movies":[],"shows":[]}"#.utf8))
+        }
+
+        let service = SimklSyncService(
+            clientId: "client",
+            clientSecret: "secret",
+            session: session,
+            onTokensRefreshed: { access, refresh in
+                callbackState.refreshedAccess = access
+                callbackState.refreshedRefresh = refresh
+            }
+        )
+        await service.setTokens(access: "expired-access", refresh: "refresh-token")
+
+        let response: SimklSyncResponse = try await service.getWatchlist()
+
+        #expect(state.refreshTokenRequests == 1)
+        #expect(state.authorizationHeaders == ["Bearer expired-access", "Bearer refreshed-access"])
+        #expect(callbackState.refreshedAccess == "refreshed-access")
+        #expect(callbackState.refreshedRefresh == "refreshed-refresh")
+        #expect(response.movies?.isEmpty == true)
     }
 
     @Test func requestIncludesSimklApiKeyHeader() async throws {
@@ -976,6 +1153,7 @@ struct SimklErrorTests {
             .httpError(500),
             .unauthorized,
             .notConnected,
+            .authorizationStateMissing,
         ]
         for error in errors {
             #expect(error.errorDescription != nil)

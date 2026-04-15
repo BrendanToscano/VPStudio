@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import os
 
 enum ExplorePhase: Equatable {
     case idle
@@ -55,13 +56,90 @@ enum YearRangePreset: Hashable, Sendable, Identifiable, CaseIterable {
     }
 }
 
+struct SearchFilterDraft: Sendable, Equatable {
+    var sortOption: DiscoverFilters.SortOption = .popularityDesc
+    var selectedYear: Int? = nil
+    var selectedLanguages: Set<String> = ["en-US"]
+    var selectedGenre: Genre? = nil
+
+    var inferredYearRangePreset: YearRangePreset? {
+        guard let selectedYear else { return nil }
+        return YearRangePreset.allCases.first { $0.contains(year: selectedYear) }
+    }
+}
+
 @Observable
 @MainActor
 final class SearchViewModel {
-    var query = ""
-    var results: [MediaPreview] = []
-    var isSearching = false
-    var error: AppError?
+    private static let logger = Logger(subsystem: "com.vpstudio", category: "search-view-model")
+    /// The most recently committed text query backing active/paginated search results.
+    /// Raw typing lives in `queryDraft` so the Search field can change without constantly
+    /// mutating the committed search state used by load-more and reload paths.
+    var query = "" {
+        didSet {
+            guard queryDraft != query else { return }
+            queryDraft = query
+        }
+    }
+
+    /// Raw text currently shown in the Search field. This can change freely while the user
+    /// types, but it is only committed back into `query` when an actual search executes.
+    var queryDraft = "" {
+        didSet {
+            let trimmed = queryDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+            let nextHasQueryText = !trimmed.isEmpty
+
+            if hasQueryText != nextHasQueryText {
+                hasQueryText = nextHasQueryText
+            }
+
+            let nextHasAttemptedTextSearch = !submittedQuery.isEmpty && trimmed == submittedQuery
+            if hasAttemptedTextSearch != nextHasAttemptedTextSearch {
+                hasAttemptedTextSearch = nextHasAttemptedTextSearch
+
+                if !nextHasAttemptedTextSearch {
+                    error = nil
+                }
+            }
+
+            if !nextHasQueryText, submittedQuery != "" {
+                submittedQuery = ""
+            }
+
+            if !nextHasQueryText {
+                cancelInFlightWork()
+                replaceResults([])
+                error = nil
+                currentPage = 1
+                totalPages = 1
+                isSearching = false
+                isLoadingMore = false
+                lastPaginationTime = nil
+
+                if !query.isEmpty {
+                    query = ""
+                }
+            }
+
+            refreshExplorePhaseIfNeeded()
+        }
+    }
+    var results: [MediaPreview] = [] {
+        didSet {
+            if shouldRebuildResultIDCache {
+                resultIDCache = Set(results.map(\.id))
+            } else {
+                shouldRebuildResultIDCache = true
+            }
+            refreshExplorePhaseIfNeeded()
+        }
+    }
+    var isSearching = false {
+        didSet { refreshExplorePhaseIfNeeded() }
+    }
+    var error: AppError? {
+        didSet { refreshExplorePhaseIfNeeded() }
+    }
     var selectedType: MediaType? = nil
     var currentPage = 1
     var totalPages = 1
@@ -70,9 +148,12 @@ final class SearchViewModel {
     // MARK: - Genre Filtering
 
     var genres: [Genre] = []
-    var selectedGenre: Genre?
+    var selectedGenre: Genre? {
+        didSet { refreshExplorePhaseIfNeeded() }
+    }
     private var genreCacheByType: [MediaType: [Genre]] = [:]
     private var genreLoadTask: Task<Void, Never>?
+    private var genreLoadTaskType: MediaType?
 
     // MARK: - Sort & Filter
 
@@ -80,22 +161,20 @@ final class SearchViewModel {
     var yearFilter: Int?
     var yearRangePreset: YearRangePreset?
     var languageFilters: Set<String> = ["en-US"]
+    private static let defaultLanguageCode = "en-US"
 
-    /// Primary language sent to the API (first from set, fallback "en-US").
+    /// Primary language sent to the API. When multiple languages are selected,
+    /// this returns the first known non-default choice so the search path remains
+    /// deterministic.
     var primaryLanguage: String? {
-        languageFilters.isEmpty ? nil : (languageFilters.sorted().first ?? "en-US")
+        preferredLanguageCode(in: languageFilters)
     }
 
-    /// ISO 639-1 original-language code derived from `languageFilters`, used for TMDB `with_original_language`.
-    /// Returns nil when filters contain the default "en-US" only (to avoid over-filtering), or when multiple
-    /// languages are selected (TMDB only supports a single `with_original_language` value).
+    /// ISO 639-1 original-language code used for TMDB `with_original_language`.
+    /// Delegates to `TMDBOriginalLanguagePolicy` so language-specific exceptions
+    /// (for example Hindi and related Indian locales) can avoid over-filtering.
     var originalLanguageCode: String? {
-        // Only apply original language filtering when a single non-default language is selected
-        guard languageFilters.count == 1,
-              let code = languageFilters.first,
-              code != "en-US"
-        else { return nil }
-        return DiscoverFilters.iso639LanguageCode(from: code)
+        TMDBOriginalLanguagePolicy.originalLanguageCode(for: languageFilters)
     }
 
     /// The number of currently active non-default filters.
@@ -103,7 +182,7 @@ final class SearchViewModel {
         var count = 0
         if sortOption != .popularityDesc { count += 1 }
         if yearFilter != nil || yearRangePreset != nil { count += 1 }
-        if languageFilters != ["en-US"] { count += 1 }
+        if hasExplicitLanguageSelection { count += 1 }
         if selectedGenre != nil { count += 1 }
         return count
     }
@@ -112,17 +191,59 @@ final class SearchViewModel {
     var hasActiveFilters: Bool { activeFilterCount > 0 }
 
     /// The mood card that is currently driving results (nil for text search or genre selection).
-    private(set) var activeMoodCard: ExploreMoodCard?
+    private(set) var activeMoodCard: ExploreMoodCard? {
+        didSet { refreshExplorePhaseIfNeeded() }
+    }
+
+    var currentFilterDraft: SearchFilterDraft {
+        SearchFilterDraft(
+            sortOption: sortOption,
+            selectedYear: yearFilter,
+            selectedLanguages: languageFilters,
+            selectedGenre: selectedGenre
+        )
+    }
 
     // MARK: - AI Recommendations
 
-    var aiRecommendations: [AIMovieRecommendation] = []
-    var isLoadingAI = false
+    var aiRecommendations: [AIMovieRecommendation] = [] {
+        didSet { refreshExplorePhaseIfNeeded() }
+    }
+    var isLoadingAI = false {
+        didSet { refreshExplorePhaseIfNeeded() }
+    }
     var aiError: String?
 
     // MARK: - Recent Searches
 
     var recentSearches: [String] = []
+
+    // MARK: - Query UI State
+
+    /// Low-churn signal used by the outer Search shell so raw keystrokes do not
+    /// invalidate the full Explore layout on every character.
+    private(set) var hasQueryText = false
+
+    /// The most recently submitted non-empty text query. Empty-state copy and
+    /// other shell chrome can depend on this instead of observing live typing.
+    private(set) var submittedQuery = ""
+
+    var emptyStateQuery: String {
+        let trimmedSubmittedQuery = submittedQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedSubmittedQuery.isEmpty {
+            return trimmedSubmittedQuery
+        }
+
+        if let selectedGenre {
+            return selectedGenre.name
+        }
+
+        if let activeMoodCard {
+            return activeMoodCard.title
+        }
+
+        return ""
+    }
 
     // MARK: - Scroll Control
 
@@ -131,19 +252,29 @@ final class SearchViewModel {
 
     // MARK: - Explore Phase
 
-    var explorePhase: ExplorePhase {
+    /// Stored separately from the high-churn source properties so views that only
+    /// care about the lane phase do not observe every results mutation.
+    private(set) var explorePhase: ExplorePhase = .idle
+
+    /// Tracks whether the current non-empty text query has actually been submitted.
+    /// This prevents the center pane from swapping out of the idle Explore grid on the
+    /// very first keystroke before the debounced request even begins.
+    private(set) var hasAttemptedTextSearch = false
+
+    private var derivedExplorePhase: ExplorePhase {
         if isSearching { return .searching }
         if error != nil && results.isEmpty { return .error }
-        let hasQuery = !query.trimmingCharacters(in: .whitespaces).isEmpty
+        let hasSubmittedTextQuery = hasAttemptedTextSearch && !queryDraft.trimmingCharacters(in: .whitespaces).isEmpty
         let hasResults = !results.isEmpty || !aiRecommendations.isEmpty
-        if hasResults || isLoadingAI || selectedGenre != nil || activeMoodCard != nil { return .results }
-        if hasQuery { return .empty }
+        if hasResults || isLoadingAI { return .results }
+        if selectedGenre != nil || activeMoodCard != nil { return .empty }
+        if hasSubmittedTextQuery { return .empty }
         return .idle
     }
 
     /// True when the current results came from a genre-browse discover call
     /// rather than a text search.
-    var isGenreBrowsing: Bool { selectedGenre != nil && query.trimmingCharacters(in: .whitespaces).isEmpty }
+    var isGenreBrowsing: Bool { selectedGenre != nil && queryDraft.trimmingCharacters(in: .whitespaces).isEmpty }
 
     private var searchTask: Task<Void, Never>?
     private var loadMoreTask: Task<Void, Never>?
@@ -173,6 +304,15 @@ final class SearchViewModel {
     /// Timestamp of the last successful `loadMore()` initiation, used with `paginationCooldown`.
     private var lastPaginationTime: ContinuousClock.Instant?
 
+    /// Cached alongside `results` so paginated appends can deduplicate without rebuilding
+    /// an ID set from the full grid on every new page.
+    private var resultIDCache: Set<String> = []
+    private var shouldRebuildResultIDCache = true
+
+    private var hasExplicitLanguageSelection: Bool {
+        !languageFilters.isEmpty && languageFilters != [Self.defaultLanguageCode]
+    }
+
     init(
         metadataService: (any MetadataProvider)? = nil,
         metadataServiceFactory: @escaping @Sendable (String) -> any MetadataProvider = { TMDBService(apiKey: $0) },
@@ -183,6 +323,35 @@ final class SearchViewModel {
         self.metadataServiceFactory = metadataServiceFactory
         self.debounceInterval = debounceInterval
         self.paginationCooldown = paginationCooldown
+        refreshExplorePhaseIfNeeded()
+    }
+
+    private func refreshExplorePhaseIfNeeded() {
+        let nextPhase = derivedExplorePhase
+        guard explorePhase != nextPhase else { return }
+        explorePhase = nextPhase
+    }
+
+    private func replaceResults(_ items: [MediaPreview]) {
+        resultIDCache = Set(items.map(\.id))
+        shouldRebuildResultIDCache = false
+        results = items
+    }
+
+    private func appendUniqueResults(_ items: [MediaPreview]) {
+        guard !items.isEmpty else { return }
+
+        var uniqueItems: [MediaPreview] = []
+        uniqueItems.reserveCapacity(items.count)
+
+        for item in items where resultIDCache.insert(item.id).inserted {
+            uniqueItems.append(item)
+        }
+
+        guard !uniqueItems.isEmpty else { return }
+
+        shouldRebuildResultIDCache = false
+        results.append(contentsOf: uniqueItems)
     }
 
     func cancelInFlightWork() {
@@ -196,16 +365,45 @@ final class SearchViewModel {
         aiTask = nil
         genreLoadTask?.cancel()
         genreLoadTask = nil
+        genreLoadTaskType = nil
     }
+
+    // Note: cancelInFlightWork() should be called from .onDisappear in the view.
+    // deinit cannot access @MainActor properties in Swift 6 strict concurrency.
 
     func configure(apiKey: String) {
         let normalizedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !normalizedKey.isEmpty else { return }
+
+        // Empty key means "search is not configured". Clear only services that were
+        // previously configured through this key path; preserve explicitly injected
+        // metadataService instances used by tests.
+        if normalizedKey.isEmpty {
+            guard configuredApiKey != nil else { return }
+            cancelInFlightWork()
+            metadataService = nil
+            configuredApiKey = nil
+            genreCacheByType.removeAll()
+            genres = []
+            selectedGenre = nil
+            activeMoodCard = nil
+            replaceResults([])
+            error = nil
+            isSearching = false
+            isLoadingMore = false
+            currentPage = 1
+            totalPages = 1
+            lastPaginationTime = nil
+            scrollToTopTrigger += 1
+            return
+        }
 
         if let configuredApiKey {
             guard configuredApiKey != normalizedKey else { return }
+            cancelInFlightWork()
             metadataService = metadataServiceFactory(normalizedKey)
             self.configuredApiKey = normalizedKey
+            genreCacheByType.removeAll()
+            genres = []
             return
         }
 
@@ -218,13 +416,24 @@ final class SearchViewModel {
 
     /// Schedules a search after the debounce interval. Calling again before the interval
     /// expires cancels the previous pending search. Use this for live-as-you-type search.
-    func debouncedSearch() {
+    func debouncedSearch(queryText: String? = nil) {
         debounceTask?.cancel()
+
+        let rawQuery = queryText ?? queryDraft
+        let trimmed = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        guard metadataService != nil else {
+            error = .tmdbSetupRequired(feature: "Search")
+            refreshExplorePhaseIfNeeded()
+            return
+        }
+
         let interval = debounceInterval
         debounceTask = Task { [weak self] in
             try? await Task.sleep(for: interval)
             guard !Task.isCancelled, let self else { return }
-            self.search()
+            self.search(queryText: rawQuery)
         }
     }
 
@@ -235,23 +444,46 @@ final class SearchViewModel {
     }
 
     /// Immediately executes a search, cancelling any pending debounce and prior in-flight search.
-    func search() {
+    func search(queryText: String? = nil) {
         debounceTask?.cancel()
         debounceTask = nil
 
-        let trimmed = query.trimmingCharacters(in: .whitespaces)
-        guard !trimmed.isEmpty, let service = metadataService else { return }
+        let rawQuery = queryText ?? queryDraft
+        let trimmed = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        if queryDraft != rawQuery {
+            queryDraft = rawQuery
+        }
+        if query != rawQuery {
+            query = rawQuery
+        }
+
+        submittedQuery = trimmed
+        if !hasAttemptedTextSearch {
+            hasAttemptedTextSearch = true
+        }
 
         searchTask?.cancel()
         loadMoreTask?.cancel()
         isLoadingMore = false
         lastPaginationTime = nil
+        error = nil
+        currentPage = 1
+        totalPages = 1
+
+        guard let service = metadataService else {
+            replaceResults([])
+            error = .tmdbSetupRequired(feature: "Search")
+            isSearching = false
+            refreshExplorePhaseIfNeeded()
+            return
+        }
+
         searchGeneration += 1
         scrollToTopTrigger += 1
         let generation = searchGeneration
         isSearching = true
-        error = nil
-        currentPage = 1
         let selectedType = selectedType
         let year = yearFilter
         let language = primaryLanguage
@@ -259,12 +491,12 @@ final class SearchViewModel {
             do {
                 let result = try await service.search(query: trimmed, type: selectedType, page: 1, year: year, language: language)
                 guard !Task.isCancelled, let self, self.searchGeneration == generation else { return }
-                self.results = result.items
+                self.replaceResults(self.locallyFilteredSearchItems(result.items, selectedType: selectedType, year: year))
                 self.totalPages = result.totalPages
                 self.isSearching = false
             } catch {
                 guard !Task.isCancelled, let self, self.searchGeneration == generation else { return }
-                self.results = []
+                self.replaceResults([])
                 self.error = AppError(error, fallback: .network(.transport("Search failed.")))
                 self.isSearching = false
             }
@@ -328,13 +560,13 @@ final class SearchViewModel {
                 )
                 let result = try await service.discover(type: type, filters: filters)
                 guard !Task.isCancelled, let self, self.searchGeneration == generation else { return }
-                let existingIDs = Set(self.results.map(\.id))
-                let newItems = result.items.filter { !existingIDs.contains($0.id) }
-                self.results.append(contentsOf: newItems)
+                self.error = nil
+                self.appendUniqueResults(result.items)
                 self.currentPage = nextPage
                 self.totalPages = result.totalPages
             } catch {
-                // silently fail pagination
+                guard let self else { return }
+                self.publishPaginationFailure(error, generation: generation)
             }
         }
     }
@@ -357,13 +589,14 @@ final class SearchViewModel {
                 let result = try await service.search(query: expectedQuery, type: selectedType, page: nextPage, year: year, language: language)
                 guard !Task.isCancelled, let self, self.searchGeneration == generation else { return }
                 guard self.query.trimmingCharacters(in: .whitespaces) == expectedQuery else { return }
-                let existingIDs = Set(self.results.map(\.id))
-                let newItems = result.items.filter { !existingIDs.contains($0.id) }
-                self.results.append(contentsOf: newItems)
+                self.error = nil
+                self.appendUniqueResults(self.locallyFilteredSearchItems(result.items, selectedType: selectedType, year: year))
                 self.currentPage = nextPage
                 self.totalPages = result.totalPages
             } catch {
-                // silently fail pagination
+                guard let self else { return }
+                guard self.query.trimmingCharacters(in: .whitespaces) == expectedQuery else { return }
+                self.publishPaginationFailure(error, generation: generation)
             }
         }
     }
@@ -406,21 +639,49 @@ final class SearchViewModel {
                 let result = try await service.discover(type: type, filters: filters)
                 guard !Task.isCancelled, let self, self.searchGeneration == generation else { return }
                 guard self.selectedGenre?.id == genre.id else { return }
-                let existingIDs = Set(self.results.map(\.id))
-                let newItems = result.items.filter { !existingIDs.contains($0.id) }
-                self.results.append(contentsOf: newItems)
+                self.error = nil
+                self.appendUniqueResults(result.items)
                 self.currentPage = nextPage
                 self.totalPages = result.totalPages
             } catch {
-                // silently fail pagination
+                guard let self else { return }
+                guard self.selectedGenre?.id == genre.id else { return }
+                self.publishPaginationFailure(error, generation: generation)
             }
+        }
+    }
+
+    private func publishPaginationFailure(_ error: Error, generation: Int) {
+        guard !Task.isCancelled, searchGeneration == generation else { return }
+        lastPaginationTime = nil
+        self.error = AppError(
+            error,
+            fallback: .network(.transport("Couldn't load more results. Try again."))
+        )
+    }
+
+    private func locallyFilteredSearchItems(
+        _ items: [MediaPreview],
+        selectedType: MediaType?,
+        year: Int?
+    ) -> [MediaPreview] {
+        guard selectedType == nil, let year else {
+            return items
+        }
+
+        return items.filter { item in
+            guard let itemYear = item.year else {
+                return false
+            }
+            return itemYear == year
         }
     }
 
     func clear() {
         cancelInFlightWork()
         query = ""
-        results = []
+        submittedQuery = ""
+        replaceResults([])
         currentPage = 1
         totalPages = 1
         selectedGenre = nil
@@ -443,6 +704,7 @@ final class SearchViewModel {
         yearFilter = nil
         yearRangePreset = nil
         languageFilters = ["en-US"]
+        error = nil
         if selectedGenre != nil {
             selectGenre(nil)
         } else {
@@ -456,22 +718,42 @@ final class SearchViewModel {
         guard let service = metadataService else { return }
         let type = selectedType ?? .movie
 
-        // Return cached genres if available
+        // Return cached genres if available.
         if let cached = genreCacheByType[type] {
             genres = cached
             return
         }
 
+        // If this exact type is already loading, keep the in-flight request instead of
+        // cancel/restarting it (which can happen when the filter sheet is reopened quickly).
+        if genreLoadTask != nil, genreLoadTaskType == type {
+            return
+        }
+
         genreLoadTask?.cancel()
+        genreLoadTaskType = type
         genreLoadTask = Task { [weak self] in
             do {
                 let loadedGenres = try await service.getGenres(type: type)
                 guard !Task.isCancelled, let self else { return }
                 self.genreCacheByType[type] = loadedGenres
-                self.genres = loadedGenres
+
+                // Only publish into the currently displayed list when the loaded type is
+                // still active; otherwise keep it warm in cache for later.
+                if (self.selectedType ?? .movie) == type {
+                    self.genres = loadedGenres
+                }
             } catch {
-                // Non-fatal — genres are optional UI enhancement
+                guard !Task.isCancelled, let self else { return }
+                if (self.selectedType ?? .movie) == type {
+                    self.genres = []
+                }
+                Self.logger.error("Genre load failed for \(type.rawValue, privacy: .public): \(error.localizedDescription, privacy: .public)")
             }
+
+            guard let self, self.genreLoadTaskType == type else { return }
+            self.genreLoadTask = nil
+            self.genreLoadTaskType = nil
         }
     }
 
@@ -481,11 +763,11 @@ final class SearchViewModel {
             browseGenre(genre)
         } else {
             // Clear genre selection — if there's a text query, re-search; otherwise clear results
-            let trimmed = query.trimmingCharacters(in: .whitespaces)
+            let trimmed = queryDraft.trimmingCharacters(in: .whitespaces)
             if !trimmed.isEmpty {
                 search()
             } else {
-                results = []
+                replaceResults([])
                 currentPage = 1
                 totalPages = 1
             }
@@ -493,8 +775,6 @@ final class SearchViewModel {
     }
 
     func browseGenre(_ genre: Genre) {
-        guard let service = metadataService else { return }
-
         debounceTask?.cancel()
         debounceTask = nil
         searchTask?.cancel()
@@ -515,6 +795,15 @@ final class SearchViewModel {
         // Date-limit regular genre browsing so future/unannounced content doesn't appear
         let dateLte = DiscoverFilters.todayString()
 
+        guard let service = metadataService else {
+            replaceResults([])
+            totalPages = 1
+            error = .tmdbSetupRequired(feature: "Search")
+            isSearching = false
+            refreshExplorePhaseIfNeeded()
+            return
+        }
+
         searchTask = Task { [weak self] in
             do {
                 let filters = DiscoverFilters(
@@ -523,12 +812,12 @@ final class SearchViewModel {
                 )
                 let result = try await service.discover(type: type, filters: filters)
                 guard !Task.isCancelled, let self, self.searchGeneration == generation else { return }
-                self.results = result.items
+                self.replaceResults(result.items)
                 self.totalPages = result.totalPages
                 self.isSearching = false
             } catch {
                 guard !Task.isCancelled, let self, self.searchGeneration == generation else { return }
-                self.results = []
+                self.replaceResults([])
                 self.error = AppError(error, fallback: .network(.transport("Genre browse failed.")))
                 self.isSearching = false
             }
@@ -577,7 +866,6 @@ final class SearchViewModel {
     ) {
         sortOption = sortBy
         selectedGenre = nil
-        guard let service = metadataService else { return }
 
         debounceTask?.cancel()
         debounceTask = nil
@@ -595,6 +883,15 @@ final class SearchViewModel {
         let language = primaryLanguage
         let origLang = originalLanguageCode
 
+        guard let service = metadataService else {
+            replaceResults([])
+            totalPages = 1
+            error = .tmdbSetupRequired(feature: "Search")
+            isSearching = false
+            refreshExplorePhaseIfNeeded()
+            return
+        }
+
         searchTask = Task { [weak self] in
             do {
                 let filters = DiscoverFilters(
@@ -604,16 +901,63 @@ final class SearchViewModel {
                 )
                 let result = try await service.discover(type: type, filters: filters)
                 guard !Task.isCancelled, let self, self.searchGeneration == generation else { return }
-                self.results = result.items
+                self.replaceResults(result.items)
                 self.totalPages = result.totalPages
                 self.isSearching = false
             } catch {
                 guard !Task.isCancelled, let self, self.searchGeneration == generation else { return }
-                self.results = []
+                self.replaceResults([])
                 self.error = AppError(error, fallback: .network(.transport(errorMessage)))
                 self.isSearching = false
             }
         }
+    }
+
+    func handleSelectedTypeChange() {
+        loadGenres()
+
+        if let card = activeMoodCard {
+            // Re-select mood cards so genre IDs are derived for the current media type.
+            selectMoodCard(card)
+            return
+        }
+
+        guard let currentGenre = selectedGenre else {
+            requery()
+            return
+        }
+
+        let type = selectedType ?? .movie
+        if let cachedGenres = genreCacheByType[type],
+           let remappedGenre = Self.remapGenre(currentGenre, in: cachedGenres) {
+            selectGenre(remappedGenre)
+            return
+        }
+
+        // Fallback: clear stale genre context so we don't keep querying a genre lane
+        // that doesn't exist for the newly selected type.
+        selectedGenre = nil
+
+        let trimmed = queryDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty {
+            search(queryText: trimmed)
+        } else {
+            replaceResults([])
+            currentPage = 1
+            totalPages = 1
+            error = nil
+            refreshExplorePhaseIfNeeded()
+        }
+    }
+
+    nonisolated static func remapGenre(_ genre: Genre, in availableGenres: [Genre]) -> Genre? {
+        if let byID = availableGenres.first(where: { $0.id == genre.id }) {
+            return byID
+        }
+
+        return availableGenres.first(where: {
+            $0.name.compare(genre.name, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame
+        })
     }
 
     // MARK: - Sort Option
@@ -625,12 +969,7 @@ final class SearchViewModel {
 
     func applyYearFilter(_ year: Int?) {
         yearFilter = year
-        // Clear preset if setting a specific year that doesn't match any preset
-        if let year {
-            yearRangePreset = YearRangePreset.allCases.first(where: { $0.contains(year: year) })
-        } else {
-            yearRangePreset = nil
-        }
+        yearRangePreset = nil
         requery()
     }
 
@@ -654,16 +993,56 @@ final class SearchViewModel {
     }
 
     func applyLanguageFilters(_ languages: Set<String>) {
-        languageFilters = languages
+        let nextSelection = Set(languages.filter { !$0.isEmpty })
+        guard nextSelection != languageFilters else { return }
+
+        languageFilters = nextSelection
         requery()
     }
 
     func toggleLanguage(_ code: String) {
-        if languageFilters.contains(code) {
+        if code == Self.defaultLanguageCode {
+            if languageFilters == [Self.defaultLanguageCode] {
+                languageFilters = []
+            } else {
+                languageFilters = [Self.defaultLanguageCode]
+            }
+        } else if languageFilters.contains(code) {
             languageFilters.remove(code)
+            if languageFilters.isEmpty {
+                languageFilters = [Self.defaultLanguageCode]
+            }
         } else {
+            if languageFilters == [Self.defaultLanguageCode] {
+                languageFilters.removeAll()
+            }
             languageFilters.insert(code)
         }
+        requery()
+    }
+
+    func applyFilterDraft(_ draft: SearchFilterDraft) {
+        let yearPreset = draft.inferredYearRangePreset
+        let stateChanged =
+            sortOption != draft.sortOption ||
+            yearFilter != draft.selectedYear ||
+            yearRangePreset != yearPreset ||
+            languageFilters != draft.selectedLanguages ||
+            selectedGenre != draft.selectedGenre
+
+        guard stateChanged else { return }
+
+        sortOption = draft.sortOption
+        yearFilter = draft.selectedYear
+        yearRangePreset = yearPreset
+        languageFilters = draft.selectedLanguages
+
+        if selectedGenre != draft.selectedGenre {
+            activeMoodCard = nil
+            selectGenre(draft.selectedGenre)
+            return
+        }
+
         requery()
     }
 
@@ -674,11 +1053,30 @@ final class SearchViewModel {
         } else if let card = activeMoodCard, card.isSpecialCard {
             selectMoodCard(card)
         } else {
-            let trimmed = query.trimmingCharacters(in: .whitespaces)
+            let trimmed = queryDraft.trimmingCharacters(in: .whitespaces)
             if !trimmed.isEmpty {
                 search()
             }
         }
+    }
+
+    private func preferredLanguageCode(in selection: Set<String>) -> String? {
+        guard !selection.isEmpty else { return nil }
+
+        let prioritizedKnownCodes = SearchLanguageOption.common.map(\.code)
+        if let preferred = prioritizedKnownCodes.first(where: { selection.contains($0) && $0 != Self.defaultLanguageCode }) {
+            return preferred
+        }
+
+        if selection == [Self.defaultLanguageCode] {
+            return nil
+        }
+
+        if let fallback = selection.first(where: { $0 != Self.defaultLanguageCode }) {
+            return fallback
+        }
+
+        return nil
     }
 
     // MARK: - Recent Searches
@@ -702,22 +1100,32 @@ final class SearchViewModel {
     }
 
     func loadRecentSearches(from settingsManager: SettingsManager) {
-        Task { [weak self] in
-            guard let json = try? await settingsManager.getString(key: SettingsKeys.recentSearches),
-                  let data = json.data(using: .utf8),
-                  let decoded = try? JSONDecoder().decode([String].self, from: data)
-            else { return }
-            self?.recentSearches = decoded
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                guard let json = try await settingsManager.getString(key: SettingsKeys.recentSearches),
+                      let data = json.data(using: .utf8) else {
+                    self.recentSearches = []
+                    return
+                }
+                self.recentSearches = try JSONDecoder().decode([String].self, from: data)
+            } catch {
+                self.recentSearches = []
+                Self.logger.error("Recent search load failed: \(error.localizedDescription, privacy: .public)")
+            }
         }
     }
 
     func saveRecentSearches(to settingsManager: SettingsManager) {
         let searches = recentSearches
         Task {
-            guard let data = try? JSONEncoder().encode(searches),
-                  let json = String(data: data, encoding: .utf8)
-            else { return }
-            try? await settingsManager.setString(key: SettingsKeys.recentSearches, value: json)
+            do {
+                let data = try JSONEncoder().encode(searches)
+                guard let json = String(data: data, encoding: .utf8) else { return }
+                try await settingsManager.setString(key: SettingsKeys.recentSearches, value: json)
+            } catch {
+                Self.logger.error("Recent search save failed: \(error.localizedDescription, privacy: .public)")
+            }
         }
     }
 
@@ -743,7 +1151,7 @@ final class SearchViewModel {
     // MARK: - AI Recommendations
 
     func fetchAIRecommendations(aiManager: AIAssistantManager) {
-        let trimmed = query.trimmingCharacters(in: .whitespaces)
+        let trimmed = queryDraft.trimmingCharacters(in: .whitespaces)
 
         aiTask?.cancel()
         isLoadingAI = true

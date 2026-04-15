@@ -278,6 +278,32 @@ struct VPPlayerEngineTrackSelectionTests {
         #expect(engine.selectedAudioTrack == 2)
     }
 
+    @Test @MainActor func loadAudioTracksUsesProvidedSelectedTrackID() {
+        let engine = VPPlayerEngine()
+        let tracks: [VPPlayerEngine.TrackInfo] = [
+            .init(id: 11, name: "English", language: "en", codec: "aac"),
+            .init(id: 21, name: "Commentary", language: "en", codec: "aac"),
+        ]
+
+        engine.loadAudioTracks(tracks, selectedTrackID: 21)
+
+        #expect(engine.audioTracks.map(\.id) == [11, 21])
+        #expect(engine.selectedAudioTrack == 21)
+    }
+
+    @Test @MainActor func loadAudioTracksFallsBackToFirstTrackWhenSelectionIsMissing() {
+        let engine = VPPlayerEngine()
+        let tracks: [VPPlayerEngine.TrackInfo] = [
+            .init(id: 7, name: "Stereo", language: "en", codec: "aac"),
+            .init(id: 9, name: "Surround", language: "en", codec: "eac3"),
+        ]
+
+        engine.selectAudioTrack(42)
+        engine.loadAudioTracks(tracks, selectedTrackID: 99)
+
+        #expect(engine.selectedAudioTrack == 7)
+    }
+
     @Test @MainActor func selectSubtitleTrackRejectsInvalidIndex() {
         let engine = VPPlayerEngine()
         // No subtitle tracks loaded, so index 5 is out of bounds

@@ -5,16 +5,33 @@ struct AnthropicProvider: AIProvider, Sendable {
     let providerKind: AIProviderKind = .anthropic
     private let apiKey: String
     private let model: String
-    private let baseURL = "https://api.anthropic.com/v1/messages"
+    private let baseURL: String
+    private let session: URLSession
+    private let sleep: AIHTTPSleep
 
-    init(apiKey: String, model: String = "claude-sonnet-4-6") {
+    init(
+        apiKey: String,
+        model: String = "claude-sonnet-4-6",
+        baseURL: String = "https://api.anthropic.com/v1/messages",
+        session: URLSession = AIHTTPTransport.defaultSession,
+        sleep: @escaping AIHTTPSleep = AIHTTPTransport.defaultSleep
+    ) {
         self.apiKey = apiKey
         self.model = model
+        self.baseURL = baseURL
+        self.session = session
+        self.sleep = sleep
     }
 
     func complete(system: String, userMessage: String) async throws -> AIProviderResponse {
+        let trimmedAPIKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedAPIKey.isEmpty, !trimmedModel.isEmpty else {
+            throw AIError.invalidResponse
+        }
+
         let body: [String: Any] = [
-            "model": model,
+            "model": trimmedModel,
             "max_tokens": 4096,
             "system": system,
             "messages": [
@@ -29,12 +46,11 @@ struct AnthropicProvider: AIProvider, Sendable {
         request.httpMethod = "POST"
         request.timeoutInterval = 60
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
+        request.setValue(trimmedAPIKey, forHTTPHeaderField: "x-api-key")
         request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse else { throw AIError.invalidResponse }
+        let (data, http) = try await AIHTTPTransport.perform(request, using: session, sleep: sleep)
 
         guard (200...299).contains(http.statusCode) else {
             let msg = String(data: data, encoding: .utf8) ?? ""
@@ -52,7 +68,7 @@ struct AnthropicProvider: AIProvider, Sendable {
         return AIProviderResponse(
             provider: .anthropic,
             content: content,
-            model: model,
+            model: trimmedModel,
             inputTokens: inputTokens,
             outputTokens: outputTokens
         )

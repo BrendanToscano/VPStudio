@@ -198,8 +198,13 @@ struct KSPlayerEngineTuningProfileTests {
         )
         let profile = KSPlayerEngine.tuningProfile(for: stream)
 
+        #if os(visionOS)
+        #expect(profile.preferredForwardBufferDuration == 2.0)
+        #expect(profile.maxBufferDuration == 10.0)
+        #else
         #expect(profile.preferredForwardBufferDuration == 3.0)
         #expect(profile.maxBufferDuration == 16.0)
+        #endif
         #expect(profile.probesize == 6_000_000)
         #expect(profile.maxAnalyzeDuration == 6_000_000)
         #expect(profile.autoSelectEmbedSubtitle == false)
@@ -214,8 +219,13 @@ struct KSPlayerEngineTuningProfileTests {
         )
         let profile = KSPlayerEngine.tuningProfile(for: stream)
 
+        #if os(visionOS)
+        #expect(profile.preferredForwardBufferDuration == 1.0)
+        #expect(profile.maxBufferDuration == 5.0)
+        #else
         #expect(profile.preferredForwardBufferDuration == 1.5)
         #expect(profile.maxBufferDuration == 8.0)
+        #endif
         #expect(profile.probesize == 2_000_000)
         #expect(profile.maxAnalyzeDuration == 2_500_000)
         #expect(profile.autoSelectEmbedSubtitle == true)
@@ -230,6 +240,10 @@ struct KSPlayerEngineTuningProfileTests {
         )
         let profile = KSPlayerEngine.tuningProfile(for: stream)
 
+        #if os(visionOS)
+        #expect(profile.maxBufferDuration == 10.0)
+        #else
         #expect(profile.maxBufferDuration == 16.0)
+        #endif
     }
 }

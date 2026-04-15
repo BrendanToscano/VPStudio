@@ -73,6 +73,26 @@ struct ExploreMoodCardTests {
         )
         #expect(card.isSpecialCard == false)
     }
+
+    @Test func missingArtImageNameFallsBackCleanly() {
+        let card = ExploreMoodCard(
+            id: "test", title: "Test", subtitle: "TEST",
+            symbol: "star", artImageName: "definitely-missing-explore-art",
+            color: .red, movieGenreId: 28, tvGenreId: 10759
+        )
+        #expect(card.artImageName == nil)
+        #expect(card.hasResolvedArtImage == false)
+    }
+
+    @Test func nilArtImageNameStaysInSymbolMode() {
+        let card = ExploreMoodCard(
+            id: "test", title: "Test", subtitle: "TEST",
+            symbol: "star", artImageName: nil,
+            color: .red, movieGenreId: 28, tvGenreId: 10759
+        )
+        #expect(card.artImageName == nil)
+        #expect(card.hasResolvedArtImage == false)
+    }
 }
 
 // MARK: - ExploreGenreCatalog Tests

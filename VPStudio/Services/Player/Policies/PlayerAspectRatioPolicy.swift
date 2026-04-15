@@ -43,6 +43,28 @@ enum AspectRatioSelection: String, CaseIterable, Sendable, Identifiable {
     var locksWindowRatio: Bool {
         self != .freeform
     }
+
+    /// Parses QA/runtime override values (case-insensitive), supporting both
+    /// human labels and compact tokens.
+    init?(qaValue: String) {
+        let normalized = qaValue
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        switch normalized {
+        case "auto", "native", "auto-native", "auto (native)":
+            self = .auto
+        case "16:9", "16x9", "sixteenbynine", "widescreen":
+            self = .sixteenByNine
+        case "21:9", "21x9", "twentyonebynine", "cinemascope":
+            self = .twentyOneByNine
+        case "4:3", "4x3", "fourbythree", "classic":
+            self = .fourByThree
+        case "freeform", "freeflow", "unlocked", "unlock":
+            self = .freeform
+        default:
+            return nil
+        }
+    }
 }
 
 // MARK: - Aspect Ratio Policy

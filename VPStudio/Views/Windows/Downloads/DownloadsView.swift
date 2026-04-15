@@ -1,26 +1,98 @@
 import SwiftUI
 
+enum DownloadsLoadingSurfacePolicy {
+    static let title = "Loading Downloads"
+    static let message = "Checking progress, completed titles, and offline availability."
+
+    static func shouldShowRootLoading(
+        hasViewModel: Bool,
+        isLoading: Bool,
+        groupCount: Int
+    ) -> Bool {
+        !hasViewModel || (isLoading && groupCount == 0)
+    }
+}
+
+enum DownloadsErrorSurfaceMode: Equatable {
+    case none
+    case rootError
+    case inlineError
+}
+
+enum DownloadsErrorSurfacePolicy {
+    static func presentationMode(
+        groupCount: Int,
+        hasRootError: Bool
+    ) -> DownloadsErrorSurfaceMode {
+        guard hasRootError else { return .none }
+        return groupCount == 0 ? .rootError : .inlineError
+    }
+}
+
 struct DownloadsView: View {
     @Environment(AppState.self) private var appState
     @Environment(\.openWindow) private var openWindow
     @State private var viewModel: DownloadsViewModel?
     @State private var reloadTask: Task<Void, Never>?
     @State private var confirmDeleteMediaId: String?
+    @State private var confirmDeleteTaskID: String?
+    @State private var playbackValidationMessage: String?
+    @State private var didPerformQADownloadAction = false
+
+    private var shouldShowRootLoadingSurface: Bool {
+        DownloadsLoadingSurfacePolicy.shouldShowRootLoading(
+            hasViewModel: viewModel != nil,
+            isLoading: viewModel?.isLoading ?? true,
+            groupCount: viewModel?.groups.count ?? 0
+        )
+    }
+
+    private func errorSurfaceMode(for vm: DownloadsViewModel) -> DownloadsErrorSurfaceMode {
+        DownloadsErrorSurfacePolicy.presentationMode(
+            groupCount: vm.groups.count,
+            hasRootError: vm.rootError != nil
+        )
+    }
 
     var body: some View {
         Group {
-            if let vm = viewModel {
+            if shouldShowRootLoadingSurface {
+                VStack {
+                    Spacer()
+                    LoadingOverlay(
+                        title: DownloadsLoadingSurfacePolicy.title,
+                        message: DownloadsLoadingSurfacePolicy.message
+                    )
+                    Spacer()
+                }
+            } else if let vm = viewModel {
                 content(vm)
             } else {
-                ProgressView("Loading Downloads...")
+                EmptyView()
             }
         }
+        .background {
+            VPMenuBackground()
+                .ignoresSafeArea()
+        }
         .navigationTitle("Downloads")
+        .alert(
+            "Download Unavailable",
+            isPresented: Binding(
+                get: { playbackValidationMessage != nil },
+                set: { if !$0 { playbackValidationMessage = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(playbackValidationMessage ?? "The downloaded file is no longer available.")
+        }
         .task {
             if viewModel == nil {
                 let vm = DownloadsViewModel(appState: appState)
                 viewModel = vm
                 await vm.load()
+                await performQADownloadActionIfNeeded(vm)
             }
         }
         .onDisappear {
@@ -30,40 +102,142 @@ struct DownloadsView: View {
         .onReceive(NotificationCenter.default.publisher(for: .downloadsDidChange)) { _ in
             guard let vm = viewModel else { return }
             reloadTask?.cancel()
-            reloadTask = Task { await vm.load() }
+            reloadTask = Task {
+                await vm.load()
+                await performQADownloadActionIfNeeded(vm)
+            }
         }
     }
 
     @ViewBuilder
     private func content(_ vm: DownloadsViewModel) -> some View {
-        if vm.isLoading && vm.groups.isEmpty {
-            ProgressView("Loading Downloads...")
-        } else if vm.groups.isEmpty {
-            ContentUnavailableView(
-                "No Downloads",
-                systemImage: "arrow.down.circle",
-                description: Text("Use the Download button on any stream to save content for offline viewing.")
-            )
-        } else {
-            ScrollView {
-                LazyVStack(spacing: 24) {
-                    ForEach(vm.groups) { group in
-                        mediaGroupCard(group, vm: vm)
+        switch errorSurfaceMode(for: vm) {
+        case .rootError:
+            if let error = vm.rootError {
+                downloadsErrorState(error, vm: vm)
+            }
+        case .inlineError, .none:
+            if vm.groups.isEmpty {
+                downloadsEmptyState
+            } else {
+                VStack(spacing: 12) {
+                    if case .inlineError = errorSurfaceMode(for: vm), let error = vm.rootError {
+                        downloadsInlineErrorBanner(error, vm: vm)
+                            .padding(.horizontal, 24)
+                            .padding(.top, 16)
+                    }
+
+                    ScrollView {
+                        LazyVStack(spacing: 24) {
+                            ForEach(vm.groups) { group in
+                                mediaGroupCard(group, vm: vm)
+                            }
+                        }
+                        .padding(.horizontal, 24)
+                        .padding(.bottom, 16)
+                    }
+                    .refreshable {
+                        await vm.load()
                     }
                 }
-                .padding(.horizontal, 24)
-                .padding(.vertical, 16)
-            }
-            .refreshable {
-                await vm.load()
             }
         }
+    }
 
-        if let error = vm.errorMessage, !error.isEmpty {
-            Text(error)
-                .font(.caption)
-                .foregroundStyle(.red)
-                .padding(.top, 6)
+    private func retryRootLoad(_ vm: DownloadsViewModel) {
+        reloadTask?.cancel()
+        reloadTask = Task {
+            await vm.load()
+            await performQADownloadActionIfNeeded(vm)
+        }
+    }
+
+    private func downloadsInlineErrorBanner(_ error: AppError, vm: DownloadsViewModel) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            AppErrorInlineView(error: error)
+
+            Spacer(minLength: 12)
+
+            Button {
+                retryRootLoad(vm)
+            } label: {
+                GlassTag(text: "Retry", tintColor: .white.opacity(0.16), symbol: "arrow.clockwise")
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(14)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
+        .overlay {
+            RoundedRectangle(cornerRadius: 14)
+                .strokeBorder(
+                    LinearGradient(
+                        colors: [.white.opacity(0.28), .white.opacity(0.06)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ),
+                    lineWidth: 1
+                )
+        }
+    }
+
+    private func downloadsErrorState(_ error: AppError, vm: DownloadsViewModel) -> some View {
+        ScrollView {
+            VStack(spacing: 18) {
+                CinematicStateCard(
+                    accent: .orange,
+                    artworkName: "genre-art-deep",
+                    minHeight: 250
+                ) {
+                    VStack(alignment: .leading, spacing: 16) {
+                        HStack(alignment: .top, spacing: 14) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .font(.system(size: 28, weight: .semibold))
+                                .foregroundStyle(.white)
+                                .frame(width: 52, height: 52)
+                                .background(Color.orange.opacity(0.28), in: Circle())
+                                .overlay {
+                                    Circle()
+                                        .strokeBorder(.white.opacity(0.18), lineWidth: 1)
+                                }
+
+                            VStack(alignment: .leading, spacing: 6) {
+                                GlassTag(text: "Downloads unavailable", tintColor: .orange.opacity(0.24), symbol: "wifi.exclamationmark")
+                                Text(error.errorDescription ?? "Downloads couldn’t load right now.")
+                                    .font(.title3.weight(.semibold))
+                                if let suggestion = error.recoverySuggestion {
+                                    Text(suggestion)
+                                        .font(.subheadline)
+                                        .foregroundStyle(.secondary)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                            }
+
+                            Spacer(minLength: 0)
+                        }
+
+                        FlowLayout(spacing: 10) {
+                            SpatialButton(title: "Retry", icon: "arrow.clockwise", tint: .orange) {
+                                retryRootLoad(vm)
+                            }
+
+                            Button {
+                                appState.selectedTab = .discover
+                            } label: {
+                                GlassTag(text: "Browse Discover", tintColor: .white.opacity(0.18), symbol: "sparkles")
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+                .padding(.top, 12)
+            }
+            .padding(.horizontal, 24)
+            .padding(.vertical, 16)
+            .frame(maxWidth: .infinity)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .refreshable {
+            await vm.load()
         }
     }
 
@@ -79,12 +253,12 @@ struct DownloadsView: View {
                             .resizable()
                             .aspectRatio(2 / 3, contentMode: .fill)
                     case .failure:
-                        posterPlaceholder
+                        posterPlaceholder(for: group)
                     case .empty:
-                        posterPlaceholder
+                        posterPlaceholder(for: group)
                             .overlay { ProgressView().controlSize(.small) }
                     @unknown default:
-                        posterPlaceholder
+                        posterPlaceholder(for: group)
                     }
                 }
                 .frame(width: 60, height: 90)
@@ -208,8 +382,8 @@ struct DownloadsView: View {
                     )
                 }
 
-                if let error = task.errorMessage, !error.isEmpty {
-                    Text(error)
+                if let message = task.errorMessage, !message.isEmpty {
+                    Text(message)
                         .font(.caption2)
                         .foregroundStyle(.red)
                         .lineLimit(2)
@@ -271,7 +445,7 @@ struct DownloadsView: View {
                 }
 
                 Button(role: .destructive) {
-                    Task { await vm.remove(task) }
+                    confirmDeleteTaskID = task.id
                 } label: {
                     Image(systemName: "trash")
                         .font(.body)
@@ -284,6 +458,22 @@ struct DownloadsView: View {
                 #if os(visionOS)
                 .hoverEffect(.highlight)
                 #endif
+                .confirmationDialog(
+                    "Delete Download?",
+                    isPresented: Binding(
+                        get: { confirmDeleteTaskID == task.id },
+                        set: { if !$0 { confirmDeleteTaskID = nil } }
+                    ),
+                    titleVisibility: .visible
+                ) {
+                    Button("Delete", role: .destructive) {
+                        confirmDeleteTaskID = nil
+                        Task { await vm.remove(task) }
+                    }
+                    Button("Cancel", role: .cancel) {}
+                } message: {
+                    Text("This will permanently delete \"\(task.displayTitle)\" from storage.")
+                }
             }
         }
         .padding(.horizontal, 16)
@@ -291,10 +481,21 @@ struct DownloadsView: View {
     }
 
     private func playDownload(_ task: DownloadTask, vm: DownloadsViewModel) {
+        guard task.status == .completed else { return }
+        guard let fileURL = task.destinationURL else {
+            playbackValidationMessage = "The downloaded file for \"\(task.displayTitle)\" is no longer available on disk."
+            Task { await vm.load() }
+            return
+        }
+        guard FileManager.default.fileExists(atPath: fileURL.path) else {
+            playbackValidationMessage = "The downloaded file for \"\(task.displayTitle)\" is no longer available on disk."
+            Task { await vm.load() }
+            return
+        }
+
         #if os(macOS)
         vm.playFile(task)
         #else
-        guard task.status == .completed, let fileURL = task.destinationURL else { return }
         guard appState.activePlayerSession == nil else { return }
         let stream = StreamInfo(
             streamURL: fileURL,
@@ -318,6 +519,36 @@ struct DownloadsView: View {
         #endif
     }
 
+    @MainActor
+    private func performQADownloadActionIfNeeded(_ vm: DownloadsViewModel) async {
+        guard QARuntimeOptions.isEnabled else { return }
+        guard !didPerformQADownloadAction else { return }
+        guard let action = QARuntimeOptions.downloadAction else { return }
+
+        switch action {
+        case .cancelFirstActive:
+            guard let task = vm.tasks.first(where: { !$0.status.isTerminal }) else { return }
+            didPerformQADownloadAction = true
+            await vm.cancel(task)
+        case .retryFirstFailed:
+            guard let task = vm.tasks.first(where: { $0.status == .failed || $0.status == .cancelled }) else { return }
+            didPerformQADownloadAction = true
+            await vm.retry(task)
+        case .removeFirst:
+            guard let task = vm.tasks.first else { return }
+            didPerformQADownloadAction = true
+            await vm.remove(task)
+        case .removeFirstGroup:
+            guard let group = vm.groups.first else { return }
+            didPerformQADownloadAction = true
+            await vm.removeAll(mediaId: group.mediaId)
+        case .playFirstCompleted:
+            guard let task = vm.tasks.first(where: { $0.status == .completed }) else { return }
+            didPerformQADownloadAction = true
+            playDownload(task, vm: vm)
+        }
+    }
+
     private func statusColor(for status: DownloadStatus) -> Color {
         switch status {
         case .completed: return .green
@@ -330,12 +561,24 @@ struct DownloadsView: View {
     }
 
     private func progressText(for task: DownloadTask) -> String {
-        let pct = Int((task.progress * 100).rounded())
+        let normalizedProgress = DownloadProgressPolicy.normalizedProgress(
+            progress: task.progress,
+            bytesWritten: task.bytesWritten,
+            totalBytes: task.totalBytes,
+            status: task.status
+        )
+        let pct = Int((normalizedProgress * 100).rounded())
+
         if let total = task.totalBytes, total > 0 {
             let written = formatBytes(task.bytesWritten)
             let totalText = formatBytes(total)
             return "\(pct)% \u{2022} \(written) / \(totalText)"
         }
+
+        if task.bytesWritten > 0 {
+            return "\(pct)% \u{2022} \(formatBytes(task.bytesWritten))"
+        }
+
         return "\(pct)%"
     }
 
@@ -350,22 +593,74 @@ struct DownloadsView: View {
         Self.byteFormatter.string(fromByteCount: bytes)
     }
 
-    private var posterPlaceholder: some View {
-        RoundedRectangle(cornerRadius: 8)
-            .fill(
-                LinearGradient(
-                    colors: [
-                        Color(red: 0.12, green: 0.10, blue: 0.18),
-                        Color(red: 0.06, green: 0.05, blue: 0.10),
-                    ],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
-            )
-            .overlay {
-                Image(systemName: "film.fill")
-                    .font(.system(size: 16))
-                    .foregroundStyle(.white.opacity(0.3))
+    private var downloadsEmptyState: some View {
+        ScrollView {
+            VStack(spacing: 18) {
+                CinematicStateCard(
+                    accent: .blue,
+                    artworkName: "genre-art-classics",
+                    minHeight: 250
+                ) {
+                    VStack(alignment: .leading, spacing: 16) {
+                        HStack(alignment: .top, spacing: 14) {
+                            Image(systemName: "arrow.down.circle.fill")
+                                .font(.system(size: 28, weight: .semibold))
+                                .foregroundStyle(.white)
+                                .frame(width: 52, height: 52)
+                                .background(Color.blue.opacity(0.28), in: Circle())
+                                .overlay {
+                                    Circle()
+                                        .strokeBorder(.white.opacity(0.18), lineWidth: 1)
+                                }
+
+                            VStack(alignment: .leading, spacing: 6) {
+                                GlassTag(text: "Ready when you are", tintColor: .blue.opacity(0.22), symbol: "sparkles")
+                                Text("Build your offline shelf")
+                                    .font(.title2.weight(.semibold))
+                                Text("Downloaded movies and episodes show up here with progress, retry controls, and one-tap playback. Grab a title from Discover, then download the stream you want to keep.")
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+
+                            Spacer(minLength: 0)
+                        }
+
+                        FlowLayout(spacing: 10) {
+                            SpatialButton(title: "Browse Discover", icon: "sparkles", tint: .vpRed) {
+                                appState.selectedTab = .discover
+                            }
+
+                            Button {
+                                appState.selectedTab = .search
+                            } label: {
+                                GlassTag(text: "Search / AI picks", tintColor: .white.opacity(0.18), symbol: "magnifyingglass")
+                            }
+                            .buttonStyle(.plain)
+
+                            Button {
+                                appState.selectedTab = .library
+                            } label: {
+                                GlassTag(text: "Check Library", tintColor: .white.opacity(0.18), symbol: "books.vertical")
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+                .padding(.top, 12)
             }
+            .padding(.horizontal, 24)
+            .padding(.vertical, 16)
+            .frame(maxWidth: .infinity)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+    }
+
+    private func posterPlaceholder(for group: DownloadMediaGroup) -> some View {
+        ArtworkFallbackPosterView(
+            title: group.mediaTitle.isEmpty ? "Download" : group.mediaTitle,
+            type: group.mediaType == "series" ? .series : .movie,
+            compact: true
+        )
     }
 }

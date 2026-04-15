@@ -51,6 +51,38 @@ struct DiscoverContinueWatchingTests {
         #expect(vm.continueWatching.first?.preview.title == "Test Movie")
     }
 
+    @Test func continueWatchingCarriesEpisodeContextIntoPreview() async throws {
+        let db = try await makeDB()
+        let item = MediaItem(
+            id: "ttyoungpope", type: .series, title: "The Young Pope", year: 2016,
+            posterPath: "/poster.jpg", backdropPath: nil, overview: nil,
+            genres: [], imdbRating: 8.0, runtime: 60, status: nil,
+            tmdbId: 123, lastFetched: Date()
+        )
+        try await db.saveMediaItem(item)
+
+        let history = WatchHistory(
+            id: "ttyoungpope-123-s2e5-history",
+            mediaId: "ttyoungpope",
+            episodeId: "123-s2e5",
+            title: "Episode 5",
+            progress: 1200,
+            duration: 3600,
+            quality: nil,
+            debridService: nil,
+            streamURL: nil,
+            watchedAt: Date(),
+            isCompleted: false
+        )
+        try await db.saveWatchHistory(history)
+
+        let vm = DiscoverViewModel(database: db)
+        await vm.loadContinueWatching()
+
+        #expect(vm.continueWatching.count == 1)
+        #expect(vm.continueWatching.first?.preview.episodeId == "123-s2e5")
+    }
+
     @Test func continueWatchingExcludesCompletedItems() async throws {
         let db = try await makeDB()
         try await seedHistory(db: db, mediaId: "tt1111111", title: "Finished Movie", progress: 7000, duration: 7200, completed: true)
@@ -110,5 +142,64 @@ struct DiscoverContinueWatchingTests {
         await vm.loadContinueWatching()
 
         #expect(vm.continueWatching.count == 10)
+    }
+
+    @Test func lateDatabaseConfigurationRefreshesContinueWatchingAfterInitialLoad() async throws {
+        let db = try await makeDB()
+        try await seedHistory(
+            db: db,
+            mediaId: "tt7654321",
+            title: "Configured Late",
+            progress: 1800,
+            duration: 7200,
+            completed: false
+        )
+
+        let vm = DiscoverViewModel()
+        vm.hasPerformedInitialLoad = true
+        vm.configure(database: db)
+        try? await Task.sleep(for: .milliseconds(25))
+
+        #expect(vm.continueWatching.count == 1)
+        #expect(vm.continueWatching.first?.preview.title == "Configured Late")
+    }
+
+    @Test func continueWatchingNavigationUsesResumePlaybackIntent() {
+        let preview = MediaPreview(
+            id: "ttyoungpope",
+            type: .series,
+            title: "The Young Pope",
+            year: 2016,
+            posterPath: "/poster.jpg",
+            backdropPath: nil,
+            imdbRating: 8.0,
+            tmdbId: 123,
+            episodeId: "123-s2e5",
+            seasonNumber: 2,
+            episodeNumber: 5
+        )
+
+        let route = DiscoverNavigationPolicy.continueWatchingRoute(for: preview)
+
+        #expect(route.preview == preview)
+        #expect(route.initialAction == .resumePlayback)
+    }
+
+    @Test func browseNavigationDoesNotAutoResumePlayback() {
+        let preview = MediaPreview(
+            id: "tt1234567",
+            type: .movie,
+            title: "Test Movie",
+            year: 2025,
+            posterPath: "/poster.jpg",
+            backdropPath: nil,
+            imdbRating: 7.0,
+            tmdbId: 100
+        )
+
+        let route = DiscoverNavigationPolicy.browseRoute(for: preview)
+
+        #expect(route.preview == preview)
+        #expect(route.initialAction == .none)
     }
 }

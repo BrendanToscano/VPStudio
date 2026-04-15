@@ -2,6 +2,43 @@ import Foundation
 import Testing
 @testable import VPStudio
 
+fileprivate func writeTempSubtitle(
+    content: String,
+    fileExtension: String = "srt",
+    encoding: String.Encoding = .utf8,
+    prependBOM: Bool = false
+) throws -> URL {
+    let url = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString)
+        .appendingPathExtension(fileExtension)
+
+    guard let encodedContent = content.data(using: encoding) else {
+        throw NSError(
+            domain: "VPPlayerEngineSubtitleTests",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "Failed to encode test subtitle using \(encoding)"]
+        )
+    }
+
+    var data = Data()
+    if prependBOM {
+        switch encoding {
+        case .utf8:
+            data.append(contentsOf: [0xEF, 0xBB, 0xBF])
+        case .utf16BigEndian:
+            data.append(contentsOf: [0xFE, 0xFF])
+        case .utf16, .utf16LittleEndian:
+            data.append(contentsOf: [0xFF, 0xFE])
+        default:
+            break
+        }
+    }
+    data.append(encodedContent)
+
+    try data.write(to: url, options: .atomic)
+    return url
+}
+
 // MARK: - Subtitle Loading Tests
 
 @Suite("VPPlayerEngine - Subtitle Loading")
@@ -9,11 +46,7 @@ struct VPPlayerEngineSubtitleLoadingTests {
 
     /// Creates a temporary SRT file and returns its file URL.
     private func writeTempSRT(content: String) throws -> URL {
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString)
-            .appendingPathExtension("srt")
-        try content.write(to: url, atomically: true, encoding: .utf8)
-        return url
+        try writeTempSubtitle(content: content)
     }
 
     private let sampleSRT = """
@@ -28,6 +61,12 @@ struct VPPlayerEngineSubtitleLoadingTests {
     3
     00:00:10,500 --> 00:00:13,200
     Third cue with <b>HTML</b> tags.
+    """
+
+    private let latin1SRT = """
+    1
+    00:00:01,000 --> 00:00:04,000
+    Café au lait
     """
 
     @Test @MainActor func loadExternalSubtitlesPopulatesTracks() throws {
@@ -49,6 +88,53 @@ struct VPPlayerEngineSubtitleLoadingTests {
         #expect(engine.subtitleTracks[0].name == "movie.srt")
         #expect(engine.subtitleTracks[0].language == "en")
         #expect(engine.subtitleTracks[0].codec == "srt")
+        #expect(engine.subtitlesEnabled)
+    }
+
+    @Test @MainActor func loadExternalSubtitlesDecodesUTF16SubtitleFiles() throws {
+        let engine = VPPlayerEngine()
+        let url = try writeTempSubtitle(
+            content: sampleSRT,
+            encoding: .utf16LittleEndian,
+            prependBOM: true
+        )
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let subtitle = Subtitle(
+            id: "test-sub-utf16",
+            language: "en",
+            fileName: "movie.srt",
+            url: url.absoluteString,
+            format: .srt
+        )
+
+        engine.loadExternalSubtitles([subtitle])
+        engine.updateSubtitleText(at: 2.0)
+
+        #expect(engine.subtitleTracks.count == 1)
+        #expect(engine.selectedSubtitleTrack == 0)
+        #expect(engine.currentSubtitleText == "Hello, world!")
+    }
+
+    @Test @MainActor func loadExternalSubtitlesDecodesLatin1SubtitleFiles() throws {
+        let engine = VPPlayerEngine()
+        let url = try writeTempSubtitle(content: latin1SRT, encoding: .isoLatin1)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let subtitle = Subtitle(
+            id: "test-sub-latin1",
+            language: "fr",
+            fileName: "movie.srt",
+            url: url.absoluteString,
+            format: .srt
+        )
+
+        engine.loadExternalSubtitles([subtitle])
+        engine.updateSubtitleText(at: 2.0)
+
+        #expect(engine.subtitleTracks.count == 1)
+        #expect(engine.selectedSubtitleTrack == 0)
+        #expect(engine.currentSubtitleText == "Café au lait")
     }
 
     @Test @MainActor func loadExternalSubtitlesAutoSelectsFirstTrack() throws {
@@ -66,6 +152,7 @@ struct VPPlayerEngineSubtitleLoadingTests {
 
         engine.loadExternalSubtitles([subtitle])
         #expect(engine.selectedSubtitleTrack == 0)
+        #expect(engine.subtitlesEnabled)
     }
 
     @Test @MainActor func loadExternalSubtitlesWithEmptyArrayClearsState() {
@@ -77,6 +164,7 @@ struct VPPlayerEngineSubtitleLoadingTests {
         #expect(engine.subtitleTracks.isEmpty)
         #expect(engine.selectedSubtitleTrack == -1)
         #expect(engine.currentSubtitleText == nil)
+        #expect(engine.subtitlesEnabled == false)
     }
 
     @Test @MainActor func loadMultipleExternalSubtitles() throws {
@@ -98,6 +186,33 @@ struct VPPlayerEngineSubtitleLoadingTests {
         #expect(engine.subtitleTracks.count == 2)
         #expect(engine.subtitleTracks[0].language == "en")
         #expect(engine.subtitleTracks[1].language == "es")
+    }
+
+    @Test @MainActor func loadExternalSubtitlesSkipsUnsupportedFormats() throws {
+        let engine = VPPlayerEngine()
+        let url = try writeTempSRT(content: sampleSRT)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let unsupported = Subtitle(
+            id: "unsupported",
+            language: "en",
+            fileName: "movie.txt",
+            url: url.absoluteString,
+            format: .unknown
+        )
+        let supported = Subtitle(
+            id: "supported",
+            language: "en",
+            fileName: "movie.srt",
+            url: url.absoluteString,
+            format: .srt
+        )
+
+        engine.loadExternalSubtitles([unsupported, supported])
+
+        #expect(engine.subtitleTracks.count == 1)
+        #expect(engine.subtitleTracks[0].name == "movie.srt")
+        #expect(engine.subtitlesEnabled)
     }
 
     @Test @MainActor func loadSubtitleWithInvalidURLDoesNotCrash() {

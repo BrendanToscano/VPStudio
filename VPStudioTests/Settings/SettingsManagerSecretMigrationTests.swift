@@ -20,6 +20,7 @@ struct SettingsManagerSecretMigrationTests {
         SettingsKeys.traktAccessToken,
         SettingsKeys.traktRefreshToken,
         SettingsKeys.simklAccessToken,
+        SettingsKeys.simklRefreshToken,
     ]
 
     private static let nonSecretKeys: [String] = [
@@ -88,93 +89,79 @@ struct SettingsManagerSecretMigrationTests {
         BoolCase(storedValue: "off", defaultValue: true, expected: false),
     ]
 
-    @Test(arguments: ExhaustiveMode.choose(fast: Array(migrationCases.prefix(20)), full: migrationCases))
-    func secretMigrationAndRetrieval(data: CaseData) async throws {
+    private func withTempSettingsEnvironment<T>(
+        databaseName: String,
+        _ body: (DatabaseManager, TestSecretStore, SettingsManager) async throws -> T
+    ) async throws -> T {
         let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tempDir) }
 
-        let dbPath = tempDir.appendingPathComponent("settings.sqlite").path
-        let database = try DatabaseManager(path: dbPath)
-        try await database.migrate()
+        let result: T = try await {
+            let dbPath = tempDir.appendingPathComponent(databaseName).path
+            let database = try DatabaseManager(path: dbPath)
+            try await database.migrate()
+            let secretStore = TestSecretStore()
+            let manager = SettingsManager(database: database, secretStore: secretStore)
+            return try await body(database, secretStore, manager)
+        }()
 
-        let secretStore = TestSecretStore()
-        let manager = SettingsManager(database: database, secretStore: secretStore)
+        try? FileManager.default.removeItem(at: tempDir)
+        return result
+    }
 
-        // Write directly to DB to simulate legacy plaintext records.
-        try await database.setSetting(key: data.key, value: data.value)
+    @Test(arguments: ExhaustiveMode.choose(fast: Array(migrationCases.prefix(20)), full: migrationCases))
+    func secretMigrationAndRetrieval(data: CaseData) async throws {
+        try await withTempSettingsEnvironment(databaseName: "settings.sqlite") { database, secretStore, manager in
+            try await database.setSetting(key: data.key, value: data.value)
 
-        let fetched = try await manager.getString(key: data.key)
-        #expect(fetched == data.value)
+            let fetched = try await manager.getString(key: data.key)
+            #expect(fetched == data.value)
 
-        let stored = try await database.getSetting(key: data.key)
-        if data.shouldStoreAsSecret {
-            #expect(stored?.hasPrefix(SecretReference.keychainPrefix) == true)
-            let secret = try await secretStore.getSecret(for: SecretKey.setting(data.key))
-            #expect(secret == data.value)
-        } else {
-            #expect(stored == data.value)
+            let stored = try await database.getSetting(key: data.key)
+            if data.shouldStoreAsSecret {
+                #expect(stored?.hasPrefix(SecretReference.keychainPrefix) == true)
+                let secret = try await secretStore.getSecret(for: SecretKey.setting(data.key))
+                #expect(secret == data.value)
+            } else {
+                #expect(stored == data.value)
+            }
         }
     }
 
     @Test(arguments: boolCases)
     func boolParsingBoundaries(data: BoolCase) async throws {
-        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tempDir) }
-
-        let dbPath = tempDir.appendingPathComponent("settings-bool.sqlite").path
-        let database = try DatabaseManager(path: dbPath)
-        try await database.migrate()
-        let manager = SettingsManager(database: database, secretStore: TestSecretStore())
-
-        try await database.setSetting(key: SettingsKeys.personalizationEnabled, value: data.storedValue)
-        let parsed = try await manager.getBool(key: SettingsKeys.personalizationEnabled, default: data.defaultValue)
-
-        #expect(parsed == data.expected)
+        try await withTempSettingsEnvironment(databaseName: "settings-bool.sqlite") { database, _, manager in
+            try await database.setSetting(key: SettingsKeys.personalizationEnabled, value: data.storedValue)
+            let parsed = try await manager.getBool(key: SettingsKeys.personalizationEnabled, default: data.defaultValue)
+            #expect(parsed == data.expected)
+        }
     }
 
     @Test
     func settingSecretTrimsWhitespaceBeforePersisting() async throws {
-        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tempDir) }
+        try await withTempSettingsEnvironment(databaseName: "settings-trim.sqlite") { _, secretStore, manager in
+            try await manager.setString(key: SettingsKeys.tmdbApiKey, value: "  token-value  ")
 
-        let dbPath = tempDir.appendingPathComponent("settings-trim.sqlite").path
-        let database = try DatabaseManager(path: dbPath)
-        try await database.migrate()
-        let secretStore = TestSecretStore()
-        let manager = SettingsManager(database: database, secretStore: secretStore)
-
-        try await manager.setString(key: SettingsKeys.tmdbApiKey, value: "  token-value  ")
-
-        let persisted = try await manager.getString(key: SettingsKeys.tmdbApiKey)
-        let storedSecret = try await secretStore.getSecret(for: SecretKey.setting(SettingsKeys.tmdbApiKey))
-        #expect(persisted == "token-value")
-        #expect(storedSecret == "token-value")
+            let persisted = try await manager.getString(key: SettingsKeys.tmdbApiKey)
+            let storedSecret = try await secretStore.getSecret(for: SecretKey.setting(SettingsKeys.tmdbApiKey))
+            #expect(persisted == "token-value")
+            #expect(storedSecret == "token-value")
+        }
     }
 
     @Test
     func settingSecretWhitespaceOnlyClearsStoredSecret() async throws {
-        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tempDir) }
+        try await withTempSettingsEnvironment(databaseName: "settings-trim-clear.sqlite") { database, secretStore, manager in
+            try await manager.setString(key: SettingsKeys.tmdbApiKey, value: "token")
+            try await manager.setString(key: SettingsKeys.tmdbApiKey, value: "   ")
 
-        let dbPath = tempDir.appendingPathComponent("settings-trim-clear.sqlite").path
-        let database = try DatabaseManager(path: dbPath)
-        try await database.migrate()
-        let secretStore = TestSecretStore()
-        let manager = SettingsManager(database: database, secretStore: secretStore)
+            let persisted = try await manager.getString(key: SettingsKeys.tmdbApiKey)
+            let raw = try await database.getSetting(key: SettingsKeys.tmdbApiKey)
+            let storedSecret = try await secretStore.getSecret(for: SecretKey.setting(SettingsKeys.tmdbApiKey))
 
-        try await manager.setString(key: SettingsKeys.tmdbApiKey, value: "token")
-        try await manager.setString(key: SettingsKeys.tmdbApiKey, value: "   ")
-
-        let persisted = try await manager.getString(key: SettingsKeys.tmdbApiKey)
-        let raw = try await database.getSetting(key: SettingsKeys.tmdbApiKey)
-        let storedSecret = try await secretStore.getSecret(for: SecretKey.setting(SettingsKeys.tmdbApiKey))
-
-        #expect(persisted == nil)
-        #expect(raw == nil)
-        #expect(storedSecret == nil)
+            #expect(persisted == nil)
+            #expect(raw == nil)
+            #expect(storedSecret == nil)
+        }
     }
 }

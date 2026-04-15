@@ -1,4 +1,5 @@
 #if os(visionOS)
+import Foundation
 import SwiftUI
 import RealityKit
 import ImageIO
@@ -50,6 +51,7 @@ enum ScreenSizePreset: String, CaseIterable, Sendable {
 struct HDRISkyboxEnvironment: View {
     @Environment(AppState.self) private var appState
     @Environment(VPPlayerEngine.self) private var engine
+    @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
 
     @State private var headTracker = HeadTracker()
     @State private var isShowingImmersiveControls = false
@@ -59,6 +61,8 @@ struct HDRISkyboxEnvironment: View {
     @State private var screenSizePreset: ScreenSizePreset = .cinema
     @State private var loadingState: LoadingState = .loading
     @State private var autoDismissTask: Task<Void, Never>?
+    @State private var subtitleEntity: Entity?
+    @State private var subtitleFontSize: Double = 24
 
     /// Tracks the identity of the current video source so we only rebuild the
     /// `VideoMaterial` when the source actually changes — avoids GPU churn on
@@ -116,6 +120,17 @@ struct HDRISkyboxEnvironment: View {
             if let loadingPanel = attachments.entity(for: "loadingIndicator") {
                 loadingPanel.position = SIMD3<Float>(0, 1.6, -4)
                 content.add(loadingPanel)
+            }
+
+            // MARK: Subtitle attachment
+            if let subtitlePanel = attachments.entity(for: "immersiveSubtitle") {
+                subtitlePanel.position = SIMD3<Float>(
+                    0,
+                    screen.position.y - preset.subtitleVerticalOffset,
+                    screen.position.z
+                )
+                content.add(subtitlePanel)
+                subtitleEntity = subtitlePanel
             }
 
             // MARK: Async HDRI load
@@ -238,12 +253,26 @@ struct HDRISkyboxEnvironment: View {
                 let col3 = initial.columns.3
                 let headPos = SIMD3<Float>(col3.x, col3.y, col3.z)
                 let col2 = initial.columns.2
-                let forward = normalize(SIMD3<Float>(-col2.x, 0, -col2.z))
+                let forward = safeHorizontalForward(from: col2)
                 let dist = screenSizePreset.distance
                 let screenPos = headPos + forward * dist
                 let finalScreenPos = SIMD3<Float>(screenPos.x, headPos.y, screenPos.z)
                 screen.look(at: headPos, from: finalScreenPos, relativeTo: nil, forward: .positiveZ)
                 didAnchorScreenToHead = true
+            }
+
+            // MARK: Subtitle position tracking
+            if let subEnt = attachments.entity(for: "immersiveSubtitle"),
+               let screen = cinemaScreen {
+                let preset = screenSizePreset
+                subEnt.position = SIMD3<Float>(
+                    screen.position.x,
+                    screen.position.y - preset.subtitleVerticalOffset,
+                    screen.position.z
+                )
+                // Match the screen's orientation so subtitles face the viewer.
+                subEnt.orientation = screen.orientation
+                subtitleEntity = subEnt
             }
 
             // MARK: Controls anchor tracking
@@ -257,7 +286,7 @@ struct HDRISkyboxEnvironment: View {
                         col3.z
                     )
                     let col2 = m.columns.2
-                    let forward = normalize(SIMD3<Float>(-col2.x, 0, -col2.z))
+                    let forward = safeHorizontalForward(from: col2)
                     let target = headPos + forward * ImmersiveControlsPolicy.controlsForwardOffset
                     let smoothing = ImmersiveControlsPolicy.controlsAnchorSmoothing
                     anchor.position = simd_mix(
@@ -289,6 +318,18 @@ struct HDRISkyboxEnvironment: View {
                     EmptyView()
                 }
             }
+
+            Attachment(id: "immersiveSubtitle") {
+                if let subtitleText = engine.currentSubtitleText, !subtitleText.isEmpty {
+                    ImmersiveSubtitleRenderer(
+                        text: subtitleText,
+                        fontSize: subtitleFontSize,
+                        maxWidth: screenSizePreset.subtitleMaxWidth
+                    )
+                    .transition(.opacity)
+                    .animation(accessibilityReduceMotion ? nil : .easeInOut(duration: 0.15), value: subtitleText)
+                }
+            }
         }
         .gesture(
             TapGesture()
@@ -299,7 +340,7 @@ struct HDRISkyboxEnvironment: View {
         )
         .preferredSurroundingsEffect(.systemDark)
         .onReceive(NotificationCenter.default.publisher(for: .immersiveTapCatcherDidFire)) { _ in
-            withAnimation(.easeInOut(duration: 0.25)) {
+            performOptionalAnimation(.easeInOut(duration: 0.25)) {
                 isShowingImmersiveControls.toggle()
             }
             headTracker.isIdle = !isShowingImmersiveControls
@@ -324,6 +365,7 @@ struct HDRISkyboxEnvironment: View {
         .onAppear {
             appState.immersiveSpaceDidAppear(.hdriSkybox)
             headTracker.start()
+            Task { await loadSubtitleAppearance() }
         }
         .onDisappear {
             autoDismissTask?.cancel()
@@ -334,6 +376,7 @@ struct HDRISkyboxEnvironment: View {
             // Explicit cleanup to break any lingering RealityKit references.
             cinemaScreen = nil
             controlsAnchor = nil
+            subtitleEntity = nil
             lastMaterialSourceID = nil
             didAnchorScreenToHead = false
         }
@@ -357,7 +400,7 @@ struct HDRISkyboxEnvironment: View {
             let col3 = initial.columns.3
             headPos = SIMD3<Float>(col3.x, col3.y, col3.z)
             let col2 = initial.columns.2
-            let forward = normalize(SIMD3<Float>(-col2.x, 0, -col2.z))
+            let forward = safeHorizontalForward(from: col2)
             let newPos = headPos + forward * newPreset.distance
             targetPos = SIMD3<Float>(newPos.x, headPos.y, newPos.z)
         } else {
@@ -369,7 +412,7 @@ struct HDRISkyboxEnvironment: View {
         // Compute target transform with proper facing via look(at:).
         let temp = Entity()
         temp.look(at: headPos, from: targetPos, relativeTo: nil, forward: .positiveZ)
-        screen.move(to: temp.transform, relativeTo: nil, duration: 0.4)
+        screen.move(to: temp.transform, relativeTo: nil, duration: accessibilityReduceMotion ? 0 : 0.4)
     }
 
     // MARK: - Auto-Dismiss
@@ -382,11 +425,35 @@ struct HDRISkyboxEnvironment: View {
         autoDismissTask = Task {
             try? await Task.sleep(for: ImmersiveControlsPolicy.autoDismissInterval)
             guard !Task.isCancelled else { return }
-            withAnimation(.easeInOut(duration: 0.25)) {
+            performOptionalAnimation(.easeInOut(duration: 0.25)) {
                 isShowingImmersiveControls = false
             }
             headTracker.isIdle = true
         }
+    }
+
+    private func performOptionalAnimation(_ animation: Animation, updates: () -> Void) {
+        if accessibilityReduceMotion {
+            updates()
+        } else {
+            withAnimation(animation, updates)
+        }
+    }
+
+    @MainActor
+    private func loadSubtitleAppearance() async {
+        let storedSize = (try? await appState.settingsManager.getString(key: SettingsKeys.subtitleFontSize))
+            .flatMap(Double.init)
+        subtitleFontSize = storedSize.map { max(16, min(48, $0)) } ?? screenSizePreset.subtitleFontSize
+    }
+
+    private func safeHorizontalForward(from column: SIMD4<Float>) -> SIMD3<Float> {
+        let candidate = SIMD3<Float>(-column.x, 0, -column.z)
+        let lengthSquared = candidate.x * candidate.x + candidate.y * candidate.y + candidate.z * candidate.z
+        guard lengthSquared > .leastNonzeroMagnitude else {
+            return SIMD3<Float>(0, 0, -1)
+        }
+        return candidate / sqrt(lengthSquared)
     }
 
     // MARK: - Loading / Error Views

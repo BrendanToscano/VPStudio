@@ -30,6 +30,7 @@ struct TraktSettingsView: View {
     @State private var clientSecret = ""
     @State private var clientIdSaveTask: Task<Void, Never>?
     @State private var clientSecretSaveTask: Task<Void, Never>?
+    @State private var confirmDisconnect = false
 
     var body: some View {
         Form {
@@ -42,42 +43,33 @@ struct TraktSettingsView: View {
         }
         .navigationTitle("Trakt")
         .task {
-            clientId = (try? await appState.settingsManager.getString(key: SettingsKeys.traktClientId)) ?? ""
-            clientSecret = (try? await appState.settingsManager.getString(key: SettingsKeys.traktClientSecret)) ?? ""
-            if let token = try? await appState.settingsManager.getString(key: SettingsKeys.traktAccessToken),
-               !token.isEmpty {
-                isConnected = true
-                statusMessage = "Connected to Trakt."
-            }
-            autoScrobble = (try? await appState.settingsManager.getBool(key: SettingsKeys.traktAutoScrobble, default: true)) ?? true
-            syncWatchlist = (try? await appState.settingsManager.getBool(key: SettingsKeys.traktSyncWatchlist, default: true)) ?? true
-            syncHistory = (try? await appState.settingsManager.getBool(key: SettingsKeys.traktSyncHistory, default: true)) ?? true
-            syncRatings = (try? await appState.settingsManager.getBool(key: SettingsKeys.traktSyncRatings, default: true)) ?? true
-            syncFolders = (try? await appState.settingsManager.getBool(key: SettingsKeys.traktSyncFolders, default: false)) ?? false
-            lastSyncDate = try? await appState.settingsManager.getString(key: SettingsKeys.traktLastSyncDate)
+            await reloadPersistedState()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .settingsDidChange)) { _ in
+            Task { await reloadPersistedState() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .appDidResetAllData)) { _ in
+            Task { await reloadPersistedState() }
         }
         .onDisappear {
             pollTask?.cancel()
             pollTask = nil
-            clientIdSaveTask?.cancel()
-            clientIdSaveTask = nil
-            clientSecretSaveTask?.cancel()
-            clientSecretSaveTask = nil
+            flushPendingClientCredentialSaves()
         }
         .onChange(of: autoScrobble) { _, newValue in
-            Task { try? await appState.settingsManager.setBool(key: SettingsKeys.traktAutoScrobble, value: newValue) }
+            Task { await persistBool(newValue, key: SettingsKeys.traktAutoScrobble) }
         }
         .onChange(of: syncWatchlist) { _, newValue in
-            Task { try? await appState.settingsManager.setBool(key: SettingsKeys.traktSyncWatchlist, value: newValue) }
+            Task { await persistBool(newValue, key: SettingsKeys.traktSyncWatchlist) }
         }
         .onChange(of: syncHistory) { _, newValue in
-            Task { try? await appState.settingsManager.setBool(key: SettingsKeys.traktSyncHistory, value: newValue) }
+            Task { await persistBool(newValue, key: SettingsKeys.traktSyncHistory) }
         }
         .onChange(of: syncRatings) { _, newValue in
-            Task { try? await appState.settingsManager.setBool(key: SettingsKeys.traktSyncRatings, value: newValue) }
+            Task { await persistBool(newValue, key: SettingsKeys.traktSyncRatings) }
         }
         .onChange(of: syncFolders) { _, newValue in
-            Task { try? await appState.settingsManager.setBool(key: SettingsKeys.traktSyncFolders, value: newValue) }
+            Task { await persistBool(newValue, key: SettingsKeys.traktSyncFolders) }
         }
         .alert(
             "Trakt Error",
@@ -89,6 +81,18 @@ struct TraktSettingsView: View {
             Button("OK", role: .cancel) {}
         } message: {
             Text(errorMessage ?? "Unknown error")
+        }
+        .confirmationDialog(
+            "Disconnect Trakt?",
+            isPresented: $confirmDisconnect,
+            titleVisibility: .visible
+        ) {
+            Button("Disconnect", role: .destructive) {
+                disconnect()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This stops Trakt sync and scrobbling for this app until you sign in again.")
         }
     }
 
@@ -106,7 +110,7 @@ struct TraktSettingsView: View {
                         .foregroundStyle(.secondary)
                 }
                 Button("Disconnect", role: .destructive) {
-                    disconnect()
+                    confirmDisconnect = true
                 }
             } else if isAuthenticating, let code = deviceUserCode, let urlString = deviceVerificationURL {
                 VStack(alignment: .leading, spacing: 12) {
@@ -135,6 +139,8 @@ struct TraktSettingsView: View {
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.small)
+                        .accessibilityLabel("Copy Trakt device code")
+                        .accessibilityHint("Copies the authorization code to the clipboard.")
                     }
 
                     Button {
@@ -151,7 +157,7 @@ struct TraktSettingsView: View {
                         .controlSize(.small)
                 }
 
-                Button("Cancel", role: .destructive) {
+                Button("Cancel", role: .cancel) {
                     cancelDeviceFlow()
                 }
             } else {
@@ -229,10 +235,17 @@ struct TraktSettingsView: View {
     private var advancedSection: some View {
         Section {
             DisclosureGroup("Trakt API Credentials", isExpanded: $showAdvanced) {
-                TextField("Client ID", text: $clientId)
+                HStack {
+                    TextField("Client ID", text: $clientId)
+                    PasteFieldButton { clientId = $0 }
+                        .accessibilityLabel("Paste Trakt client ID from clipboard")
+                        .accessibilityHint("Pastes the Trakt client ID into the field.")
+                }
                 HStack {
                     SecureField("Client Secret", text: $clientSecret)
                     PasteFieldButton { clientSecret = $0 }
+                        .accessibilityLabel("Paste Trakt client secret from clipboard")
+                        .accessibilityHint("Pastes the Trakt client secret into the field.")
                 }
 
                 Text(TraktDefaults.hasBundledCredentials
@@ -247,7 +260,7 @@ struct TraktSettingsView: View {
             clientIdSaveTask = Task {
                 try? await Task.sleep(for: .milliseconds(500))
                 guard !Task.isCancelled else { return }
-                try? await appState.settingsManager.setString(key: SettingsKeys.traktClientId, value: newValue)
+                await persistString(newValue, key: SettingsKeys.traktClientId)
             }
         }
         .onChange(of: clientSecret) { _, newValue in
@@ -255,7 +268,7 @@ struct TraktSettingsView: View {
             clientSecretSaveTask = Task {
                 try? await Task.sleep(for: .milliseconds(500))
                 guard !Task.isCancelled else { return }
-                try? await appState.settingsManager.setString(key: SettingsKeys.traktClientSecret, value: newValue)
+                await persistString(newValue, key: SettingsKeys.traktClientSecret)
             }
         }
     }
@@ -282,6 +295,7 @@ struct TraktSettingsView: View {
 
         do {
             let deviceCode = try await service.requestDeviceCode()
+            errorMessage = nil
             isAuthenticating = true
             deviceUserCode = deviceCode.userCode
             deviceVerificationURL = deviceCode.verificationUrl
@@ -329,20 +343,32 @@ struct TraktSettingsView: View {
                     pollInterval += 1
                     continue
                 case .success(let access, let refresh):
-                    try? await appState.settingsManager.setString(key: SettingsKeys.traktAccessToken, value: access)
-                    try? await appState.settingsManager.setString(key: SettingsKeys.traktRefreshToken, value: refresh)
-                    isConnected = true
+                    do {
+                        try await appState.settingsManager.setString(key: SettingsKeys.traktAccessToken, value: access)
+                        try await appState.settingsManager.setString(key: SettingsKeys.traktRefreshToken, value: refresh)
+                        NotificationCenter.default.post(name: .settingsDidChange, object: nil)
+                        errorMessage = nil
+                        isConnected = true
+                        isAuthenticating = false
+                        deviceUserCode = nil
+                        deviceVerificationURL = nil
+                        statusMessage = "Connected to Trakt."
+                        return
+                    } catch {
+                        isAuthenticating = false
+                        deviceUserCode = nil
+                        deviceVerificationURL = nil
+                        errorMessage = error.localizedDescription
+                        return
+                    }
+                }
+            } catch {
+                await MainActor.run {
                     isAuthenticating = false
                     deviceUserCode = nil
                     deviceVerificationURL = nil
-                    statusMessage = "Connected to Trakt."
-                    return
+                    errorMessage = error.localizedDescription
                 }
-            } catch {
-                isAuthenticating = false
-                deviceUserCode = nil
-                deviceVerificationURL = nil
-                errorMessage = error.localizedDescription
                 return
             }
         }
@@ -366,14 +392,61 @@ struct TraktSettingsView: View {
     private func disconnect() {
         pollTask?.cancel()
         pollTask = nil
-        isConnected = false
-        isAuthenticating = false
-        deviceUserCode = nil
-        deviceVerificationURL = nil
-        statusMessage = nil
         Task {
-            try? await appState.settingsManager.setString(key: SettingsKeys.traktAccessToken, value: nil)
-            try? await appState.settingsManager.setString(key: SettingsKeys.traktRefreshToken, value: nil)
+            do {
+                try await appState.disconnectTrakt()
+                await MainActor.run {
+                    isConnected = false
+                    isAuthenticating = false
+                    deviceUserCode = nil
+                    deviceVerificationURL = nil
+                    statusMessage = nil
+                    errorMessage = nil
+                }
+            } catch {
+                await MainActor.run {
+                    errorMessage = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    @MainActor
+    private func reloadPersistedState() async {
+        clientId = (try? await appState.settingsManager.getString(key: SettingsKeys.traktClientId)) ?? ""
+        clientSecret = (try? await appState.settingsManager.getString(key: SettingsKeys.traktClientSecret)) ?? ""
+
+        if let token = try? await appState.settingsManager.getString(key: SettingsKeys.traktAccessToken),
+           !token.isEmpty {
+            isConnected = true
+            statusMessage = "Connected to Trakt."
+        } else {
+            isConnected = false
+            statusMessage = nil
+            isAuthenticating = false
+            deviceUserCode = nil
+            deviceVerificationURL = nil
+        }
+
+        autoScrobble = (try? await appState.settingsManager.getBool(key: SettingsKeys.traktAutoScrobble, default: true)) ?? true
+        syncWatchlist = (try? await appState.settingsManager.getBool(key: SettingsKeys.traktSyncWatchlist, default: true)) ?? true
+        syncHistory = (try? await appState.settingsManager.getBool(key: SettingsKeys.traktSyncHistory, default: true)) ?? true
+        syncRatings = (try? await appState.settingsManager.getBool(key: SettingsKeys.traktSyncRatings, default: true)) ?? true
+        syncFolders = (try? await appState.settingsManager.getBool(key: SettingsKeys.traktSyncFolders, default: false)) ?? false
+        lastSyncDate = try? await appState.settingsManager.getString(key: SettingsKeys.traktLastSyncDate)
+    }
+
+    private func flushPendingClientCredentialSaves() {
+        clientIdSaveTask?.cancel()
+        clientIdSaveTask = nil
+        clientSecretSaveTask?.cancel()
+        clientSecretSaveTask = nil
+
+        let pendingClientId = clientId
+        let pendingClientSecret = clientSecret
+        Task {
+            await persistString(pendingClientId, key: SettingsKeys.traktClientId)
+            await persistString(pendingClientSecret, key: SettingsKeys.traktClientSecret)
         }
     }
 
@@ -385,12 +458,11 @@ struct TraktSettingsView: View {
         syncResultMessage = nil
         defer { isSyncing = false }
 
-        guard let orchestrator = await appState.makeTraktSyncOrchestrator() else {
+        guard let result = await appState.performTraktSyncAndRefreshLocalState() else {
             syncResultMessage = "Cannot sync: Trakt credentials are missing."
             return
         }
 
-        let result = await orchestrator.sync()
         syncResultMessage = result.summary
         lastSyncDate = try? await appState.settingsManager.getString(key: SettingsKeys.traktLastSyncDate)
     }
@@ -401,5 +473,33 @@ struct TraktSettingsView: View {
         let relative = RelativeDateTimeFormatter()
         relative.unitsStyle = .abbreviated
         return relative.localizedString(for: date, relativeTo: Date())
+    }
+
+    private func persistBool(_ value: Bool, key: String) async {
+        do {
+            await MainActor.run {
+                errorMessage = nil
+            }
+            try await appState.settingsManager.setBool(key: key, value: value)
+            NotificationCenter.default.post(name: .settingsDidChange, object: nil)
+        } catch {
+            await MainActor.run {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func persistString(_ value: String?, key: String) async {
+        do {
+            await MainActor.run {
+                errorMessage = nil
+            }
+            try await appState.settingsManager.setString(key: key, value: value)
+            NotificationCenter.default.post(name: .settingsDidChange, object: nil)
+        } catch {
+            await MainActor.run {
+                errorMessage = error.localizedDescription
+            }
+        }
     }
 }

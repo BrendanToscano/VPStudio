@@ -569,6 +569,16 @@ struct LibraryCSVImportServiceTests {
         }
     }
 
+    @Test
+    func importServiceStagesWritesInsideSingleDatabaseTransaction() throws {
+        let source = try contents(of: "VPStudio/Services/Import/LibraryCSVImportService.swift")
+
+        #expect(source.contains("database.writeInTransaction"))
+        #expect(source.contains("DatabaseManager.applyTasteEventsRetentionPolicy(in: db"))
+        #expect(source.contains("database.applyTasteEventsRetentionPolicy") == false)
+        #expect(source.contains("return transactionalSummary"))
+    }
+
     private func makeTemporaryDatabase(named fileName: String) async throws -> (DatabaseManager, URL) {
         let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
@@ -582,5 +592,20 @@ struct LibraryCSVImportServiceTests {
         let fileURL = directory.appendingPathComponent(name)
         try content.write(to: fileURL, atomically: true, encoding: .utf8)
         return fileURL
+    }
+
+    private func contents(of relativePath: String) throws -> String {
+        let absolutePath = repoRootURL().appendingPathComponent(relativePath).path
+        return try String(contentsOfFile: absolutePath, encoding: .utf8)
+    }
+
+    private func repoRootURL() -> URL {
+        var url = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        while !FileManager.default.fileExists(atPath: url.appendingPathComponent("Package.swift").path) {
+            let parent = url.deletingLastPathComponent()
+            if parent.path == url.path { break }
+            url = parent
+        }
+        return url
     }
 }

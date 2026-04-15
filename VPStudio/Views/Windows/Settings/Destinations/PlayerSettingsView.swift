@@ -15,9 +15,17 @@ struct PlayerSettingsView: View {
     @State private var hdrPreference: HDRPreference = .auto
     @State private var runtimeDiagnosticsEnabled = false
     @State private var navigationLayout: NavigationLayout = .bottomTabBar
+    @State private var surfaceError: AppError?
 
     var body: some View {
         Form {
+            if let surfaceError {
+                Section {
+                    SettingsErrorBanner(error: surfaceError)
+                }
+            }
+
+            quickStartSection
             navigationSection
             qualitySection
             playbackSection
@@ -65,6 +73,18 @@ struct PlayerSettingsView: View {
         }
     }
 
+    private var quickStartSection: some View {
+        Section("Quick Start") {
+            Text("Recommended defaults: Engine Mode = Compatibility, Prefer Cached Streams = On, Quality = 1080p.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Text("If playback fails, switch Engine Mode to Adaptive and retry the same title.")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        }
+    }
+
     private var navigationSection: some View {
         Section("Navigation") {
             Picker("Layout", selection: $navigationLayout) {
@@ -109,6 +129,10 @@ struct PlayerSettingsView: View {
             Text(playerEngineStrategy.summary)
                 .font(.caption)
                 .foregroundStyle(.secondary)
+
+            Text("Tip: Compatibility is the safest. Adaptive is best when you want automatic fallback between engines.")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
         }
     }
 
@@ -127,6 +151,19 @@ struct PlayerSettingsView: View {
                     text: $externalPlayerTemplate,
                     prompt: Text("player://open?url={url}")
                 )
+
+                switch ExternalPlayerRouting.validationResult(forCustomTemplate: externalPlayerTemplate) {
+                case .empty:
+                    EmptyView()
+                case .valid:
+                    Text("Use {url} for the stream URL. VPStudio percent-encodes it before launch.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                case .invalid(let message):
+                    Text(message)
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                }
             }
 
             Text(externalPlayerApp.summary)
@@ -172,7 +209,7 @@ struct PlayerSettingsView: View {
         playerEngineStrategy = PlayerEngineStrategy(rawValue: strategyRaw) ?? .compatibility
         let externalPreference = await ExternalPlayerSettings.loadPreference(from: appState.settingsManager)
         externalPlayerApp = externalPreference.app
-        externalPlayerTemplate = externalPreference.customURLTemplate ?? ""
+        externalPlayerTemplate = ExternalPlayerRouting.normalizedCustomTemplate(externalPreference.customURLTemplate) ?? ""
         preferCached = (try? await appState.settingsManager.getBool(key: SettingsKeys.preferCachedStreams, default: true)) ?? true
         preferAtmos = (try? await appState.settingsManager.getBool(key: SettingsKeys.preferAtmosAudio, default: true)) ?? true
         if let storedHDR = (try? await appState.settingsManager.getString(key: SettingsKeys.preferredHDRFormat)),
@@ -195,54 +232,101 @@ struct PlayerSettingsView: View {
     }
 
     private func savePreferredQuality(_ value: VideoQuality) {
-        Task { try? await appState.settingsManager.setString(key: SettingsKeys.preferredQuality, value: value.rawValue) }
+        persistStringSetting(key: SettingsKeys.preferredQuality, value: value.rawValue)
     }
 
     private func saveAutoPlay(_ value: Bool) {
-        Task { try? await appState.settingsManager.setBool(key: SettingsKeys.autoPlayNext, value: value) }
+        persistBoolSetting(key: SettingsKeys.autoPlayNext, value: value)
     }
 
     private func saveHardwareDecoding(_ value: Bool) {
-        Task { try? await appState.settingsManager.setBool(key: SettingsKeys.hardwareDecoding, value: value) }
+        persistBoolSetting(key: SettingsKeys.hardwareDecoding, value: value)
     }
 
     private func savePlayerEngineStrategy(_ value: PlayerEngineStrategy) {
-        Task { try? await appState.settingsManager.setString(key: SettingsKeys.playerEngineStrategy, value: value.rawValue) }
+        persistStringSetting(key: SettingsKeys.playerEngineStrategy, value: value.rawValue)
     }
 
     private func saveExternalPlayerApp(_ value: ExternalPlayerApp) {
-        Task { try? await appState.settingsManager.setString(key: SettingsKeys.externalPlayerApp, value: value.rawValue) }
+        persistStringSetting(key: SettingsKeys.externalPlayerApp, value: value.rawValue)
     }
 
     private func saveExternalPlayerTemplate(_ value: String) {
-        Task {
-            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-            try? await appState.settingsManager.setString(
-                key: SettingsKeys.externalPlayerURLTemplate,
-                value: trimmed.isEmpty ? nil : trimmed
-            )
-        }
+        let trimmed = ExternalPlayerRouting.normalizedCustomTemplate(value)
+        persistStringSetting(key: SettingsKeys.externalPlayerURLTemplate, value: trimmed)
     }
 
     private func savePreferCached(_ value: Bool) {
-        Task { try? await appState.settingsManager.setBool(key: SettingsKeys.preferCachedStreams, value: value) }
+        persistBoolSetting(key: SettingsKeys.preferCachedStreams, value: value)
     }
 
     private func savePreferAtmos(_ value: Bool) {
-        Task { try? await appState.settingsManager.setBool(key: SettingsKeys.preferAtmosAudio, value: value) }
+        persistBoolSetting(key: SettingsKeys.preferAtmosAudio, value: value)
     }
 
     private func saveHDRPreference(_ value: HDRPreference) {
-        Task { try? await appState.settingsManager.setString(key: SettingsKeys.preferredHDRFormat, value: value.rawValue) }
+        persistStringSetting(key: SettingsKeys.preferredHDRFormat, value: value.rawValue)
     }
 
     private func saveRuntimeDiagnosticsEnabled(_ value: Bool) {
-        appState.runtimeDiagnosticsEnabled = value
-        Task { try? await appState.settingsManager.setBool(key: SettingsKeys.runtimeDiagnosticsEnabled, value: value) }
+        Task {
+            do {
+                try await appState.settingsManager.setBool(key: SettingsKeys.runtimeDiagnosticsEnabled, value: value)
+                await MainActor.run {
+                    appState.runtimeDiagnosticsEnabled = value
+                    surfaceError = nil
+                }
+            } catch {
+                await MainActor.run {
+                    surfaceError = AppError(error)
+                }
+            }
+        }
     }
 
     private func saveNavigationLayout(_ value: NavigationLayout) {
-        appState.navigationLayout = value
-        Task { try? await appState.settingsManager.setString(key: SettingsKeys.navigationLayout, value: value.rawValue) }
+        Task {
+            do {
+                try await appState.settingsManager.setString(key: SettingsKeys.navigationLayout, value: value.rawValue)
+                await MainActor.run {
+                    appState.navigationLayout = value
+                    surfaceError = nil
+                }
+            } catch {
+                await MainActor.run {
+                    surfaceError = AppError(error)
+                }
+            }
+        }
+    }
+
+    private func persistBoolSetting(key: String, value: Bool) {
+        Task {
+            do {
+                try await appState.settingsManager.setBool(key: key, value: value)
+                await MainActor.run {
+                    surfaceError = nil
+                }
+            } catch {
+                await MainActor.run {
+                    surfaceError = AppError(error)
+                }
+            }
+        }
+    }
+
+    private func persistStringSetting(key: String, value: String?) {
+        Task {
+            do {
+                try await appState.settingsManager.setString(key: key, value: value)
+                await MainActor.run {
+                    surfaceError = nil
+                }
+            } catch {
+                await MainActor.run {
+                    surfaceError = AppError(error)
+                }
+            }
+        }
     }
 }

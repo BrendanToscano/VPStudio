@@ -261,36 +261,13 @@ struct ScrobbleCoordinatorActiveTests {
 
         let tracker = RequestTracker()
         let session = makeTrackingSession(tracker: tracker)
-
-        // We need TraktSyncService to use our stub session. Since ScrobbleCoordinator
-        // constructs TraktSyncService internally, we verify behavior indirectly:
-        // the coordinator reads settings, creates TraktSyncService, and calls
-        // startScrobble. If the coordinator is properly enabled, the TraktSyncService
-        // will attempt an HTTP POST to /scrobble/start.
-        //
-        // However, TraktSyncService uses URLSession.shared by default when created
-        // by the coordinator, so we cannot intercept those calls without modifying
-        // the coordinator's init.
-        //
-        // Instead, we verify the coordinator's state-gating logic by confirming it
-        // does NOT bail early (the isTraktScrobbleEnabled and traktServiceIfAvailable
-        // guards pass). We test this by checking the coordinator does proceed past
-        // the guards for a fully-configured setup.
-        //
-        // This is a design limitation test: confirm the coordinator reads settings
-        // correctly and only proceeds when everything is configured.
-        let coordinator = ScrobbleCoordinator(settingsManager: settings, secretStore: secretStore)
+        let coordinator = ScrobbleCoordinator(
+            settingsManager: settings,
+            secretStore: secretStore,
+            session: session
+        )
         await coordinator.startPlayback(mediaId: "tt1234567", mediaType: .movie, progress: 5.0)
-
-        // After startPlayback with valid settings, the coordinator should have set
-        // isScrobbling = true (internal state). We verify by calling pause -- if the
-        // start didn't set isScrobbling, pause would be a no-op.
-        // We can confirm the coordinator accepted the session by calling stop and
-        // seeing it resets state (it won't crash or no-op).
-        await coordinator.stopPlayback(progress: 10.0)
-
-        // Call pause again -- should be a no-op since we stopped
-        await coordinator.pausePlayback(progress: 15.0)
+        #expect(tracker.contains("/scrobble/start"))
     }
 
     @Test("pausePlayback only works after startPlayback has been called")
@@ -439,6 +416,26 @@ struct ScrobbleCoordinatorHistoryTests {
         // 100% completion should definitely trigger history
         await coordinator.stopPlayback(progress: 100.0)
     }
+
+    @Test("stopPlayback treats 0...1 progress as completion percentage for history sync")
+    func fractionalProgressTriggersHistoryWhenPastThreshold() async throws {
+        let (settings, secretStore) = try await makeSettingsManager()
+        try await enableTraktScrobble(settings: settings)
+        try await settings.setBool(key: SettingsKeys.traktSyncHistory, value: true)
+
+        let tracker = RequestTracker()
+        let session = makeTrackingSession(tracker: tracker)
+        let coordinator = ScrobbleCoordinator(
+            settingsManager: settings,
+            secretStore: secretStore,
+            session: session
+        )
+
+        await coordinator.startPlayback(mediaId: "ttfractional", mediaType: .movie, progress: 0)
+        await coordinator.stopPlayback(progress: 0.85)
+
+        #expect(tracker.contains("/sync/history"))
+    }
 }
 
 @Suite("ScrobbleCoordinator - Settings Gate Logic", .serialized)
@@ -500,6 +497,53 @@ struct ScrobbleCoordinatorSettingsGateTests {
         await coordinator.pausePlayback(progress: 30.0)
     }
 
+    @Test("coordinator revalidates persisted tokens before using a cached Trakt service")
+    func tokenRemovalBlocksCachedScrobbleSession() async throws {
+        let (settings, secretStore) = try await makeSettingsManager()
+        try await enableTraktScrobble(settings: settings)
+
+        let tracker = RequestTracker()
+        let session = makeTrackingSession(tracker: tracker)
+        let coordinator = ScrobbleCoordinator(
+            settingsManager: settings,
+            secretStore: secretStore,
+            session: session
+        )
+
+        await coordinator.startPlayback(mediaId: "tt1234567", mediaType: .movie, progress: 0)
+        #expect(tracker.paths.filter { $0.contains("/scrobble/start") }.count == 1)
+
+        try await settings.setString(key: SettingsKeys.traktAccessToken, value: nil)
+        try await settings.setString(key: SettingsKeys.traktRefreshToken, value: nil)
+
+        await coordinator.stopPlayback(progress: 45.0)
+
+        #expect(tracker.paths.filter { $0.contains("/scrobble/stop") }.isEmpty)
+    }
+
+    @Test("invalidateTraktSession clears cached playback state and stops follow-up scrobbles")
+    func invalidateTraktSessionClearsCachedState() async throws {
+        let (settings, secretStore) = try await makeSettingsManager()
+        try await enableTraktScrobble(settings: settings)
+
+        let tracker = RequestTracker()
+        let session = makeTrackingSession(tracker: tracker)
+        let coordinator = ScrobbleCoordinator(
+            settingsManager: settings,
+            secretStore: secretStore,
+            session: session
+        )
+
+        await coordinator.startPlayback(mediaId: "tt1234567", mediaType: .movie, progress: 0)
+        #expect(tracker.contains("/scrobble/start"))
+
+        await coordinator.invalidateTraktSession()
+        await coordinator.stopPlayback(progress: 95.0)
+
+        #expect(tracker.paths.filter { $0.contains("/scrobble/stop") }.isEmpty)
+        #expect(await coordinator.lastErrorMessage == nil)
+    }
+
     @Test("coordinator works with movie and series media types")
     func bothMediaTypesWork() async throws {
         let (settings, secretStore) = try await makeSettingsManager()
@@ -525,16 +569,88 @@ struct ScrobbleCoordinatorErrorResilienceTests {
         let (settings, secretStore) = try await makeSettingsManager()
         try await enableTraktScrobble(settings: settings)
 
-        // The coordinator will create a TraktSyncService that uses URLSession.shared
-        // which will fail to reach api.trakt.tv in a test environment. The coordinator
-        // should swallow these network errors gracefully.
-        let coordinator = ScrobbleCoordinator(settingsManager: settings, secretStore: secretStore)
+        let session = makeScrobbleStubSession { request in
+            let url = request.url!
+            let response = HTTPURLResponse(url: url, statusCode: 500, httpVersion: nil, headerFields: nil)!
+            return (response, Data())
+        }
+
+        let coordinator = ScrobbleCoordinator(
+            settingsManager: settings,
+            secretStore: secretStore,
+            session: session
+        )
         await coordinator.startPlayback(mediaId: "tt1234567", mediaType: .movie, progress: 0)
+        let lastError = await coordinator.lastErrorMessage
+        #expect(lastError?.contains("start scrobble failed") == true)
 
         // Even if startScrobble fails, subsequent calls should not crash
         await coordinator.pausePlayback(progress: 25.0)
         await coordinator.resumePlayback(progress: 50.0)
         await coordinator.stopPlayback(progress: 75.0)
+    }
+
+    @Test("history sync errors are recorded when stopPlayback adds to history")
+    func historySyncErrorsAreRecorded() async throws {
+        let (settings, secretStore) = try await makeSettingsManager()
+        try await enableTraktScrobble(settings: settings)
+
+        let session = makeScrobbleStubSession { request in
+            let url = request.url!
+            let path = url.path
+            let statusCode: Int = path.contains("/sync/history") ? 500 : 200
+            let response = HTTPURLResponse(url: url, statusCode: statusCode, httpVersion: nil, headerFields: nil)!
+            let body: String
+            if path.contains("/sync/history") {
+                body = "{}"
+            } else {
+                body = #"{"id":1,"action":"scrobble"}"#
+            }
+            return (response, Data(body.utf8))
+        }
+
+        let coordinator = ScrobbleCoordinator(
+            settingsManager: settings,
+            secretStore: secretStore,
+            session: session
+        )
+
+        await coordinator.startPlayback(mediaId: "tt1234567", mediaType: .movie, progress: 0)
+        await coordinator.stopPlayback(progress: 95.0)
+
+        let lastError = await coordinator.lastErrorMessage
+        #expect(lastError?.contains("history sync failed") == true)
+    }
+
+    @Test("history sync still runs when start scrobble failed but playback meaningfully completed")
+    func historySyncStillRunsAfterStartFailure() async throws {
+        let (settings, secretStore) = try await makeSettingsManager()
+        try await enableTraktScrobble(settings: settings)
+        try await settings.setBool(key: SettingsKeys.traktSyncHistory, value: true)
+
+        let tracker = RequestTracker()
+        let session = makeScrobbleStubSession { request in
+            let url = request.url!
+            let path = url.path
+            tracker.record(path)
+            let statusCode = path.contains("/scrobble/start") ? 500 : 200
+            let response = HTTPURLResponse(url: url, statusCode: statusCode, httpVersion: nil, headerFields: nil)!
+            let body = path.contains("/sync/history")
+                ? #"{"added":{"movies":1,"shows":0,"episodes":0}}"#
+                : #"{"id":1,"action":"scrobble"}"#
+            return (response, Data(body.utf8))
+        }
+
+        let coordinator = ScrobbleCoordinator(
+            settingsManager: settings,
+            secretStore: secretStore,
+            session: session
+        )
+
+        await coordinator.startPlayback(mediaId: "tt-start-failure", mediaType: .movie, progress: 0)
+        await coordinator.stopPlayback(progress: 0.95)
+
+        #expect(tracker.contains("/sync/history"))
     }
 
     @Test("coordinator can be reused after stopPlayback")

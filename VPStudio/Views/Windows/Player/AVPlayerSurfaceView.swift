@@ -27,6 +27,7 @@ struct AVPlayerSurfaceView: NSViewRepresentable {
 }
 #elseif canImport(UIKit)
 import UIKit
+import os
 
 struct AVPlayerSurfaceView: UIViewRepresentable {
     let player: AVPlayer
@@ -50,11 +51,14 @@ struct AVPlayerSurfaceView: UIViewRepresentable {
 }
 
 final class AVPlayerSurfaceUIView: UIView {
+    private static let logger = Logger(subsystem: "com.vpstudio", category: "avplayer-surface")
+
     override class var layerClass: AnyClass { AVPlayerLayer.self }
 
     var playerLayer: AVPlayerLayer {
         guard let layer = self.layer as? AVPlayerLayer else {
-            fatalError("Expected AVPlayerLayer backing layer.")
+            Self.logger.error("Expected AVPlayerLayer backing layer.")
+            return AVPlayerLayer()
         }
         return layer
     }

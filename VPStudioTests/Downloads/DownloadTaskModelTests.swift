@@ -189,6 +189,43 @@ import Testing
         #expect(task.episodeTitle == nil)
     }
 
+    @Test func completedTaskClearsSensitivePersistedStateAndNormalizesProgress() {
+        let task = DownloadTask(
+            mediaId: "tt100",
+            streamURL: "  https://example.com/private.mkv?token=secret  ",
+            fileName: "video.mkv",
+            status: .completed,
+            progress: 0.42,
+            bytesWritten: -50,
+            totalBytes: -100,
+            expectedBytes: -200,
+            resumeDataBase64: Data("resume".utf8).base64EncodedString()
+        )
+
+        #expect(task.progress == 1)
+        #expect(task.bytesWritten == 0)
+        #expect(task.totalBytes == nil)
+        #expect(task.expectedBytes == nil)
+        #expect(task.resumeDataBase64 == nil)
+        #expect(task.streamURL.isEmpty)
+        #expect(task.persistedStreamURL == nil)
+    }
+
+    @Test func invalidResumeDataIsDroppedDuringNormalization() throws {
+        let task = DownloadTask(
+            mediaId: "tt100",
+            streamURL: "https://example.com/video.mkv",
+            fileName: "video.mkv",
+            status: .failed,
+            resumeDataBase64: "definitely-not-base64"
+        )
+
+        let data = try JSONEncoder().encode(task)
+        let decoded = try JSONDecoder().decode(DownloadTask.self, from: data)
+        #expect(decoded.resumeDataBase64 == nil)
+        #expect(decoded.resumeData == nil)
+    }
+
     // MARK: - DownloadStatus.isTerminal
 
     @Test func statusIsTerminal() {
@@ -455,7 +492,8 @@ import Testing
         #expect(decoded.id == original.id)
         #expect(decoded.mediaId == original.mediaId)
         #expect(decoded.episodeId == original.episodeId)
-        #expect(decoded.streamURL == original.streamURL)
+        #expect(decoded.streamURL.isEmpty)
+        #expect(decoded.persistedStreamURL == nil)
         #expect(decoded.fileName == original.fileName)
         #expect(decoded.status == original.status)
         #expect(decoded.progress == original.progress)

@@ -24,6 +24,24 @@ enum BottomTabRoutingPolicy {
     }
 }
 
+enum RootNavigationBadgePolicy {
+    static func activeDownloadCount(from tasks: [DownloadTask]) -> Int {
+        tasks.filter { !$0.status.isTerminal }.count
+    }
+
+    static func settingsWarningCount(from snapshot: SettingsStatusSnapshot) -> Int {
+        SettingsNavigationCatalog.orderedDestinations.filter {
+            SettingsStatusFormatter.status(for: $0, snapshot: snapshot).kind == .warning
+        }.count
+    }
+}
+
+enum QuickStartPromptPolicy {
+    static let skipSetupDestination: SidebarTab = .library
+    static let skipSetupTitle = "Browse Library"
+    static let bodyCopy = "Skip setup for now and browse Library, or run setup to unlock Discover, Search, and streaming features."
+}
+
 // MARK: - ContentView
 
 struct ContentView: View {
@@ -36,6 +54,8 @@ struct ContentView: View {
 
     @State private var discoverViewModel = DiscoverViewModel()
     @State private var isShowingQuickStartPrompt = false
+    @State private var activeDownloadCount = 0
+    @State private var settingsWarningCount = 0
 
     #if os(visionOS)
     @Environment(\.openImmersiveSpace) private var openImmersiveSpace
@@ -88,25 +108,23 @@ struct ContentView: View {
             }
         }
         .background(Color.black.opacity(0.6))
-        .onAppear {
-            appState.terminateActivePlayerSession()
-            NotificationCenter.default.post(name: .mainWindowDidActivate, object: nil)
-            #if os(macOS) || os(visionOS)
-            dismissWindow(id: "player")
-            #endif
-        }
         .sheet(isPresented: $state.isShowingSetup) {
             SetupWizardView()
         }
         .overlay(alignment: .top) {
-            if isShowingQuickStartPrompt {
+            if isShowingQuickStartPrompt, state.selectedTab == .discover {
                 QuickStartPromptView(
+                    onExploreNow: {
+                        softSetupPromptDismissed = true
+                        isShowingQuickStartPrompt = false
+                        appState.selectedTab = QuickStartPromptPolicy.skipSetupDestination
+                    },
                     onRunSetup: {
                         softSetupPromptDismissed = true
                         isShowingQuickStartPrompt = false
                         appState.isShowingSetup = true
                     },
-                    onSkip: {
+                    onDismiss: {
                         softSetupPromptDismissed = true
                         isShowingQuickStartPrompt = false
                     }
@@ -120,6 +138,7 @@ struct ContentView: View {
         .frame(minWidth: 900, minHeight: 600)
         .animation(.spring(response: 0.45, dampingFraction: 0.85), value: isShowingQuickStartPrompt)
         .task {
+            discoverViewModel.configure(database: appState.database)
             await appState.bootstrap()
             // Restore persisted tab selection after bootstrap (settings DB is now ready)
             if let savedTab = try? await appState.settingsManager.getString(key: SettingsKeys.lastSelectedTab) {
@@ -135,19 +154,51 @@ struct ContentView: View {
                let layout = NavigationLayout(rawValue: savedLayout) {
                 appState.navigationLayout = layout
             }
+            await refreshRootBadgeCounts()
+            await appState.runQATraktRefreshIfRequested()
             RuntimeMemoryDiagnostics.capture(
                 event: .appBootstrapCompleted,
                 enabled: appState.runtimeDiagnosticsEnabled
             )
-            if appState.setupRecommendationNeeded, !softSetupPromptDismissed {
+            if appState.setupRecommendationNeeded,
+               !softSetupPromptDismissed,
+               state.selectedTab == .discover {
                 isShowingQuickStartPrompt = true
             }
+        }
+        .task(id: state.selectedTab) {
+            guard !appState.isBootstrapping else { return }
+            if appState.setupRecommendationNeeded, !softSetupPromptDismissed {
+                isShowingQuickStartPrompt = (state.selectedTab == .discover)
+            }
+            await refreshRootBadgeCounts()
         }
         .onChange(of: state.isShowingSetup) { _, isShowingSetup in
             if isShowingSetup {
                 softSetupPromptDismissed = true
                 isShowingQuickStartPrompt = false
             }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .downloadsDidChange)) { _ in
+            Task { await refreshDownloadBadgeCount() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .tmdbApiKeyDidChange)) { _ in
+            Task { await refreshSettingsBadgeCount() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .indexersDidChange)) { _ in
+            Task { await refreshSettingsBadgeCount() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .environmentsDidChange)) { _ in
+            Task { await refreshSettingsBadgeCount() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .localModelsDidChange)) { _ in
+            Task { await refreshSettingsBadgeCount() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .openSubtitlesDidChange)) { _ in
+            Task { await refreshSettingsBadgeCount() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .appDidResetAllData)) { _ in
+            Task { await refreshRootBadgeCounts() }
         }
         #if os(visionOS)
         .ornament(attachmentAnchor: .scene(.bottom), contentAlignment: .top) {
@@ -156,7 +207,9 @@ struct ContentView: View {
                     selectedTab: $state.selectedTab,
                     opensEnvironmentPicker: true,
                     onOpenEnvironmentPicker: { isShowingEnvironmentPicker = true },
-                    onTabSelection: { tab in handleTabSelection(tab, state: state) }
+                    onTabSelection: { tab in handleTabSelection(tab, state: state) },
+                    activeDownloadCount: activeDownloadCount,
+                    settingsWarningCount: settingsWarningCount
                 )
                 .environment(appState)
             }
@@ -167,7 +220,9 @@ struct ContentView: View {
                     selectedTab: $state.selectedTab,
                     opensEnvironmentPicker: true,
                     onOpenEnvironmentPicker: { isShowingEnvironmentPicker = true },
-                    onTabSelection: { tab in handleTabSelection(tab, state: state) }
+                    onTabSelection: { tab in handleTabSelection(tab, state: state) },
+                    activeDownloadCount: activeDownloadCount,
+                    settingsWarningCount: settingsWarningCount
                 )
                 .environment(appState)
             }
@@ -190,7 +245,9 @@ struct ContentView: View {
                     selectedTab: $state.selectedTab,
                     opensEnvironmentPicker: false,
                     onOpenEnvironmentPicker: {},
-                    onTabSelection: { tab in handleTabSelection(tab, state: state) }
+                    onTabSelection: { tab in handleTabSelection(tab, state: state) },
+                    activeDownloadCount: activeDownloadCount,
+                    settingsWarningCount: settingsWarningCount
                 )
                 .padding(.horizontal, 12)
                 .padding(.top, 8)
@@ -203,7 +260,9 @@ struct ContentView: View {
                     selectedTab: $state.selectedTab,
                     opensEnvironmentPicker: false,
                     onOpenEnvironmentPicker: {},
-                    onTabSelection: { tab in handleTabSelection(tab, state: state) }
+                    onTabSelection: { tab in handleTabSelection(tab, state: state) },
+                    activeDownloadCount: activeDownloadCount,
+                    settingsWarningCount: settingsWarningCount
                 )
                 .padding(.vertical, 12)
                 .padding(.leading, 10)
@@ -213,9 +272,16 @@ struct ContentView: View {
     }
 
     private func handleTabSelection(_ tab: SidebarTab, state: AppState) {
+        let isReselectingCurrentTab = (state.selectedTab == tab)
+
         withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
             state.selectedTab = tab
-            state.navigationResetID = UUID()
+
+            // Only hard-reset the navigation stack when re-selecting the already-active tab.
+            // Resetting on every tab change causes unnecessary full-stack rebuilds and visible hitches.
+            if isReselectingCurrentTab {
+                state.navigationResetID = UUID()
+            }
         }
         Task { try? await appState.settingsManager.setValue(tab.rawValue, forKey: SettingsKeys.lastSelectedTab) }
         RuntimeMemoryDiagnostics.capture(
@@ -223,6 +289,21 @@ struct ContentView: View {
             enabled: appState.runtimeDiagnosticsEnabled,
             context: tab.rawValue
         )
+    }
+
+    private func refreshRootBadgeCounts() async {
+        await refreshDownloadBadgeCount()
+        await refreshSettingsBadgeCount()
+    }
+
+    private func refreshDownloadBadgeCount() async {
+        guard let tasks = try? await appState.downloadManager.listDownloads() else { return }
+        activeDownloadCount = RootNavigationBadgePolicy.activeDownloadCount(from: tasks)
+    }
+
+    private func refreshSettingsBadgeCount() async {
+        let snapshot = await captureSettingsStatusSnapshot()
+        settingsWarningCount = RootNavigationBadgePolicy.settingsWarningCount(from: snapshot)
     }
 
     @ViewBuilder
@@ -241,6 +322,60 @@ struct ContentView: View {
         case .settings:
             SettingsView()
         }
+    }
+
+    private func captureSettingsStatusSnapshot() async -> SettingsStatusSnapshot {
+        var snapshot = SettingsStatusSnapshot()
+
+        if let configs = try? await appState.database.fetchAllDebridConfigs() {
+            snapshot.activeDebridCount = configs.filter(\.isActive).count
+        }
+
+        if let configs = try? await appState.database.fetchAllIndexerConfigs() {
+            snapshot.activeIndexerCount = configs.filter(\.isActive).count
+        }
+
+        snapshot.hasTMDBKey = await hasNonEmptyString(for: SettingsKeys.tmdbApiKey)
+        snapshot.hasOpenSubtitlesKey = await hasNonEmptyString(for: SettingsKeys.openSubtitlesApiKey)
+
+        if let assets = try? await appState.environmentCatalogManager.fetchAssets() {
+            snapshot.environmentAssetCount = assets.count
+        }
+
+        let providerRaw = (try? await appState.settingsManager.getString(key: SettingsKeys.defaultAIProvider))
+            ?? AIProviderKind.anthropic.rawValue
+        snapshot.aiProvider = AIProviderKind(rawValue: providerRaw) ?? .anthropic
+
+        snapshot.hasOpenAIKey = await hasNonEmptyString(for: SettingsKeys.openAIApiKey)
+        snapshot.hasAnthropicKey = await hasNonEmptyString(for: SettingsKeys.anthropicApiKey)
+        snapshot.hasGeminiKey = await hasNonEmptyString(for: SettingsKeys.geminiApiKey)
+        snapshot.hasOllamaEndpoint = await hasNonEmptyString(
+            for: SettingsKeys.ollamaEndpoint,
+            fallback: "http://localhost:11434"
+        )
+        snapshot.hasOpenRouterKey = await hasNonEmptyString(for: SettingsKeys.openRouterApiKey)
+
+        let localConfiguration = await appState.localAIProviderConfiguration()
+        snapshot.isLocalAIEnabled = localConfiguration.isEnabled
+        snapshot.hasUsableLocalModel = localConfiguration.isUsable
+
+        let userTraktClient = try? await appState.settingsManager.getString(key: SettingsKeys.traktClientId)
+        let userTraktSecret = try? await appState.settingsManager.getString(key: SettingsKeys.traktClientSecret)
+        snapshot.hasTraktCredentials = TraktDefaults.resolvedCredentials(
+            userClientId: userTraktClient,
+            userClientSecret: userTraktSecret
+        ) != nil
+
+        let hasSimklClient = await hasNonEmptyString(for: SettingsKeys.simklClientId)
+        let hasSimklToken = await hasNonEmptyString(for: SettingsKeys.simklAccessToken)
+        snapshot.hasSimklCredentials = hasSimklClient && hasSimklToken
+
+        return snapshot
+    }
+
+    private func hasNonEmptyString(for key: String, fallback: String? = nil) async -> Bool {
+        let value = (try? await appState.settingsManager.getString(key: key)) ?? fallback
+        return !(value?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
     }
 
     // MARK: - visionOS Environment Logic
@@ -278,8 +413,9 @@ struct ContentView: View {
 }
 
 private struct QuickStartPromptView: View {
+    let onExploreNow: () -> Void
     let onRunSetup: () -> Void
-    let onSkip: () -> Void
+    let onDismiss: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -289,12 +425,12 @@ private struct QuickStartPromptView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Quick Start")
                         .font(.headline)
-                    Text("Explore now with no setup, or run setup for full streaming features.")
+                    Text(QuickStartPromptPolicy.bodyCopy)
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 0)
-                Button(action: onSkip) {
+                Button(action: onDismiss) {
                     Image(systemName: "xmark.circle.fill")
                         .font(.title3)
                         .foregroundStyle(.secondary)
@@ -304,8 +440,8 @@ private struct QuickStartPromptView: View {
             }
 
             HStack(spacing: 10) {
-                Button(action: onSkip) {
-                    Label("Explore Now", systemImage: "play.fill")
+                Button(action: onExploreNow) {
+                    Label(QuickStartPromptPolicy.skipSetupTitle, systemImage: "books.vertical.fill")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
@@ -339,13 +475,43 @@ struct VPBottomTabBar: View {
     /// Counts driving badge visibility — wired by parent or defaults to 0.
     var activeDownloadCount: Int = 0
     var settingsWarningCount: Int = 0
-
-    #if os(macOS)
     @State private var hoveredTab: SidebarTab?
+
+    #if os(visionOS)
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
+
+    /// Vision Pro compact layouts need a slightly larger hit target than legacy baseline,
+    /// while regular layouts keep the current 25% upscale from production.
+    private var chromeScale: CGFloat {
+        if QARuntimeOptions.forceCompactNavScale {
+            return 1.1
+        }
+
+        if horizontalSizeClass == .compact || verticalSizeClass == .compact {
+            return 1.1
+        }
+        return 1.25
+    }
+    #else
+    private var chromeScale: CGFloat { 1 }
     #endif
 
+    private var stackSpacing: CGFloat { 8 * chromeScale }
+    private var horizontalPadding: CGFloat { 14 * chromeScale }
+    private var verticalPadding: CGFloat { 9 * chromeScale }
+    private var iconLabelSpacing: CGFloat { 5 * chromeScale }
+    private var tabWidth: CGFloat { 68 * chromeScale }
+    private var tabHeight: CGFloat { 50 * chromeScale }
+    private var separatorHeight: CGFloat { 30 * chromeScale }
+    private var separatorPadding: CGFloat { 3 * chromeScale }
+    private var iconSize: CGFloat { 17 * chromeScale }
+    private var textSize: CGFloat { 10 * chromeScale }
+    private var badgeSize: CGFloat { 7 * chromeScale }
+    private var containerInset: CGFloat { 4 * chromeScale }
+
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: stackSpacing) {
             ForEach(SidebarTab.mainTabs, id: \.self) { tab in
                 tabButton(tab: tab, isSelected: selectedTab == tab) {
                     switch BottomTabRoutingPolicy.action(
@@ -363,37 +529,38 @@ struct VPBottomTabBar: View {
             // Thin separator between main tabs and settings
             Capsule()
                 .fill(.white.opacity(0.15))
-                .frame(width: 1, height: 28)
-                .padding(.horizontal, 2)
+                .frame(width: 1, height: separatorHeight)
+                .padding(.horizontal, separatorPadding)
 
             tabButton(tab: .settings, isSelected: selectedTab == .settings) {
                 onTabSelection(.settings)
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
+        .padding(containerInset)
+        .padding(.horizontal, horizontalPadding)
+        .padding(.vertical, verticalPadding)
         .background(.regularMaterial, in: Capsule())
         .overlay {
             Capsule()
                 .strokeBorder(
                     LinearGradient(
-                        colors: [.white.opacity(0.28), .white.opacity(0.06)],
+                        colors: [.white.opacity(0.30), .white.opacity(0.08)],
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
                     ),
-                    lineWidth: 0.5
+                    lineWidth: 0.8
                 )
         }
-        .shadow(color: .black.opacity(0.07), radius: 24, y: 0)
-        .shadow(color: .black.opacity(0.13), radius: 8, y: 4)
+        .shadow(color: .black.opacity(0.10), radius: 28, y: 6)
+        .shadow(color: .black.opacity(0.18), radius: 12, y: 8)
     }
 
     private func tabButton(tab: SidebarTab, isSelected: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            VStack(spacing: 4) {
+            VStack(spacing: iconLabelSpacing) {
                 ZStack(alignment: .topTrailing) {
                     Image(systemName: tab.icon)
-                        .font(.system(size: 16, weight: isSelected ? .semibold : .medium))
+                        .font(.system(size: iconSize, weight: isSelected ? .semibold : .medium))
 
                     // Badge dot
                     if TabBadgePolicy.shouldShowBadge(
@@ -403,16 +570,16 @@ struct VPBottomTabBar: View {
                     ) {
                         Circle()
                             .fill(TabBadgePolicy.badgeColor(for: tab))
-                            .frame(width: 7, height: 7)
-                            .offset(x: 4, y: -2)
+                            .frame(width: badgeSize, height: badgeSize)
+                            .offset(x: 4 * chromeScale, y: -2 * chromeScale)
                     }
                 }
 
                 Text(tab.rawValue)
-                    .font(.system(size: 9, weight: .medium))
+                    .font(.system(size: textSize, weight: .medium))
             }
             .foregroundStyle(isSelected ? .white : .white.opacity(0.5))
-            .frame(width: 64, height: 48)
+            .frame(width: tabWidth, height: tabHeight)
             .background {
                 #if os(macOS)
                 if isSelected {
