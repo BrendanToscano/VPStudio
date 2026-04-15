@@ -166,7 +166,7 @@ actor DownloadManager {
                             ? Double(totalBytesWritten) / Double(totalBytesExpected)
                             : 0.0
                         let db = self.database
-                        Task {
+                        Task { [weak self] in
                             try? await db.updateDownloadTaskProgress(
                                 id: id,
                                 progress: min(progress, 0.99),
@@ -174,7 +174,7 @@ actor DownloadManager {
                                 totalBytes: totalBytesExpected > 0 ? totalBytesExpected : nil,
                                 destinationPath: nil
                             )
-                            self.notifyDownloadsChanged()
+                            self?.notifyDownloadsChanged()
                         }
                     }
                 },
