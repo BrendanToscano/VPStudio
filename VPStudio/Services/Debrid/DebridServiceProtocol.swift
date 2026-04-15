@@ -107,6 +107,7 @@ enum DebridError: LocalizedError, Equatable {
 enum DebridHTTPExecutor {
     private static let initialBackoffNanoseconds: UInt64 = 250_000_000
     private static let maximumBackoffNanoseconds: UInt64 = 5_000_000_000
+    private static let maximumRetryAfterNanoseconds: UInt64 = 60_000_000_000
     private static let maxAttempts = 4
     private static let retryableStatusCodes: Set<Int> = [408, 425, 429, 500, 502, 503, 504]
     private static let retryableTransportErrorCodes: Set<URLError.Code> = [
@@ -188,7 +189,7 @@ enum DebridHTTPExecutor {
         let trimmed = retryAfter.trimmingCharacters(in: .whitespacesAndNewlines)
         if let retryAfterSeconds = TimeInterval(trimmed), retryAfterSeconds > 0 {
             let retryAfterDelay = UInt64((retryAfterSeconds * 1_000_000_000).rounded())
-            return min(maximumBackoffNanoseconds, max(exponentialDelay, retryAfterDelay))
+            return min(maximumRetryAfterNanoseconds, max(exponentialDelay, retryAfterDelay))
         }
 
         guard let retryAfterDate = RetryHeaderDateParser.date(from: trimmed) else {
@@ -201,7 +202,7 @@ enum DebridHTTPExecutor {
         }
 
         let retryAfterDelay = UInt64((retryAfterSeconds * 1_000_000_000).rounded())
-        return min(maximumBackoffNanoseconds, max(exponentialDelay, retryAfterDelay))
+        return min(maximumRetryAfterNanoseconds, max(exponentialDelay, retryAfterDelay))
     }
 
     private static func shouldRetry(urlError: URLError) -> Bool {

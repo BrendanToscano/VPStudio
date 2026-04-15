@@ -18,6 +18,16 @@ struct ImmersivePlayerControlsView: View {
         self.showsScreenSizeControl = showsScreenSizeControl
     }
 
+    private var playPauseAccessibilityValue: String {
+        if engine.error != nil {
+            return "Failed"
+        }
+        if engine.isBuffering {
+            return engine.isPlaying ? "Buffering" : "Preparing"
+        }
+        return engine.isPlaying ? "Playing" : "Paused"
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             mediaInfoHeader
@@ -195,6 +205,7 @@ struct ImmersivePlayerControlsView: View {
             .buttonStyle(.plain)
             .hoverEffect(.highlight)
             .accessibilityLabel(engine.isPlaying ? "Pause" : "Play")
+            .accessibilityValue(playPauseAccessibilityValue)
 
             // Seek forward
             controlButton(icon: "goforward.30", size: .body) {

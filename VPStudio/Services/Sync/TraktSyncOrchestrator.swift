@@ -1123,11 +1123,11 @@ actor TraktSyncOrchestrator {
         let episodeId: String?
         if let episodeImdb = item.episode?.ids?.imdb, !episodeImdb.isEmpty {
             episodeId = episodeImdb
-        } else if let episodeTMDB = item.episode?.ids?.tmdb {
-            episodeId = "tmdb-episode-\(episodeTMDB)"
         } else if let season = item.episode?.season,
                   let number = item.episode?.number {
             episodeId = String(format: "s%02de%02d", season, number)
+        } else if let episodeTMDB = item.episode?.ids?.tmdb {
+            episodeId = "tmdb-episode-\(episodeTMDB)"
         } else {
             episodeId = nil
         }

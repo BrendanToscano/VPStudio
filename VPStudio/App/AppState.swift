@@ -30,6 +30,7 @@ final class AppState {
         var fetchActiveEnvironment: (@Sendable () async throws -> EnvironmentAsset?)?
         var fetchDebridConfigs: (@Sendable () async throws -> [DebridConfig])?
         var availableDebridServices: (@Sendable () async -> [DebridServiceType])?
+        var fetchTMDBApiKey: (@Sendable () async throws -> String?)?
         var initializeIndexers: (@Sendable () async throws -> Void)?
 
         nonisolated init(
@@ -41,6 +42,7 @@ final class AppState {
             fetchActiveEnvironment: (@Sendable () async throws -> EnvironmentAsset?)? = nil,
             fetchDebridConfigs: (@Sendable () async throws -> [DebridConfig])? = nil,
             availableDebridServices: (@Sendable () async -> [DebridServiceType])? = nil,
+            fetchTMDBApiKey: (@Sendable () async throws -> String?)? = nil,
             initializeIndexers: (@Sendable () async throws -> Void)? = nil
         ) {
             self.databaseFactory = databaseFactory
@@ -51,6 +53,7 @@ final class AppState {
             self.fetchActiveEnvironment = fetchActiveEnvironment
             self.fetchDebridConfigs = fetchDebridConfigs
             self.availableDebridServices = availableDebridServices
+            self.fetchTMDBApiKey = fetchTMDBApiKey
             self.initializeIndexers = initializeIndexers
         }
     }
@@ -521,7 +524,16 @@ final class AppState {
                 hasReadyDebridService = await !debridManager.availableServices().isEmpty
             }
 
-            setupRecommendationNeeded = !hasDebridConfig || !hasReadyDebridService
+            let hasTMDBApiKey: Bool
+            if let fetchTMDBApiKey = testHooks.fetchTMDBApiKey {
+                let tmdbApiKey = try await fetchTMDBApiKey() ?? ""
+                hasTMDBApiKey = !tmdbApiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            } else {
+                let tmdbApiKey = (try? await settingsManager.getString(key: SettingsKeys.tmdbApiKey)) ?? ""
+                hasTMDBApiKey = !tmdbApiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            }
+
+            setupRecommendationNeeded = !hasDebridConfig || !hasReadyDebridService || !hasTMDBApiKey
 
             await localCatalogStore.seedCatalog()
             await localInferenceEngine.startMonitoring()
@@ -622,6 +634,7 @@ final class AppState {
         }
 
         await scrobbleCoordinator.invalidateTraktSession()
+        NotificationCenter.default.post(name: .settingsDidChange, object: nil)
     }
 
     func migratePersistedSecretsIfNeeded() async throws {
@@ -868,6 +881,7 @@ final class AppState {
             }()
             : nil
         let activeSecretStore: any SecretStore = injectedSecretStore ?? secretStore
+        let rotatesSecretNamespace = namespaceRotation != nil
 
         do {
             // Clean up downloaded and environment files left on disk
@@ -876,6 +890,15 @@ final class AppState {
                 try cleanupPersistentArtifacts(persistedLocalModels)
             } else {
                 try Self.cleanupPersistentArtifacts(localModels: persistedLocalModels)
+            }
+
+            if let namespaceRotation {
+                defaults.set(namespaceRotation.next, forKey: Self.secretStoreNamespaceKey)
+                _secretStore = nil
+            }
+
+            if !rotatesSecretNamespace {
+                try await activeSecretStore.deleteAllSecrets()
             }
 
             // Reset the database only after filesystem cleanup succeeds so
@@ -889,10 +912,6 @@ final class AppState {
             defaults.set(false, forKey: "onboarding.soft_setup_dismissed")
             defaults.set("", forKey: "settings.last_destination")
             defaults.set("", forKey: "settings.search_query")
-            if let namespaceRotation {
-                defaults.set(namespaceRotation.next, forKey: Self.secretStoreNamespaceKey)
-                _secretStore = nil
-            }
 
             // Clear in-memory state
             selectedTab = .discover
@@ -929,12 +948,15 @@ final class AppState {
             _networkMonitor = nil
             _secretStore = nil
 
-            do {
-                try await activeSecretStore.deleteAllSecrets()
-            } catch {
-                Self.logger.error("Secret store cleanup after reset failed: \(error.localizedDescription, privacy: .public)")
+            if rotatesSecretNamespace {
+                do {
+                    try await activeSecretStore.deleteAllSecrets()
+                } catch {
+                    Self.logger.error("Secret cleanup after namespace rotation failed: \(error.localizedDescription, privacy: .public)")
+                }
             }
 
+            NotificationCenter.default.post(name: .settingsDidChange, object: nil)
             NotificationCenter.default.post(name: .appDidResetAllData, object: nil)
         } catch {
             if let namespaceRotation {

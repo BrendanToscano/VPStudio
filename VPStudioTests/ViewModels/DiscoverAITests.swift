@@ -76,14 +76,50 @@ struct DiscoverAICuratedSectionPolicyTests {
 struct DiscoverViewModelAIHeroPreviewTests {
     private actor DiscoverAIHeroMetadataStub: MetadataProvider {
         var detailByID: [String: MediaItem] = [:]
+        var searchResultsByQuery: [String: [MediaPreview]] = [:]
         var marker: String?
 
-        init(detailByID: [String: MediaItem] = [:], marker: String? = nil) {
+        init(
+            detailByID: [String: MediaItem] = [:],
+            searchResultsByQuery: [String: [MediaPreview]] = [:],
+            marker: String? = nil
+        ) {
             self.detailByID = detailByID
+            self.searchResultsByQuery = searchResultsByQuery
             self.marker = marker
         }
 
-        func search(query: String, type: MediaType?, page: Int) async throws -> MetadataSearchResult { fatalError("unused") }
+        func search(query: String, type: MediaType?, page: Int) async throws -> MetadataSearchResult {
+            try await search(query: query, type: type, page: page, year: nil, language: nil)
+        }
+
+        func search(query: String, type: MediaType?, page: Int, year: Int?, language: String?) async throws -> MetadataSearchResult {
+            if let results = searchResultsByQuery[query] {
+                return MetadataSearchResult(items: results, page: page, totalPages: 1, totalResults: results.count)
+            }
+
+            if let marker, let type {
+                return MetadataSearchResult(
+                    items: [
+                        MediaPreview(
+                            id: "\(type.rawValue)-tmdb-11",
+                            type: type,
+                            title: query,
+                            year: year,
+                            posterPath: "/poster-\(marker).jpg",
+                            backdropPath: "/backdrop-\(marker).jpg",
+                            imdbRating: 8.4,
+                            tmdbId: 11
+                        )
+                    ],
+                    page: page,
+                    totalPages: 1,
+                    totalResults: 1
+                )
+            }
+
+            return MetadataSearchResult(items: [], page: page, totalPages: 1, totalResults: 0)
+        }
 
         func getDetail(id: String, type: MediaType) async throws -> MediaItem {
             if let item = detailByID[id] {
@@ -154,6 +190,49 @@ struct DiscoverViewModelAIHeroPreviewTests {
         #expect(viewModel.aiHeroPreview?.posterPath == "/arrival-poster.jpg")
         #expect(viewModel.aiHeroPreview?.backdropPath == "/arrival-backdrop.jpg")
         #expect(viewModel.aiHeroPreview?.imdbRating == 8.0)
+    }
+
+    @Test
+    @MainActor
+    func updateAIRecommendationsIgnoresMismatchedTmdbHintAndUsesValidatedSearchMatch() async {
+        let wrongDetail = MediaItem(
+            id: "22",
+            type: .movie,
+            title: "Thor",
+            year: 2011,
+            posterPath: "/thor-poster.jpg",
+            backdropPath: "/thor-backdrop.jpg",
+            overview: nil,
+            genres: [],
+            imdbRating: 7.0,
+            runtime: nil,
+            status: nil,
+            tmdbId: 22
+        )
+        let arrivalPreview = MediaPreview(
+            id: "movie-tmdb-329865",
+            type: .movie,
+            title: "Arrival",
+            year: 2016,
+            posterPath: "/arrival-search-poster.jpg",
+            backdropPath: "/arrival-search-backdrop.jpg",
+            imdbRating: 8.1,
+            tmdbId: 329865
+        )
+        let metadata = DiscoverAIHeroMetadataStub(
+            detailByID: ["22": wrongDetail],
+            searchResultsByQuery: ["Arrival": [arrivalPreview]]
+        )
+        let viewModel = DiscoverViewModel(metadataService: metadata)
+
+        await viewModel.updateAIRecommendations([
+            makeRecommendation(title: "Arrival", year: 2016, tmdbId: 22, score: 0.95)
+        ])
+
+        #expect(viewModel.aiRecommendations.first?.tmdbId == 329865)
+        #expect(viewModel.aiHeroPreview?.title == "Arrival")
+        #expect(viewModel.aiHeroPreview?.backdropPath == "/arrival-search-backdrop.jpg")
+        #expect(viewModel.aiHeroPreview?.tmdbId == 329865)
     }
 
     @Test

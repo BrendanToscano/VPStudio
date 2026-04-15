@@ -239,6 +239,20 @@ struct RealDebridServiceTests {
         #expect(result.isEmpty)
     }
 
+    @Test func checkCacheMarksInvalidHashesUnknownWithoutNetworkRequest() async throws {
+        let session = makeStubSession { _ in
+            Issue.record("Should not make a request when every hash is invalid")
+            let response = HTTPURLResponse(url: URL(string: "https://x.com")!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (response, Data())
+        }
+
+        let service = RealDebridService(apiToken: "token", session: session)
+        let result = try await service.checkCache(hashes: ["not-a-hash", "12345"])
+
+        #expect(result["not-a-hash"] == .unknown)
+        #expect(result["12345"] == .unknown)
+    }
+
     @Test func checkCacheBatchesLargeHashLists() async throws {
         final class State: @unchecked Sendable {
             var requestPaths: [String] = []

@@ -294,6 +294,7 @@ struct DebridSettingsView: View {
             }
 
             try await appState.debridManager.initialize()
+            NotificationCenter.default.post(name: .settingsDidChange, object: nil)
             await loadConfigs()
             newApiKey = ""
             showingAddSheet = false
@@ -314,6 +315,7 @@ struct DebridSettingsView: View {
         do {
             try await saveConfigs(updated)
             try await appState.debridManager.initialize()
+            NotificationCenter.default.post(name: .settingsDidChange, object: nil)
             connectivityStatusByConfigID[configID] = nil
             await loadConfigs()
         } catch {
@@ -334,6 +336,7 @@ struct DebridSettingsView: View {
             let remaining = try await appState.database.fetchAllDebridConfigs()
             try await saveConfigs(remaining)
             try await appState.debridManager.initialize()
+            NotificationCenter.default.post(name: .settingsDidChange, object: nil)
             connectivityStatusByConfigID[config.id] = nil
             await loadConfigs()
         } catch {

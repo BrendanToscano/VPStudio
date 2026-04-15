@@ -3,6 +3,8 @@ import Foundation
 extension Notification.Name {
     static let libraryDidChange = Notification.Name("VPStudio.LibraryDidChange")
     static let tasteProfileDidChange = Notification.Name("VPStudio.TasteProfileDidChange")
+    static let settingsDidChange = Notification.Name("VPStudio.SettingsDidChange")
+    static let discoverAISettingsDidChange = Notification.Name("VPStudio.DiscoverAISettingsDidChange")
     static let downloadsDidChange = Notification.Name("VPStudio.DownloadsDidChange")
     static let watchHistoryDidChange = Notification.Name("VPStudio.WatchHistoryDidChange")
     static let openSubtitlesDidChange = Notification.Name("VPStudio.OpenSubtitlesDidChange")

@@ -4,6 +4,45 @@ import Testing
 
 @Suite("DiscoverViewModel AI Recommendations", .serialized)
 struct DiscoverViewModelAITests {
+    private actor SequencedAIProvider: AIProvider {
+        let providerKind: AIProviderKind
+        private var queuedResults: [Result<AIProviderResponse, Error>]
+        private var receivedMessages: [String] = []
+
+        init(providerKind: AIProviderKind = .anthropic, jsonResponses: [String]) {
+            self.providerKind = providerKind
+            self.queuedResults = jsonResponses.map {
+                .success(
+                    AIProviderResponse(
+                        provider: providerKind,
+                        content: $0,
+                        model: "test",
+                        inputTokens: 0,
+                        outputTokens: 0
+                    )
+                )
+            }
+        }
+
+        func complete(system: String, userMessage: String) async throws -> AIProviderResponse {
+            receivedMessages.append(userMessage)
+            guard !queuedResults.isEmpty else {
+                throw AIError.invalidResponse
+            }
+
+            let result = queuedResults.removeFirst()
+            switch result {
+            case .success(let response):
+                return response
+            case .failure(let error):
+                throw error
+            }
+        }
+
+        func messages() -> [String] {
+            receivedMessages
+        }
+    }
 
     // MARK: - Helpers
 
@@ -32,6 +71,36 @@ struct DiscoverViewModelAITests {
             ))
         )
         await aiManager.registerProvider(kind: .anthropic, provider: stubProvider)
+        return (db, settings, aiManager)
+    }
+
+    private static func makeSequencedDependencies(
+        jsonResponses: [String]
+    ) async throws -> (db: DatabaseManager, settings: SettingsManager, aiManager: AIAssistantManager, provider: SequencedAIProvider) {
+        let dbPath = FileManager.default.temporaryDirectory
+            .appendingPathComponent("vpstudio-discover-ai-sequenced-tests-\(UUID().uuidString).sqlite")
+            .path
+        let db = try DatabaseManager(path: dbPath)
+        try await db.migrate()
+        let secretStore = TestSecretStore()
+        let settings = SettingsManager(database: db, secretStore: secretStore)
+        let aiManager = AIAssistantManager(database: db)
+        let provider = SequencedAIProvider(jsonResponses: jsonResponses)
+        await aiManager.registerProvider(kind: .anthropic, provider: provider)
+        return (db, settings, aiManager, provider)
+    }
+
+    private static func makeUnconfiguredDependencies()
+        async throws -> (db: DatabaseManager, settings: SettingsManager, aiManager: AIAssistantManager)
+    {
+        let dbPath = FileManager.default.temporaryDirectory
+            .appendingPathComponent("vpstudio-discover-ai-unconfigured-tests-\(UUID().uuidString).sqlite")
+            .path
+        let db = try DatabaseManager(path: dbPath)
+        try await db.migrate()
+        let secretStore = TestSecretStore()
+        let settings = SettingsManager(database: db, secretStore: secretStore)
+        let aiManager = AIAssistantManager(database: db)
         return (db, settings, aiManager)
     }
 
@@ -108,6 +177,21 @@ struct DiscoverViewModelAITests {
         await vm.loadAIRecommendationsIfNeeded(aiManager: deps.aiManager, settingsManager: deps.settings)
 
         #expect(vm.aiRecommendationsEnabled == true)
+    }
+
+    @Test
+    @MainActor
+    func loadAIRecommendationsIfNeededHidesAIRowWhenNoProviderIsConfigured() async throws {
+        let deps = try await Self.makeUnconfiguredDependencies()
+        let vm = Self.makeViewModel(database: deps.db)
+
+        try await deps.settings.setBool(key: SettingsKeys.discoverAIRecommendationsEnabled, value: true)
+
+        await vm.loadAIRecommendationsIfNeeded(aiManager: deps.aiManager, settingsManager: deps.settings)
+
+        #expect(vm.aiRecommendations.isEmpty)
+        #expect(vm.aiRecommendationsEnabled == false)
+        #expect(vm.isLoadingAIRecommendations == false)
     }
 
     @Test
@@ -566,6 +650,41 @@ struct DiscoverViewModelAITests {
         let data = cachedJSON!.data(using: .utf8)!
         let decoded = try JSONDecoder().decode([AIMovieRecommendation].self, from: data)
         #expect(decoded.first?.title == "Test Movie", "Cached recommendations should match fetched ones")
+    }
+
+    @Test
+    @MainActor
+    func regenerateAIRecommendationsAvoidsPriorTitlesAndPassesExplicitExclusions() async throws {
+        let deps = try await Self.makeSequencedDependencies(
+            jsonResponses: [
+                """
+                [{"title":"Arrival","year":2016,"type":"movie","reason":"Thoughtful sci-fi","tmdbId":329865},
+                 {"title":"Dune","year":2021,"type":"movie","reason":"Epic scale","tmdbId":438631}]
+                """,
+                """
+                [{"title":"Arrival","year":2016,"type":"movie","reason":"Still thoughtful","tmdbId":329865},
+                 {"title":"Dune","year":2021,"type":"movie","reason":"Still epic","tmdbId":438631}]
+                """,
+                """
+                [{"title":"Arrival","year":2016,"type":"movie","reason":"Repeat","tmdbId":329865},
+                 {"title":"Ex Machina","year":2014,"type":"movie","reason":"Sharp AI thriller","tmdbId":264660}]
+                """
+            ]
+        )
+        let vm = Self.makeViewModel(database: deps.db)
+
+        try await deps.settings.setBool(key: SettingsKeys.discoverAIRecommendationsEnabled, value: true)
+
+        await vm.loadAIRecommendationsIfNeeded(aiManager: deps.aiManager, settingsManager: deps.settings)
+        #expect(vm.aiRecommendations.map(\.title) == ["Arrival", "Dune"])
+
+        await vm.regenerateAIRecommendations(aiManager: deps.aiManager, settingsManager: deps.settings)
+
+        #expect(vm.aiRecommendations.map(\.title) == ["Ex Machina"])
+
+        let messages = await deps.provider.messages()
+        #expect(messages.count == 4)
+        #expect(messages.dropFirst().allSatisfy { $0.contains("Do not recommend any of these titles again: Arrival, Dune") })
     }
 
     @Test

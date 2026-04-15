@@ -277,6 +277,8 @@ struct LibraryCSVImportSheet: View {
             trace("importCSVFiles start files=\(urls.count) importToFolder=\(importToFolder) autoSubfolderPerFile=\(autoSubfolderPerFile)")
             csvImportError = nil
             csvImportNotice = nil
+            importSummary = nil
+            multiImportSummaries = []
             csvImportInFlight = true
             defer { csvImportInFlight = false }
 
@@ -295,12 +297,15 @@ struct LibraryCSVImportSheet: View {
                     urls[0],
                     autoFolderFromFilename: useAutoSubfolderPerFile
                 )
-                try? await appState.database.pruneEmptyManualFolders()
+                let prunedFolders = (try? await appState.database.pruneEmptyManualFolders()) ?? 0
                 importSummary = summary
                 multiImportSummaries = []
                 trace("single file=\(urls[0].lastPathComponent) \(Self.summaryLogLine(summary))")
                 if !Self.hasLibraryChanges(in: summary) {
                     csvImportNotice = Self.noLibraryChangesNotice(anyRatingsImported: summary.ratingsImported > 0)
+                }
+                if prunedFolders > 0 && !Self.hasLibraryChanges(in: summary) {
+                    NotificationCenter.default.post(name: .libraryDidChange, object: nil)
                 }
                 onImportComplete(summary)
                 return
@@ -347,7 +352,10 @@ struct LibraryCSVImportSheet: View {
             }
 
             // Clean up any empty folders left from previous imports
-            try? await appState.database.pruneEmptyManualFolders()
+            let prunedFolders = (try? await appState.database.pruneEmptyManualFolders()) ?? 0
+            if prunedFolders > 0 && !anyLibraryChange {
+                NotificationCenter.default.post(name: .libraryDidChange, object: nil)
+            }
 
             if !summaries.isEmpty {
                 let aggregate = aggregatedSummary(summaries)

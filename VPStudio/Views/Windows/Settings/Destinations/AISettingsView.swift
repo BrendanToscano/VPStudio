@@ -45,6 +45,7 @@ struct AISettingsView: View {
     @State private var openRouterModels: [AIModelDefinition] = AIModelCatalog.models(for: .openRouter)
     @State private var ollamaModels: [AIModelDefinition] = AIModelCatalog.models(for: .ollama)
     @State private var isFetchingModels = false
+    @State private var isReloadingPersistedState = false
 
     /// Approximate app launch time — used to partition session vs lifetime usage.
     private static let appLaunchDate = Date()
@@ -100,6 +101,10 @@ struct AISettingsView: View {
         return !trimmed.isEmpty && ollamaEndpointWarningMessage == nil
     }
 
+    private var canEnableDiscoverAI: Bool {
+        !availableDefaultProviders.isEmpty
+    }
+
     var body: some View {
         formWithKeyHandlers
             .navigationTitle("AI Assistant")
@@ -115,61 +120,29 @@ struct AISettingsView: View {
             } message: {
                 Text("This clears request counts and cost history for all AI providers. This cannot be undone.")
             }
-        .task {
-            anthropicKey = (try? await appState.settingsManager.getString(key: SettingsKeys.anthropicApiKey)) ?? ""
-            openAIKey = (try? await appState.settingsManager.getString(key: SettingsKeys.openAIApiKey)) ?? ""
-            geminiKey = (try? await appState.settingsManager.getString(key: SettingsKeys.geminiApiKey)) ?? ""
-            openRouterKey = (try? await appState.settingsManager.getString(key: SettingsKeys.openRouterApiKey)) ?? ""
-            ollamaURL = (try? await appState.settingsManager.getString(key: SettingsKeys.ollamaEndpoint)) ?? "http://localhost:11434"
-
-            let storedAnthropicModel = try? await appState.settingsManager.getString(key: SettingsKeys.anthropicModelPreset)
-            anthropicModelID = storedAnthropicModel ?? AIModelCatalog.defaultModel(for: .anthropic)?.id ?? "claude-sonnet-4-6"
-
-            let storedOpenAIModel = try? await appState.settingsManager.getString(key: SettingsKeys.openAIModelPreset)
-            openAIModelID = storedOpenAIModel ?? AIModelCatalog.defaultModel(for: .openAI)?.id ?? "gpt-5.4"
-
-            let storedGeminiModel = try? await appState.settingsManager.getString(key: SettingsKeys.geminiModelPreset)
-            geminiModelID = storedGeminiModel ?? AIModelCatalog.defaultModel(for: .gemini)?.id ?? "gemini-2.5-flash"
-
-            let storedOpenRouterModel = try? await appState.settingsManager.getString(key: SettingsKeys.openRouterModelPreset)
-            openRouterModelID = storedOpenRouterModel ?? AIModelCatalog.defaultModel(for: .openRouter)?.id ?? ""
-
-            let storedOllamaModel = try? await appState.settingsManager.getString(key: SettingsKeys.ollamaModelPreset)
-            ollamaModelID = storedOllamaModel ?? AIModelCatalog.defaultModel(for: .ollama)?.id ?? "llama3.1"
-
-            if let providerRaw = try? await appState.settingsManager.getString(key: SettingsKeys.defaultAIProvider),
-               let provider = AIProviderKind(rawValue: providerRaw) {
-                preferredProvider = provider
-            }
-            selectedProvider = preferredProvider
-            discoverAIEnabled = (try? await appState.settingsManager.getBool(key: SettingsKeys.discoverAIRecommendationsEnabled)) ?? false
-            aiAutoGenerate = (try? await appState.settingsManager.getBool(key: SettingsKeys.aiAutoGenerate, default: true)) ?? true
-            localModelEnabled = (try? await appState.settingsManager.getBool(key: SettingsKeys.localModelEnabled)) ?? false
-            let storedLocalModel = try? await appState.settingsManager.getString(key: SettingsKeys.localModelPreset)
-            localModelID = storedLocalModel ?? AIModelCatalog.defaultModel(for: .local)?.id ?? ""
-            await reloadLocalModels(syncProvider: true)
-            reconcileSelectedProvider()
-            await loadFeedbackState()
-            await loadUsageStats()
-            await refreshModels()
-        }
+        .task { await reloadPersistedState(refreshRemoteModels: true) }
         .onChange(of: anthropicKey) { _, newValue in
+            guard !isReloadingPersistedState else { return }
             reconcileSelectedProvider()
             scheduleCloudKeySave(task: &anthropicSaveTask, key: SettingsKeys.anthropicApiKey, value: newValue, provider: .anthropic)
         }
         .onChange(of: openAIKey) { _, newValue in
+            guard !isReloadingPersistedState else { return }
             reconcileSelectedProvider()
             scheduleCloudKeySave(task: &openAISaveTask, key: SettingsKeys.openAIApiKey, value: newValue, provider: .openAI)
         }
         .onChange(of: geminiKey) { _, newValue in
+            guard !isReloadingPersistedState else { return }
             reconcileSelectedProvider()
             scheduleCloudKeySave(task: &geminiSaveTask, key: SettingsKeys.geminiApiKey, value: newValue, provider: .gemini)
         }
         .onChange(of: openRouterKey) { _, newValue in
+            guard !isReloadingPersistedState else { return }
             reconcileSelectedProvider()
             scheduleCloudKeySave(task: &openRouterSaveTask, key: SettingsKeys.openRouterApiKey, value: newValue, provider: .openRouter)
         }
         .onChange(of: localModelEnabled) { _, newValue in
+            guard !isReloadingPersistedState else { return }
             reconcileSelectedProvider()
             Task {
                 await persistBoolSetting(key: SettingsKeys.localModelEnabled, value: newValue) {
@@ -179,6 +152,7 @@ struct AISettingsView: View {
             }
         }
         .onChange(of: localModelID) { _, newValue in
+            guard !isReloadingPersistedState else { return }
             reconcileSelectedProvider()
             Task {
                 await persistStringSetting(key: SettingsKeys.localModelPreset, value: newValue) {
@@ -192,6 +166,12 @@ struct AISettingsView: View {
                 await MainActor.run { reconcileSelectedProvider() }
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .settingsDidChange)) { _ in
+            Task { await reloadPersistedState(refreshRemoteModels: false) }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .appDidResetAllData)) { _ in
+            Task { await reloadPersistedState(refreshRemoteModels: false) }
+        }
         .onDisappear {
             flushPendingCloudKeySaves()
             feedbackReloadTask?.cancel()
@@ -202,12 +182,14 @@ struct AISettingsView: View {
     private var formWithKeyHandlers: some View {
         formContent
         .onChange(of: ollamaURL) { _, newValue in
+            guard !isReloadingPersistedState else { return }
             reconcileSelectedProvider()
             Task {
                 await persistOllamaEndpoint(newValue)
             }
         }
         .onChange(of: anthropicModelID) { _, newValue in
+            guard !isReloadingPersistedState else { return }
             Task {
                 await persistStringSetting(key: SettingsKeys.anthropicModelPreset, value: newValue) {
                     await refreshAIProviders()
@@ -215,6 +197,7 @@ struct AISettingsView: View {
             }
         }
         .onChange(of: openAIModelID) { _, newValue in
+            guard !isReloadingPersistedState else { return }
             Task {
                 await persistStringSetting(key: SettingsKeys.openAIModelPreset, value: newValue) {
                     await refreshAIProviders()
@@ -222,6 +205,7 @@ struct AISettingsView: View {
             }
         }
         .onChange(of: geminiModelID) { _, newValue in
+            guard !isReloadingPersistedState else { return }
             Task {
                 await persistStringSetting(key: SettingsKeys.geminiModelPreset, value: newValue) {
                     await refreshAIProviders()
@@ -229,6 +213,7 @@ struct AISettingsView: View {
             }
         }
         .onChange(of: openRouterModelID) { _, newValue in
+            guard !isReloadingPersistedState else { return }
             Task {
                 await persistStringSetting(key: SettingsKeys.openRouterModelPreset, value: newValue) {
                     await refreshAIProviders()
@@ -236,6 +221,7 @@ struct AISettingsView: View {
             }
         }
         .onChange(of: ollamaModelID) { _, newValue in
+            guard !isReloadingPersistedState else { return }
             Task {
                 await persistStringSetting(key: SettingsKeys.ollamaModelPreset, value: newValue) {
                     await refreshAIProviders()
@@ -243,6 +229,7 @@ struct AISettingsView: View {
             }
         }
         .onChange(of: selectedProvider) { _, newValue in
+            guard !isReloadingPersistedState else { return }
             if suppressedProviderSelection == newValue {
                 suppressedProviderSelection = nil
                 return
@@ -255,16 +242,28 @@ struct AISettingsView: View {
             }
         }
         .onChange(of: discoverAIEnabled) { _, newValue in
+            guard !isReloadingPersistedState else { return }
+            guard !newValue || canEnableDiscoverAI else {
+                discoverAIEnabled = false
+                surfaceError = .unknown("Configure an AI provider before enabling the Discover AI row.")
+                return
+            }
             Task {
-                await persistBoolSetting(key: SettingsKeys.discoverAIRecommendationsEnabled, value: newValue)
+                await persistBoolSetting(key: SettingsKeys.discoverAIRecommendationsEnabled, value: newValue) {
+                    NotificationCenter.default.post(name: .discoverAISettingsDidChange, object: nil)
+                }
             }
         }
         .onChange(of: aiAutoGenerate) { _, newValue in
+            guard !isReloadingPersistedState else { return }
             Task {
-                await persistBoolSetting(key: SettingsKeys.aiAutoGenerate, value: newValue)
+                await persistBoolSetting(key: SettingsKeys.aiAutoGenerate, value: newValue) {
+                    NotificationCenter.default.post(name: .discoverAISettingsDidChange, object: nil)
+                }
             }
         }
         .onChange(of: feedbackScaleMode) { _, newValue in
+            guard !isReloadingPersistedState else { return }
             Task {
                 await persistStringSetting(
                     key: SettingsKeys.feedbackScaleMode,
@@ -324,6 +323,7 @@ struct AISettingsView: View {
     private func persistCloudKey(key: String, value: String, provider: AIProviderKind) async {
         do {
             try await appState.settingsManager.setString(key: key, value: value)
+            NotificationCenter.default.post(name: .settingsDidChange, object: nil)
             await refreshAIProviders()
             await refreshModels(for: provider)
             surfaceError = nil
@@ -370,6 +370,7 @@ struct AISettingsView: View {
     ) async {
         do {
             try await appState.settingsManager.setString(key: key, value: value)
+            NotificationCenter.default.post(name: .settingsDidChange, object: nil)
             surfaceError = nil
             if let postSave {
                 await postSave()
@@ -387,6 +388,7 @@ struct AISettingsView: View {
     ) async {
         do {
             try await appState.settingsManager.setBool(key: key, value: value)
+            NotificationCenter.default.post(name: .settingsDidChange, object: nil)
             surfaceError = nil
             if let postSave {
                 await postSave()
@@ -400,6 +402,7 @@ struct AISettingsView: View {
     private func refreshAIProviders() async {
         await appState.configureAIProviders()
         reconcileSelectedProvider()
+        NotificationCenter.default.post(name: .discoverAISettingsDidChange, object: nil)
     }
 
     @MainActor
@@ -790,11 +793,16 @@ struct AISettingsView: View {
     private var discoverIntegrationSection: some View {
         Section("Discover Integration") {
             Toggle("Show AI Curated Row", isOn: $discoverAIEnabled)
+            if !canEnableDiscoverAI {
+                Text("Configure at least one AI provider before enabling Discover recommendations.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             Text("Personalized \u{201C}Curated For You\u{201D} row on the Discover page using your taste profile.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Toggle("Auto-generate recommendations", isOn: $aiAutoGenerate)
-                .disabled(!discoverAIEnabled)
+                .disabled(!discoverAIEnabled || !canEnableDiscoverAI)
             Text("When off, shows cached recommendations. Press \u{201C}Regenerate\u{201D} on the Discover page to fetch new ones.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -951,6 +959,57 @@ struct AISettingsView: View {
     private func loadUsageStats() async {
         sessionUsage = (try? await appState.database.fetchAIUsageSummary(since: Self.appLaunchDate)) ?? .empty
         lifetimeUsage = (try? await appState.database.fetchAIUsageSummary()) ?? .empty
+    }
+
+    @MainActor
+    private func reloadPersistedState(refreshRemoteModels: Bool) async {
+        isReloadingPersistedState = true
+        defer { isReloadingPersistedState = false }
+
+        anthropicKey = (try? await appState.settingsManager.getString(key: SettingsKeys.anthropicApiKey)) ?? ""
+        openAIKey = (try? await appState.settingsManager.getString(key: SettingsKeys.openAIApiKey)) ?? ""
+        geminiKey = (try? await appState.settingsManager.getString(key: SettingsKeys.geminiApiKey)) ?? ""
+        openRouterKey = (try? await appState.settingsManager.getString(key: SettingsKeys.openRouterApiKey)) ?? ""
+        ollamaURL = (try? await appState.settingsManager.getString(key: SettingsKeys.ollamaEndpoint)) ?? "http://localhost:11434"
+
+        let storedAnthropicModel = try? await appState.settingsManager.getString(key: SettingsKeys.anthropicModelPreset)
+        anthropicModelID = storedAnthropicModel ?? AIModelCatalog.defaultModel(for: .anthropic)?.id ?? "claude-sonnet-4-6"
+
+        let storedOpenAIModel = try? await appState.settingsManager.getString(key: SettingsKeys.openAIModelPreset)
+        openAIModelID = storedOpenAIModel ?? AIModelCatalog.defaultModel(for: .openAI)?.id ?? "gpt-5.4"
+
+        let storedGeminiModel = try? await appState.settingsManager.getString(key: SettingsKeys.geminiModelPreset)
+        geminiModelID = storedGeminiModel ?? AIModelCatalog.defaultModel(for: .gemini)?.id ?? "gemini-2.5-flash"
+
+        let storedOpenRouterModel = try? await appState.settingsManager.getString(key: SettingsKeys.openRouterModelPreset)
+        openRouterModelID = storedOpenRouterModel ?? AIModelCatalog.defaultModel(for: .openRouter)?.id ?? ""
+
+        let storedOllamaModel = try? await appState.settingsManager.getString(key: SettingsKeys.ollamaModelPreset)
+        ollamaModelID = storedOllamaModel ?? AIModelCatalog.defaultModel(for: .ollama)?.id ?? "llama3.1"
+
+        if let providerRaw = try? await appState.settingsManager.getString(key: SettingsKeys.defaultAIProvider),
+           let provider = AIProviderKind(rawValue: providerRaw) {
+            preferredProvider = provider
+        } else {
+            preferredProvider = .anthropic
+        }
+
+        suppressedProviderSelection = preferredProvider
+        selectedProvider = preferredProvider
+        discoverAIEnabled = (try? await appState.settingsManager.getBool(key: SettingsKeys.discoverAIRecommendationsEnabled)) ?? false
+        aiAutoGenerate = (try? await appState.settingsManager.getBool(key: SettingsKeys.aiAutoGenerate, default: true)) ?? true
+        localModelEnabled = (try? await appState.settingsManager.getBool(key: SettingsKeys.localModelEnabled)) ?? false
+        let storedLocalModel = try? await appState.settingsManager.getString(key: SettingsKeys.localModelPreset)
+        localModelID = storedLocalModel ?? AIModelCatalog.defaultModel(for: .local)?.id ?? ""
+
+        await reloadLocalModels(syncProvider: true)
+        reconcileSelectedProvider()
+        await loadFeedbackState()
+        await loadUsageStats()
+
+        if refreshRemoteModels {
+            await refreshModels()
+        }
     }
 
     @MainActor

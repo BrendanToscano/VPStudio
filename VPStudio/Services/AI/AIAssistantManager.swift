@@ -157,15 +157,31 @@ actor AIAssistantManager {
     }
 
     /// Get movie/show recommendations based on user taste
-    func getRecommendations(context: AssistantContext, provider: AIProviderKind? = nil) async throws -> [AIMovieRecommendation] {
+    func getRecommendations(
+        context: AssistantContext,
+        provider: AIProviderKind? = nil,
+        excludingTitles: [String] = []
+    ) async throws -> [AIMovieRecommendation] {
         var promptParts = [
             "Based on my viewing history and preferences, recommend 10 movies or TV shows I'd enjoy.",
             "Focus on titles I haven't seen yet.",
             "For each, provide: title, year, type (movie/series), and a brief reason why I'd like it.",
-            "Format as JSON array with keys: title, year, type, reason, tmdbId (if known).",
+            "Format as JSON array with keys: title, year, type, reason, tmdbId.",
+            "Only include tmdbId when you are highly confident it is correct. Otherwise use null.",
         ]
         if let mood = context.currentMood {
             promptParts.insert("I'm currently in the mood for: \(mood).", at: 1)
+        }
+        if !excludingTitles.isEmpty {
+            let exclusions = excludingTitles
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+                .prefix(12)
+                .joined(separator: ", ")
+            if !exclusions.isEmpty {
+                promptParts.append("Do not recommend any of these titles again: \(exclusions).")
+                promptParts.append("Return a meaningfully different list from those excluded titles.")
+            }
         }
         let prompt = promptParts.joined(separator: " ")
 

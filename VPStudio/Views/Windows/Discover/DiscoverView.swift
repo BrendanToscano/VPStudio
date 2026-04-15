@@ -349,6 +349,24 @@ struct DiscoverView: View {
                 await viewModel.refreshLocalPersonalizationState()
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .discoverAISettingsDidChange)) { _ in
+            recommendationsFilterTask?.cancel()
+            recommendationsFilterTask = Task {
+                await viewModel.reloadAIRecommendationSettings(
+                    aiManager: appState.aiAssistantManager,
+                    settingsManager: appState.settingsManager
+                )
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .appDidResetAllData)) { _ in
+            recommendationsFilterTask?.cancel()
+            recommendationsFilterTask = Task {
+                await viewModel.reloadAIRecommendationSettings(
+                    aiManager: appState.aiAssistantManager,
+                    settingsManager: appState.settingsManager
+                )
+            }
+        }
         .onDisappear {
             tmdbReloadTask?.cancel()
             userRatingsReloadTask?.cancel()
@@ -536,8 +554,9 @@ struct DiscoverView: View {
                         if !state.supportingRecommendations.isEmpty {
                             VStack(spacing: 10) {
                                 ForEach(state.supportingRecommendations) { recommendation in
+                                    let recommendationPreview = viewModel.aiPreview(for: recommendation)
                                     AICuratedSupportingRow(recommendation: recommendation) {
-                                        selectedRoute = DiscoverNavigationPolicy.browseRoute(for: recommendation.toMediaPreview())
+                                        selectedRoute = DiscoverNavigationPolicy.browseRoute(for: recommendationPreview)
                                     }
                                 }
                             }
@@ -593,6 +612,7 @@ struct DiscoverView: View {
         viewModel.configure(database: appState.database)
         currentHeroIndex = 0
         await viewModel.load(apiKey: key)
+        await viewModel.refreshResolvedAIPreviewsIfNeeded()
         await viewModel.loadAIRecommendationsIfNeeded(
             aiManager: appState.aiAssistantManager,
             settingsManager: appState.settingsManager

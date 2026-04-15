@@ -194,6 +194,20 @@ struct SearchViewModelFilterTests {
         #expect(viewModel.error == nil)
     }
 
+    @Test
+    @MainActor
+    func clearAllFiltersClearsStaleBrowseErrorState() {
+        let viewModel = SearchViewModel()
+        viewModel.selectedGenre = Genre(id: 28, name: "Action")
+        viewModel.error = .unknown("Genre browse failed")
+
+        viewModel.clearAllFilters()
+
+        #expect(viewModel.selectedGenre == nil)
+        #expect(viewModel.error == nil)
+        #expect(viewModel.explorePhase == .idle)
+    }
+
     // MARK: - Genre Selection → Discover
 
     @Test

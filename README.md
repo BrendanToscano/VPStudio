@@ -10,7 +10,7 @@ Built with Swift, SwiftUI, RealityKit, GRDB, and KSPlayer. Targets visionOS 26+.
 
 VPStudio handles the full media workflow on Vision Pro: metadata from TMDB, stream resolution through debrid services, codec-aware playback with dual engines (AVPlayer / KSPlayer), subtitle fetching, downloads with real progress tracking, library management with folders and CSV import, and immersive HDRI environments with a head-tracked cinema screen.
 
-It syncs to Trakt, and includes an AI assistant (Anthropic, OpenAI, or Ollama) that generates recommendations from watch history and ratings. Simkl is cleanup-only in this build: settings remain visible for reviewing or clearing saved authorization, but Simkl sync and scrobbling are unavailable.
+It syncs to Trakt, and includes an AI assistant (Anthropic, OpenAI, Gemini, OpenRouter, or Ollama) that generates recommendations from watch history and ratings. Simkl is cleanup-only in this build: settings remain visible for reviewing or clearing saved authorization, but Simkl sync and scrobbling are unavailable.
 
 ## Features
 
@@ -22,6 +22,32 @@ It syncs to Trakt, and includes an AI assistant (Anthropic, OpenAI, or Ollama) t
 - **Downloads** - Real byte-level progress via URLSessionDownloadDelegate. Offline playback.
 - **Settings** - Debrid providers (RealDebrid, TorBox, AllDebrid, Premiumize, Offcloud, DebridLink, EasyNews), TMDB, Trakt, Simkl cleanup-only surface (sync unavailable in this build), OpenSubtitles, AI providers. Setup wizard. Health dashboard.
 - **AI** - Personalized analysis with predicted ratings and verdicts. Taste profile from watch history, ratings, and favorites.
+
+## Release Gallery
+
+### v2
+
+Current release preview:
+
+| Settings | Library |
+| --- | --- |
+| ![VPStudio v2 Settings](.github/readme-assets/v2/settings.png) | ![VPStudio v2 Library](.github/readme-assets/v2/library.png) |
+
+| Downloads | Favorites |
+| --- | --- |
+| ![VPStudio v2 Downloads](.github/readme-assets/v2/downloads.png) | ![VPStudio v2 Favorites](.github/readme-assets/v2/favorites.png) |
+
+### v1
+
+Archive preview:
+
+| Search | Library |
+| --- | --- |
+| ![VPStudio v1 Search](.github/readme-assets/v1/search.png) | ![VPStudio v1 Library](.github/readme-assets/v1/library.png) |
+
+| Downloads | Settings |
+| --- | --- |
+| ![VPStudio v1 Downloads](.github/readme-assets/v1/downloads.png) | ![VPStudio v1 Settings](.github/readme-assets/v1/settings.png) |
 
 ## Setup
 
@@ -55,7 +81,7 @@ Select `VPStudio` scheme -> `Apple Vision Pro Simulator` (or your device) -> `Cm
 
 On first launch you can either:
 
-- `Explore Now` (local sections only until TMDB is configured), or
+- `Browse Library` (local sections only until TMDB is configured), or
 - `Run Setup` for full configuration.
 
 For full streaming behavior, configure at least a TMDB API key and one debrid provider token. Trakt, AI, and subtitles are optional. Simkl is cleanup-only in this build: settings remain visible for clearing saved authorization, but Simkl sync and scrobbling are unavailable.

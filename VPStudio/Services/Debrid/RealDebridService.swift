@@ -38,10 +38,14 @@ actor RealDebridService: DebridServiceProtocol {
     func checkCache(hashes: [String]) async throws -> [String: CacheStatus] {
         guard !hashes.isEmpty else { return [:] }
 
+        var result: [String: CacheStatus] = [:]
         let validHashes = hashes.compactMap(DebridHashValidator.normalizedInfoHash)
-        guard !validHashes.isEmpty else { return [:] }
+        for hash in hashes where DebridHashValidator.normalizedInfoHash(hash) == nil {
+            result[hash] = .unknown
+        }
+        guard !validHashes.isEmpty else { return result }
         if case .disabled = cacheEndpointAvailability {
-            return validHashes.reduce(into: [String: CacheStatus]()) { result, hash in
+            return validHashes.reduce(into: result) { result, hash in
                 result[hash] = .unknown
             }
         }
@@ -49,8 +53,6 @@ actor RealDebridService: DebridServiceProtocol {
         // Batch hashes to keep URL under ~2000 chars. Each hash is 40 chars + 1 separator.
         // Path prefix "/torrents/instantAvailability/" = 30 chars, so ~48 hashes per batch.
         let batchSize = 48
-        var result: [String: CacheStatus] = [:]
-
         for batchStart in stride(from: 0, to: validHashes.count, by: batchSize) {
             let batch = Array(validHashes[batchStart ..< min(batchStart + batchSize, validHashes.count)])
             let hashStr = batch.joined(separator: "/")

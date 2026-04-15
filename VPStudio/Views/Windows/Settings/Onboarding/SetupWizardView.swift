@@ -394,8 +394,8 @@ struct SetupWizardView: View {
                             Text(provider.displayName).tag(provider)
                         }
                     }
-                    .pickerStyle(.segmented)
-                    .frame(maxWidth: 260)
+                    .pickerStyle(.menu)
+                    .frame(maxWidth: 220)
                     .accessibilityLabel("AI provider")
                     .accessibilityHint("Choose an optional AI provider for recommendations and analysis.")
                 }
@@ -642,7 +642,7 @@ struct SetupWizardView: View {
 
                 // Save AI provider selection
                 try await appState.settingsManager.setValue(
-                    selectedAIProvider.rawValue,
+                    selectedAIProvider == .none ? nil : selectedAIProvider.rawValue,
                     forKey: SettingsKeys.defaultAIProvider
                 )
 
@@ -651,6 +651,8 @@ struct SetupWizardView: View {
                     let aiSettingsKey: String = switch selectedAIProvider {
                     case .openAI: SettingsKeys.openAIApiKey
                     case .anthropic: SettingsKeys.anthropicApiKey
+                    case .gemini: SettingsKeys.geminiApiKey
+                    case .openRouter: SettingsKeys.openRouterApiKey
                     case .none: ""
                     }
                     if !aiSettingsKey.isEmpty {
@@ -660,6 +662,8 @@ struct SetupWizardView: View {
                         )
                     }
                 }
+                NotificationCenter.default.post(name: .settingsDidChange, object: nil)
+                NotificationCenter.default.post(name: .discoverAISettingsDidChange, object: nil)
             } catch {
                 saveError = error.localizedDescription
                 return
@@ -1204,6 +1208,8 @@ enum AIProviderOption: String, CaseIterable, Identifiable, Sendable {
     case none = "none"
     case openAI = "openai"
     case anthropic = "anthropic"
+    case gemini = "gemini"
+    case openRouter = "openrouter"
 
     var id: String { rawValue }
 
@@ -1212,6 +1218,8 @@ enum AIProviderOption: String, CaseIterable, Identifiable, Sendable {
         case .none: return "None"
         case .openAI: return "OpenAI"
         case .anthropic: return "Anthropic"
+        case .gemini: return "Gemini"
+        case .openRouter: return "OpenRouter"
         }
     }
 }

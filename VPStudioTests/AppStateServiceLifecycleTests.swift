@@ -306,7 +306,7 @@ struct AppStateServiceLifecycleTests {
 
     @Test
     @MainActor
-    func resetAllDataStillCompletesWhenSecretDeletionFails() async throws {
+    func resetAllDataThrowsAndSkipsSuccessNotificationsWhenInjectedSecretDeletionFails() async throws {
         let (database, tempDir) = try await makeTemporaryDatabase(named: "appstate-reset-secret-failure.sqlite")
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
@@ -335,12 +335,15 @@ struct AppStateServiceLifecycleTests {
         }
         defer { NotificationCenter.default.removeObserver(token) }
 
-        try await appState.resetAllData()
+        do {
+            try await appState.resetAllData()
+            Issue.record("Expected resetAllData to throw when deleteAllSecrets fails")
+        } catch is ThrowingDeleteAllSecretStore.Failure {
+            // expected
+        }
 
-        #expect(appState.selectedTab == .discover)
-        #expect(try await database.getSetting(key: "sample-setting") == nil)
-        #expect(try await database.fetchWatchHistory(mediaId: "tt1234567", episodeId: nil) == nil)
-        #expect(flag.didPost())
+        #expect(appState.selectedTab == .library)
+        #expect(flag.didPost() == false)
     }
 
     @Test

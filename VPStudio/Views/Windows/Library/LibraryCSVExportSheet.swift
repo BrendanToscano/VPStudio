@@ -156,6 +156,8 @@ struct LibraryCSVExportSheet: View {
     private func performExport() async {
         isExporting = true
         errorMessage = nil
+        exportSummary = nil
+        exportDirectoryURL = nil
         defer { isExporting = false }
 
         do {

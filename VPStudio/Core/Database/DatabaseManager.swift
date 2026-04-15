@@ -1272,20 +1272,37 @@ actor DatabaseManager {
     }
 
     /// Removes manual folders that contain zero library entries.
-    func pruneEmptyManualFolders() async throws {
+    /// Returns the number of deleted folders so callers can decide whether UI should refresh.
+    func pruneEmptyManualFolders() async throws -> Int {
         try await dbPool.write { db in
-            let emptyFolders = try Row.fetchAll(db, sql: """
-                SELECT f.id, f.listType FROM library_folders f
-                WHERE f.isSystem = 0
-                AND NOT EXISTS (
-                    SELECT 1 FROM user_library ul
-                    WHERE ul.folderId = f.id AND ul.listType = f.listType
-                )
-                """)
-            for row in emptyFolders {
-                let folderId: String = row["id"]
-                try db.execute(sql: "DELETE FROM library_folders WHERE id = ?", arguments: [folderId])
+            var deletedFolderCount = 0
+
+            while true {
+                let emptyFolderIDs = try String.fetchAll(db, sql: """
+                    SELECT f.id
+                    FROM library_folders f
+                    WHERE f.isSystem = 0
+                    AND NOT EXISTS (
+                        SELECT 1 FROM user_library ul
+                        WHERE ul.folderId = f.id AND ul.listType = f.listType
+                    )
+                    AND NOT EXISTS (
+                        SELECT 1 FROM library_folders child
+                        WHERE child.parentId = f.id AND child.listType = f.listType
+                    )
+                    """)
+
+                guard !emptyFolderIDs.isEmpty else {
+                    break
+                }
+
+                for folderID in emptyFolderIDs {
+                    try db.execute(sql: "DELETE FROM library_folders WHERE id = ?", arguments: [folderID])
+                }
+                deletedFolderCount += emptyFolderIDs.count
             }
+
+            return deletedFolderCount
         }
     }
 

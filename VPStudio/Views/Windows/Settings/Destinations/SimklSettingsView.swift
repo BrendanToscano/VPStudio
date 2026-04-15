@@ -79,8 +79,10 @@ struct SimklSettingsView: View {
     private func disconnect() {
         Task {
             do {
+                try await appState.settingsManager.setString(key: SettingsKeys.simklClientId, value: nil)
                 try await appState.settingsManager.setString(key: SettingsKeys.simklAccessToken, value: nil)
                 try await appState.settingsManager.setString(key: SettingsKeys.simklRefreshToken, value: nil)
+                NotificationCenter.default.post(name: .settingsDidChange, object: nil)
                 await loadSavedAuthorizationState()
             } catch {
                 await MainActor.run {

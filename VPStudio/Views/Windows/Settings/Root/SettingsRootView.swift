@@ -231,12 +231,16 @@ struct SettingsView: View {
         .onReceive(NotificationCenter.default.publisher(for: .openSubtitlesDidChange)) { _ in
             Task { await refreshStatuses() }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .settingsDidChange)) { _ in
+            Task { await refreshStatuses() }
+        }
         .onReceive(NotificationCenter.default.publisher(for: .appDidResetAllData)) { _ in
             query = ""
             persistedSearchQuery = ""
             lastDestinationRawValue = ""
             didLoadInitialSearch = false
             isShowingResetSheet = false
+            Task { await refreshStatuses() }
         }
     }
 

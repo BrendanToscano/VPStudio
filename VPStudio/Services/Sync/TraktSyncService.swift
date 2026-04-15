@@ -275,6 +275,26 @@ actor TraktSyncService {
                     ["ids": ["imdb": episodeId], "watched_at": watchedAtString]
                 ]
             ]
+        } else if type == .series,
+                  let episodeContext = Self.episodeContext(from: episodeId) {
+            body = [
+                "shows": [
+                    [
+                        "ids": ["imdb": imdbId],
+                        "seasons": [
+                            [
+                                "number": episodeContext.season,
+                                "episodes": [
+                                    [
+                                        "number": episodeContext.episode,
+                                        "watched_at": watchedAtString,
+                                    ]
+                                ],
+                            ]
+                        ],
+                    ]
+                ]
+            ]
         } else {
             body = [
                 type == .movie ? "movies" : "shows": [
@@ -284,6 +304,29 @@ actor TraktSyncService {
         }
 
         let _: TraktSyncResponse = try await post(path: "/sync/history", body: body, auth: true)
+    }
+
+    private static func episodeContext(from episodeId: String?) -> (season: Int, episode: Int)? {
+        guard let episodeId else { return nil }
+        guard let match = episodeId.range(
+            of: #"s(\d{1,2})e(\d{1,3})"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) else {
+            return nil
+        }
+
+        let token = episodeId[match].lowercased()
+        let parts = token
+            .replacingOccurrences(of: "s", with: "")
+            .split(separator: "e", maxSplits: 1)
+
+        guard parts.count == 2,
+              let season = Int(parts[0]),
+              let episode = Int(parts[1]) else {
+            return nil
+        }
+
+        return (season, episode)
     }
 
     // MARK: - Custom Lists

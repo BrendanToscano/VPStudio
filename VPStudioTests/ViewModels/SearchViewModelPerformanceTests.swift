@@ -396,16 +396,16 @@ struct SearchViewModelPerformanceTests {
 
     @Test
     @MainActor
-    func debouncedSearchWithoutConfigurationKeepsIdleTypingState() async {
+    func debouncedSearchWithoutConfigurationSurfacesSetupErrorAfterDebounce() async {
         let viewModel = SearchViewModel()
-        viewModel.query = "inception"
+        viewModel.queryDraft = "inception"
 
         viewModel.debouncedSearch()
-        try? await Task.sleep(for: .milliseconds(350))
 
         #expect(viewModel.hasAttemptedTextSearch == false)
-        #expect(viewModel.explorePhase == .idle)
         #expect(viewModel.submittedQuery.isEmpty)
+        #expect(viewModel.error == .tmdbSetupRequired(feature: "Search"))
+        #expect(viewModel.explorePhase == .error)
     }
 
     @Test

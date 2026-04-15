@@ -833,7 +833,7 @@ actor LibraryCSVImportService {
     }
 
     private static func inferredScale(for rawRating: Double) -> FeedbackScaleMode {
-        if rawRating <= 1 {
+        if rawRating <= 0 {
             return .likeDislike
         }
         if rawRating <= 10 {

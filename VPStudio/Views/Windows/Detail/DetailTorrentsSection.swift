@@ -163,7 +163,7 @@ struct TorrentResultRow: View {
             Spacer(minLength: 8)
 
             HStack(spacing: 8) {
-                if isPlayerOpening {
+                if isPlayerOpening || playerOpeningError != nil {
                     // Row-level feedback: player is launching
                     VStack(alignment: .leading, spacing: 4) {
                         if let error = playerOpeningError {

@@ -1181,6 +1181,21 @@ struct SearchView: View {
                 .transition(.opacity.combined(with: .move(edge: .top)))
             }
 
+            if let error = viewModel.error {
+                centeredStage {
+                    HStack(spacing: 12) {
+                        AppErrorInlineView(error: error)
+                        Spacer(minLength: 0)
+                        Button("Retry") {
+                            viewModel.retry()
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                    .padding(.horizontal, 24)
+                    .padding(.bottom, 8)
+                }
+            }
+
             ScrollViewReader { scrollProxy in
                 ScrollView {
                     centeredStage {

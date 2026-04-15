@@ -111,6 +111,7 @@ struct PlayerView: View {
     @State private var selectedAVAudioID: String?
     @State private var selectedAVSubtitleID: String?
     @State private var subtitleSelectionMode: SubtitleSelectionMode = .automaticPreferred
+    @State private var startupRefreshAttempts: [String: Int] = [:]
 
     #if os(visionOS)
     @State private var apmpInjector = APMPInjector()
@@ -289,8 +290,6 @@ struct PlayerView: View {
         .onDisappear {
             stopProgressPersistence()
             scrobbleStop()
-            scrobbleTask?.cancel()
-            scrobbleTask = nil
             if !didInitiateClose {
                 persistCurrentWatchProgress()
             }
@@ -1384,6 +1383,54 @@ struct PlayerView: View {
         preparePlaybackTask = Task { await preparePlayback(for: stream, preparationID: preparationID) }
     }
 
+    @MainActor
+    private func refreshedStartupStreamIfNeeded(
+        after error: Error,
+        for stream: StreamInfo
+    ) async -> StreamInfo? {
+        let attemptKey = PlayerStreamLinkRecovery.attemptTrackingKey(for: stream)
+        let priorRefreshAttempts = startupRefreshAttempts[attemptKey] ?? 0
+        guard PlayerStartupFailurePolicy.shouldSkipRemainingEnginesAndRefreshCurrentStream(
+            after: error,
+            stream: stream,
+            priorRefreshAttempts: priorRefreshAttempts
+        ) else {
+            return nil
+        }
+
+        guard let refreshPlan = PlayerStreamLinkRecovery.refreshPlan(
+            for: stream,
+            priorAttempts: priorRefreshAttempts
+        ) else {
+            return nil
+        }
+
+        startupRefreshAttempts[attemptKey] = priorRefreshAttempts + 1
+
+        do {
+            switch refreshPlan {
+            case .replace(let replacement):
+                return replacement
+            case .reResolve(let context):
+                return try await appState.debridManager.resolveStream(from: context)
+            }
+        } catch {
+            playbackMessage = "Refreshing stream link failed."
+            return nil
+        }
+    }
+
+    @MainActor
+    private func queueWithRefreshedPrimary(_ refreshedStream: StreamInfo, replacing staleStream: StreamInfo) -> [StreamInfo] {
+        let refreshedAvailable = streamQueue.map { queuedStream in
+            queuedStream.id == staleStream.id ? refreshedStream : queuedStream
+        }
+        return PlayerSessionRouting.sessionStreams(
+            primary: refreshedStream,
+            available: refreshedAvailable.filter { $0.id != refreshedStream.id }
+        )
+    }
+
     #if os(visionOS)
     private func loadDimPassthroughPreference() async {
         engine.isDimEnabled = (try? await appState.settingsManager.getBool(
@@ -1674,6 +1721,19 @@ struct PlayerView: View {
                     requestedPreparationID: preparationID,
                     activePreparationID: activePreparePlaybackID
                 ) else {
+                    return
+                }
+                if let refreshedStream = await refreshedStartupStreamIfNeeded(after: error, for: stream) {
+                    guard Self.preparePlaybackShouldRun(
+                        requestedPreparationID: preparationID,
+                        activePreparationID: activePreparePlaybackID
+                    ) else {
+                        return
+                    }
+                    currentStream = refreshedStream
+                    streamQueue = queueWithRefreshedPrimary(refreshedStream, replacing: stream)
+                    playbackMessage = "Refreshing stream link..."
+                    startPlaybackPreparation(for: refreshedStream)
                     return
                 }
                 failures.append("\(kind.displayName): \(error.localizedDescription)")
@@ -2038,7 +2098,15 @@ struct PlayerView: View {
         let progress = scrobbleProgress
         let type: MediaType = episodeId != nil ? .series : .movie
         scrobbleTask?.cancel()
-        scrobbleTask = Task { await appState.scrobbleCoordinator.startPlayback(mediaId: mediaId, mediaType: type, progress: progress) }
+        let currentEpisodeID = episodeId
+        scrobbleTask = Task {
+            await appState.scrobbleCoordinator.startPlayback(
+                mediaId: mediaId,
+                mediaType: type,
+                progress: progress,
+                episodeId: currentEpisodeID
+            )
+        }
     }
 
     private func scrobblePause() {

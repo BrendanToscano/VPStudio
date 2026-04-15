@@ -423,10 +423,11 @@ final class SearchViewModel {
         let trimmed = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
 
-        // Without configured metadata, keep raw typing in the lightweight idle state.
-        // The explicit submit path still triggers `search()` so the TMDB setup gate can
-        // appear once the user actually asks to search.
-        guard metadataService != nil else { return }
+        guard metadataService != nil else {
+            error = .tmdbSetupRequired(feature: "Search")
+            refreshExplorePhaseIfNeeded()
+            return
+        }
 
         let interval = debounceInterval
         debounceTask = Task { [weak self] in
@@ -490,7 +491,7 @@ final class SearchViewModel {
             do {
                 let result = try await service.search(query: trimmed, type: selectedType, page: 1, year: year, language: language)
                 guard !Task.isCancelled, let self, self.searchGeneration == generation else { return }
-                self.replaceResults(result.items)
+                self.replaceResults(self.locallyFilteredSearchItems(result.items, selectedType: selectedType, year: year))
                 self.totalPages = result.totalPages
                 self.isSearching = false
             } catch {
@@ -589,7 +590,7 @@ final class SearchViewModel {
                 guard !Task.isCancelled, let self, self.searchGeneration == generation else { return }
                 guard self.query.trimmingCharacters(in: .whitespaces) == expectedQuery else { return }
                 self.error = nil
-                self.appendUniqueResults(result.items)
+                self.appendUniqueResults(self.locallyFilteredSearchItems(result.items, selectedType: selectedType, year: year))
                 self.currentPage = nextPage
                 self.totalPages = result.totalPages
             } catch {
@@ -659,6 +660,23 @@ final class SearchViewModel {
         )
     }
 
+    private func locallyFilteredSearchItems(
+        _ items: [MediaPreview],
+        selectedType: MediaType?,
+        year: Int?
+    ) -> [MediaPreview] {
+        guard selectedType == nil, let year else {
+            return items
+        }
+
+        return items.filter { item in
+            guard let itemYear = item.year else {
+                return false
+            }
+            return itemYear == year
+        }
+    }
+
     func clear() {
         cancelInFlightWork()
         query = ""
@@ -686,6 +704,7 @@ final class SearchViewModel {
         yearFilter = nil
         yearRangePreset = nil
         languageFilters = ["en-US"]
+        error = nil
         if selectedGenre != nil {
             selectGenre(nil)
         } else {

@@ -918,7 +918,7 @@ struct VPStudioTests {
         let result = try await manager.checkCacheAcrossServices(hashes: [cachedHash, unresolvedHash])
 
         if case .cached = result[cachedHash]?.0 {
-            #expect(true)
+            #expect(Bool(true))
         } else {
             Issue.record("Expected cached result for resolved hash")
         }
@@ -2097,6 +2097,47 @@ struct VPStudioTests {
         #expect(state.sawEpisodePayload)
         #expect(state.requestBody != nil)
         #expect(state.requestBody?["episodes"] != nil)
+    }
+
+    @Test func traktAddToHistoryBuildsSeasonEpisodePayloadWhenEpisodeCodeIsAvailable() async throws {
+        final class State: @unchecked Sendable {
+            var requestBody: [String: Any]?
+        }
+
+        let state = State()
+        let expectedDate = Date(timeIntervalSince1970: 1_700_000_100)
+        let expectedWatchedAt = ISO8601DateFormatter().string(from: expectedDate)
+
+        let session = makeStubSession { request in
+            let url = request.url ?? URL(string: "https://api.trakt.tv/sync/history")!
+            let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+
+            if request.httpMethod == "POST", url.path.contains("/sync/history"), let bodyData = requestBodyData(from: request) {
+                state.requestBody = try JSONSerialization.jsonObject(with: bodyData, options: []) as? [String: Any]
+            }
+
+            return (response, Data("{}".utf8))
+        }
+
+        let service = TraktSyncService(clientId: TraktDefaults.clientId, clientSecret: TraktDefaults.clientSecret, session: session)
+        await service.setTokens(access: "token", refresh: "refresh")
+        try await service.addToHistory(
+            imdbId: "tt1234567",
+            type: .series,
+            episodeId: "tmdb-999-s2e5",
+            watchedAt: expectedDate
+        )
+
+        let shows = try #require(state.requestBody?["shows"] as? [[String: Any]])
+        let firstShow = try #require(shows.first)
+        let seasons = try #require(firstShow["seasons"] as? [[String: Any]])
+        let firstSeason = try #require(seasons.first)
+        let episodes = try #require(firstSeason["episodes"] as? [[String: Any]])
+        let firstEpisode = try #require(episodes.first)
+
+        #expect(firstSeason["number"] as? Int == 2)
+        #expect(firstEpisode["number"] as? Int == 5)
+        #expect(firstEpisode["watched_at"] as? String == expectedWatchedAt)
     }
 
     @Test func databaseFetchCompletedHistorySupportsPagination() async throws {

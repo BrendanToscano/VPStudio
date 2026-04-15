@@ -249,12 +249,32 @@ actor DownloadManager {
         }
 
         let existing = try await database.fetchDownloadTask(id: id)
+        let stagedDestination: (original: URL, staged: URL)?
         if let destination = existing?.destinationURL,
            fileManager.fileExists(atPath: destination.path) {
-            try fileManager.removeItem(at: destination)
+            let stagedURL = destination
+                .deletingLastPathComponent()
+                .appendingPathComponent(".vpstudio-delete-\(UUID().uuidString)-\(destination.lastPathComponent)")
+            try fileManager.moveItem(at: destination, to: stagedURL)
+            stagedDestination = (destination, stagedURL)
+        } else {
+            stagedDestination = nil
         }
 
-        try await database.deleteDownloadTask(id: id)
+        do {
+            try await database.deleteDownloadTask(id: id)
+        } catch {
+            if let stagedDestination,
+               fileManager.fileExists(atPath: stagedDestination.staged.path) {
+                try? fileManager.moveItem(at: stagedDestination.staged, to: stagedDestination.original)
+            }
+            throw error
+        }
+
+        if let stagedDestination,
+           fileManager.fileExists(atPath: stagedDestination.staged.path) {
+            try? fileManager.removeItem(at: stagedDestination.staged)
+        }
         inMemoryReplayableRequestsByTaskID[id] = nil
         releaseReservedDestination(for: id)
         if let existing {
@@ -677,6 +697,8 @@ actor DownloadManager {
         } catch {
             if var rollback = try? await database.fetchDownloadTask(id: id) {
                 rollback.destinationPath = nil
+                rollback.progress = 0
+                rollback.bytesWritten = 0
                 rollback.updatedAt = Date()
                 try? await database.saveDownloadTask(rollback)
             }

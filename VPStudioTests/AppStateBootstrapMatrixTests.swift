@@ -73,6 +73,9 @@ struct AppStateBootstrapMatrixTests {
             },
             availableDebridServices: {
                 data.hasReadyService ? [.realDebrid] : []
+            },
+            fetchTMDBApiKey: {
+                "tmdb-key"
             }
         )
 

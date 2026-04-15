@@ -52,6 +52,7 @@ struct TorznabIndexer: TorrentIndexer {
     }
 
     func searchByQuery(query: String, type: MediaType) async throws -> [TorrentResult] {
+        let episodeContext = type == .series ? EpisodeTokenMatcher.context(fromQuery: query) : nil
         let request: URLRequest
         if isProwlarrEndpoint {
             request = try buildRequest(queryItems: [
@@ -64,7 +65,17 @@ struct TorznabIndexer: TorrentIndexer {
                 URLQueryItem(name: "q", value: query),
             ])
         }
-        return try await fetchResults(from: request)
+        let results = try await fetchResults(from: request)
+        guard type == .series, let episodeContext else {
+            return results
+        }
+        return results.filter {
+            EpisodeTokenMatcher.matchesIfPresent(
+                title: $0.title,
+                season: episodeContext.season,
+                episode: episodeContext.episode
+            )
+        }
     }
 
     private var isProwlarrEndpoint: Bool {
@@ -173,7 +184,7 @@ struct TorznabIndexer: TorrentIndexer {
             )
         }
 
-        return items.compactMap { item in
+        let results: [TorrentResult] = items.compactMap { item in
             let title = (item["title"] as? String) ?? (item["name"] as? String) ?? "Unknown"
             let infoHash = (item["infoHash"] as? String)
                 ?? (item["hash"] as? String)
@@ -195,6 +206,15 @@ struct TorznabIndexer: TorrentIndexer {
                 magnetURI: magnetURL
             )
         }
+
+        if !items.isEmpty, results.isEmpty {
+            throw IndexerParseError.invalidPayload(
+                indexer: name,
+                reason: "JSON payload did not include any usable torrent hashes"
+            )
+        }
+
+        return results
     }
 
     private func dataLooksLikeJSON(_ data: Data) -> Bool {

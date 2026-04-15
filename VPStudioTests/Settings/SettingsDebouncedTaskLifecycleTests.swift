@@ -24,6 +24,14 @@ struct SettingsDebouncedTaskLifecycleTests {
     }
 
     @Test
+    func aiSettingsRefreshesWhenSettingsOrResetNotificationsArrive() throws {
+        let source = try contents(of: "VPStudio/Views/Windows/Settings/Destinations/AISettingsView.swift")
+        #expect(source.contains(".onReceive(NotificationCenter.default.publisher(for: .settingsDidChange))"))
+        #expect(source.contains(".onReceive(NotificationCenter.default.publisher(for: .appDidResetAllData))"))
+        #expect(source.contains("reloadPersistedState(refreshRemoteModels: false)"))
+    }
+
+    @Test
     func traktSettingsCancelsDebouncedSaveTasksOnDisappear() throws {
         let source = try contents(of: "VPStudio/Views/Windows/Settings/Destinations/TraktSettingsView.swift")
         #expect(source.contains(".onDisappear"))
@@ -38,6 +46,14 @@ struct SettingsDebouncedTaskLifecycleTests {
         #expect(source.contains("persistBool"))
         #expect(source.contains("persistString"))
         #expect(source.contains("errorMessage = error.localizedDescription"))
+    }
+
+    @Test
+    func traktSettingsRefreshesWhenSettingsOrResetNotificationsArrive() throws {
+        let source = try contents(of: "VPStudio/Views/Windows/Settings/Destinations/TraktSettingsView.swift")
+        #expect(source.contains(".onReceive(NotificationCenter.default.publisher(for: .settingsDidChange))"))
+        #expect(source.contains(".onReceive(NotificationCenter.default.publisher(for: .appDidResetAllData))"))
+        #expect(source.contains("await reloadPersistedState()"))
     }
 
     @Test

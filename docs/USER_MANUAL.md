@@ -25,7 +25,7 @@ Quick install summary:
 
 1. Launch VPStudio.
 2. In the first-run prompt, choose:
-   - `Explore Now` to browse local sections immediately, or
+   - `Browse Library` to browse local sections immediately, or
    - `Run Setup` to configure services now.
 3. Open `Discover` or `Search`.
 4. Add an item to your Library, Watchlist, or Favorites.
@@ -167,7 +167,7 @@ If sync appears stale:
 
 ### Setup loop or blank startup states
 
-1. Use `Explore Now` to bypass setup and confirm the app opens normally.
+1. Use `Browse Library` to bypass setup and confirm the app opens normally.
 2. Re-run setup later from Settings.
 3. If needed, relaunch app.
 
