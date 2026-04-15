@@ -2138,7 +2138,12 @@ struct PlayerView: View {
             guard let liveScene = playerWindowScene,
                   ObjectIdentifier(liveScene) == trackedSceneID else { return }
 
-            let currentWidth = max(liveScene.effectiveGeometry.coordinateSpace.bounds.width, 1400)
+            let currentWidth: CGFloat
+            if let window = liveScene.windows.first {
+                currentWidth = max(window.frame.width, 1400)
+            } else {
+                currentWidth = 1400
+            }
             let targetHeight = currentWidth / ratio
             let targetSize = CGSize(width: currentWidth, height: targetHeight)
 

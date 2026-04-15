@@ -788,7 +788,8 @@ final class AppState {
         if !openRouterKey.isEmpty {
             await manager.configure(provider: .openRouter, apiKey: openRouterKey, model: openRouterModel)
         }
-        let shouldRegisterOllama = !ollamaURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let hasOllamaModel = ollamaModel != nil && !(ollamaModel?.isEmpty ?? true)
+        let shouldRegisterOllama = !ollamaURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && hasOllamaModel
         if shouldRegisterOllama {
             await manager.configure(provider: .ollama, apiKey: "", baseURL: ollamaURL, model: ollamaModel)
         }
