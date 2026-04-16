@@ -55,18 +55,6 @@ Current release preview:
 | --- |
 | ![VPStudio v2 Library](.github/pr-assets/v2/library.png) |
 
-### v1
-
-Archive preview:
-
-| Search | Library |
-| --- | --- |
-| ![VPStudio v1 Search](.github/readme-assets/v1/search.png) | ![VPStudio v1 Library](.github/readme-assets/v1/library.png) |
-
-| Downloads | Settings |
-| --- | --- |
-| ![VPStudio v1 Downloads](.github/readme-assets/v1/downloads.png) | ![VPStudio v1 Settings](.github/readme-assets/v1/settings.png) |
-
 ## Setup
 
 ### Requirements
