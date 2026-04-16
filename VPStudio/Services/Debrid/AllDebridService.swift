@@ -1,0 +1,361 @@
+import Foundation
+
+actor AllDebridService: DebridServiceProtocol {
+    let serviceType: DebridServiceType = .allDebrid
+    private let apiToken: String
+    private let baseURL = "https://api.alldebrid.com/v4"
+    private let session: URLSession
+    private let agent = "VPStudio"
+    private var selectedFileIDsByTorrent: [String: Set<Int>] = [:]
+
+    init(apiToken: String, session: URLSession = .shared) {
+        self.apiToken = apiToken
+        self.session = session
+    }
+
+    func validateToken() async throws -> Bool {
+        let _: ADResponse<ADUser> = try await request(path: "/user", params: [:])
+        return true
+    }
+
+    func getAccountInfo() async throws -> DebridAccountInfo {
+        let response: ADResponse<ADUser> = try await request(path: "/user", params: [:])
+        let user = response.data
+        return DebridAccountInfo(
+            username: user.user?.username ?? "Unknown",
+            email: user.user?.email,
+            premiumExpiry: nil,
+            isPremium: user.user?.isPremium ?? false
+        )
+    }
+
+    func checkCache(hashes: [String]) async throws -> [String: CacheStatus] {
+        guard !hashes.isEmpty else { return [:] }
+        let params = hashes.enumerated().reduce(into: [String: String]()) { result, pair in
+            result["magnets[\(pair.offset)]"] = pair.element
+        }
+        let response: ADResponse<ADInstantResponse> = try await request(path: "/magnet/instant", params: params)
+
+        var result: [String: CacheStatus] = hashes.reduce(into: [String: CacheStatus]()) { partialResult, hash in
+            partialResult[hash.lowercased()] = .notCached
+        }
+        if let magnets = response.data.magnets {
+            for magnet in magnets {
+                let hash = (magnet.hash ?? "").lowercased()
+                guard !hash.isEmpty else { continue }
+                if magnet.instant == true {
+                    result[hash] = .cached(fileId: nil, fileName: nil, fileSize: nil)
+                } else {
+                    result[hash] = .notCached
+                }
+            }
+        }
+        return result
+    }
+
+    func addMagnet(hash: String) async throws -> String {
+        let normalizedHash = try DebridHashValidator.validatedInfoHash(hash)
+        let magnet = "magnet:?xt=urn:btih:\(normalizedHash)"
+        let params = ["magnets[0]": magnet]
+        let response: ADResponse<ADUploadResponse> = try await request(path: "/magnet/upload", params: params, method: "POST")
+        guard let id = response.data.magnets?.first?.id else {
+            throw DebridError.invalidHash(hash)
+        }
+        return String(id)
+    }
+
+    func selectFiles(torrentId: String, fileIds: [Int]) async throws {
+        if fileIds.isEmpty {
+            selectedFileIDsByTorrent.removeValue(forKey: torrentId)
+            return
+        }
+        selectedFileIDsByTorrent[torrentId] = Set(fileIds)
+    }
+
+    func selectMatchingEpisodeFile(
+        torrentId: String,
+        seasonNumber: Int,
+        episodeNumber: Int
+    ) async throws -> Bool {
+        let params = ["id": torrentId]
+        let response: ADResponse<ADMagnetStatus> = try await request(path: "/magnet/status", params: params)
+        guard let links = response.data.links else { return false }
+        return try await selectMatchingEpisodeFile(
+            torrentId: torrentId,
+            seasonNumber: seasonNumber,
+            episodeNumber: episodeNumber,
+            resolvedFileNameHint: nil,
+            resolvedFileSizeHint: nil,
+            links: links
+        )
+    }
+
+    func selectMatchingEpisodeFile(
+        torrentId: String,
+        seasonNumber: Int,
+        episodeNumber: Int,
+        resolvedFileNameHint: String?,
+        resolvedFileSizeHint: Int64?
+    ) async throws -> Bool {
+        let params = ["id": torrentId]
+        let response: ADResponse<ADMagnetStatus> = try await request(path: "/magnet/status", params: params)
+        guard let links = response.data.links else { return false }
+        return try await selectMatchingEpisodeFile(
+            torrentId: torrentId,
+            seasonNumber: seasonNumber,
+            episodeNumber: episodeNumber,
+            resolvedFileNameHint: resolvedFileNameHint,
+            resolvedFileSizeHint: resolvedFileSizeHint,
+            links: links
+        )
+    }
+
+    private func selectMatchingEpisodeFile(
+        torrentId: String,
+        seasonNumber: Int,
+        episodeNumber: Int,
+        resolvedFileNameHint: String?,
+        resolvedFileSizeHint: Int64?,
+        links: [ADLink]
+    ) async throws -> Bool {
+        if let exactMatchIndex = bestExactMatchIndex(
+            in: links,
+            resolvedFileNameHint: resolvedFileNameHint,
+            resolvedFileSizeHint: resolvedFileSizeHint
+        ) {
+            try await selectFiles(torrentId: torrentId, fileIds: [exactMatchIndex + 1])
+            return true
+        }
+
+        var bestMatchIndex: Int?
+        var bestMatchSize: Int64 = 0
+        for (index, link) in links.enumerated() {
+            guard let fileName = link.filename,
+                  EpisodeTokenMatcher.matches(title: fileName, season: seasonNumber, episode: episodeNumber) else {
+                continue
+            }
+
+            let size = link.size ?? 0
+            if bestMatchIndex == nil || size > bestMatchSize {
+                bestMatchIndex = index
+                bestMatchSize = size
+            }
+        }
+
+        if let bestMatchIndex {
+            try await selectFiles(torrentId: torrentId, fileIds: [bestMatchIndex + 1])
+            return true
+        }
+
+        if links.count == 1 {
+            try await selectFiles(torrentId: torrentId, fileIds: [1])
+            return true
+        }
+
+        // Use 1-based index as a stable surrogate ID for locally selecting a link.
+        return false
+    }
+
+    func cleanupRemoteTransfer(torrentId: String) async throws {
+        selectedFileIDsByTorrent.removeValue(forKey: torrentId)
+        let _: ADResponse<ADDeleteResponse> = try await request(
+            path: "/magnet/delete",
+            params: ["id": torrentId],
+            method: "POST"
+        )
+    }
+
+    func getStreamURL(torrentId: String) async throws -> StreamInfo {
+        let params = ["id": torrentId]
+        let response: ADResponse<ADMagnetStatus> = try await request(path: "/magnet/status", params: params)
+        let status = response.data
+
+        guard status.statusCode == 4 else {
+            throw DebridError.fileNotReady(status.status ?? "processing")
+        }
+
+        let selectedIDs = selectedFileIDsByTorrent[torrentId] ?? []
+        let selectedLink = status.links?.enumerated().first(where: { pair in
+            selectedIDs.contains(pair.offset + 1)
+        })?.element.link
+        let fallbackLink = status.links?.first?.link
+        guard let link = selectedLink ?? fallbackLink else {
+            throw DebridError.torrentNotFound(torrentId)
+        }
+
+        selectedFileIDsByTorrent.removeValue(forKey: torrentId)
+        let url = try await unrestrict(link: link)
+        let fileName = status.filename ?? "Unknown"
+
+        return StreamInfo(
+            streamURL: url,
+            quality: VideoQuality.parse(from: fileName),
+            codec: VideoCodec.parse(from: fileName),
+            audio: AudioFormat.parse(from: fileName),
+            source: SourceType.parse(from: fileName),
+            hdr: HDRFormat.parse(from: fileName),
+            fileName: fileName,
+            sizeBytes: status.size,
+            debridService: serviceType.rawValue
+        )
+    }
+
+    func unrestrict(link: String) async throws -> URL {
+        let params = ["link": link]
+        let response: ADResponse<ADUnlockResponse> = try await request(path: "/link/unlock", params: params)
+        guard let urlStr = response.data.link, let url = URL(string: urlStr) else {
+            throw DebridError.networkError("Invalid unrestrict URL")
+        }
+        return url
+    }
+
+    private static let formEncodingAllowed: CharacterSet = {
+        var allowed = CharacterSet.urlQueryAllowed
+        allowed.remove(charactersIn: "+&=")
+        return allowed
+    }()
+
+    // MARK: - HTTP
+
+    private func request<T: Decodable>(path: String, params: [String: String], method: String = "GET") async throws -> T {
+        guard var components = URLComponents(string: baseURL + path) else {
+            throw DebridError.networkError("Invalid request URL")
+        }
+        var allParams = params
+        allParams["agent"] = agent
+
+        if method == "GET" {
+            components.queryItems = allParams.map { URLQueryItem(name: $0.key, value: $0.value) }
+        }
+
+        guard let url = components.url else {
+            throw DebridError.networkError("Invalid request URL")
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = method
+        request.timeoutInterval = 30
+        request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization")
+
+        if method == "POST" {
+            let body = allParams.map { "\($0.key)=\($0.value.addingPercentEncoding(withAllowedCharacters: Self.formEncodingAllowed) ?? $0.value)" }.joined(separator: "&")
+            request.httpBody = Data(body.utf8)
+            request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        }
+
+        let (data, httpResponse) = try await DebridHTTPExecutor.data(for: request, session: session)
+
+        switch httpResponse.statusCode {
+        case 200...299:
+            break
+        case 401, 403:
+            throw DebridError.unauthorized
+        case 429:
+            throw DebridError.rateLimited
+        default:
+            let message = String(data: data, encoding: .utf8) ?? ""
+            throw DebridError.httpError(httpResponse.statusCode, message)
+        }
+
+        return try JSONDecoder().decode(T.self, from: data)
+    }
+
+    private func bestExactMatchIndex(
+        in links: [ADLink],
+        resolvedFileNameHint: String?,
+        resolvedFileSizeHint: Int64?
+    ) -> Int? {
+        guard let normalizedHint = Self.normalizedFileName(resolvedFileNameHint) else {
+            return nil
+        }
+
+        let matches = links.enumerated().filter { _, link in
+            Self.normalizedFileName(link.filename) == normalizedHint
+        }
+        guard !matches.isEmpty else { return nil }
+
+        if let resolvedFileSizeHint,
+           let exactSizeIndex = matches.first(where: { $0.element.size == resolvedFileSizeHint })?.offset {
+            return exactSizeIndex
+        }
+
+        return matches.max(by: { ($0.element.size ?? 0) < ($1.element.size ?? 0) })?.offset
+    }
+
+    private static func normalizedFileName(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        return URL(fileURLWithPath: trimmed).lastPathComponent.lowercased()
+    }
+}
+
+// MARK: - AllDebrid API Models
+
+private struct ADResponse<T: Decodable & Sendable>: Sendable {
+    let status: String
+    let data: T
+}
+extension ADResponse: Decodable {}
+
+private struct ADUser: Sendable {
+    let user: ADUserInfo?
+}
+extension ADUser: Decodable {}
+
+private struct ADUserInfo: Sendable {
+    let username: String?
+    let email: String?
+    let isPremium: Bool?
+}
+extension ADUserInfo: Decodable {}
+
+private struct ADInstantResponse: Sendable {
+    let magnets: [ADInstantMagnet]?
+}
+extension ADInstantResponse: Decodable {}
+
+private struct ADInstantMagnet: Sendable {
+    let hash: String?
+    let instant: Bool?
+}
+extension ADInstantMagnet: Decodable {}
+
+private struct ADUploadResponse: Sendable {
+    let magnets: [ADUploadedMagnet]?
+}
+extension ADUploadResponse: Decodable {}
+
+private struct ADUploadedMagnet: Sendable {
+    let id: Int
+}
+extension ADUploadedMagnet: Decodable {}
+
+private struct ADMagnetStatus: Sendable {
+    let id: Int?
+    let filename: String?
+    let size: Int64?
+    let status: String?
+    let statusCode: Int?
+    let links: [ADLink]?
+}
+extension ADMagnetStatus: Decodable {}
+
+private struct ADLink: Sendable {
+    let link: String?
+    let filename: String?
+    let size: Int64?
+}
+extension ADLink: Decodable {}
+
+private struct ADUnlockResponse: Sendable {
+    let link: String?
+    let filename: String?
+    let filesize: Int64?
+}
+extension ADUnlockResponse: Decodable {}
+
+private struct ADDeleteResponse: Sendable {
+    let message: String?
+}
+extension ADDeleteResponse: Decodable {}
