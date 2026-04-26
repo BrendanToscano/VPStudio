@@ -209,6 +209,12 @@ private struct PMAccountResponse: Sendable {
     let status: String?
     let customerId: String?
     let premiumUntil: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case status
+        case customerId = "customer_id"
+        case premiumUntil = "premium_until"
+    }
 }
 extension PMAccountResponse: Decodable {}
 

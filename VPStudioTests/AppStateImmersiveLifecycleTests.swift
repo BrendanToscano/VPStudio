@@ -51,4 +51,33 @@ struct AppStateImmersiveLifecycleTests {
         #expect(appState.isImmersiveTransitionInFlight == false)
         #expect(appState.consumeSuspendedImmersiveRestoreRequest() == false)
     }
+
+    @Test
+    @MainActor
+    func completionAfterDismissClearsOpenStateAndTransitionLock() {
+        let appState = AppState()
+        appState.immersiveSpaceDidAppear(.customEnvironment)
+
+        #expect(appState.beginImmersiveTransition())
+        appState.stageImmersiveDismiss(reason: .switchingEnvironment)
+        appState.completeImmersiveDismissIfStillPending()
+
+        #expect(appState.isImmersiveSpaceOpen == false)
+        #expect(appState.activeEnvironment == nil)
+        #expect(appState.isImmersiveTransitionInFlight == false)
+        #expect(appState.beginImmersiveTransition())
+    }
+
+    @Test
+    @MainActor
+    func completionAfterDismissIsNoOpWhenNoDismissIsPending() {
+        let appState = AppState()
+
+        appState.completeImmersiveDismissIfStillPending()
+
+        #expect(appState.isImmersiveSpaceOpen == false)
+        #expect(appState.activeEnvironment == nil)
+        #expect(appState.isImmersiveTransitionInFlight == false)
+        #expect(appState.consumeSuspendedImmersiveRestoreRequest() == false)
+    }
 }

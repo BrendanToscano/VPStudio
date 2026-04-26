@@ -93,6 +93,7 @@ private func makeScrobbleStubSession(
 private final class RequestTracker: @unchecked Sendable {
     private let lock = NSLock()
     private var _paths: [String] = []
+    private var _bodies: [[String: Any]] = []
 
     func record(_ path: String) {
         lock.lock()
@@ -100,9 +101,32 @@ private final class RequestTracker: @unchecked Sendable {
         lock.unlock()
     }
 
+    func record(_ request: URLRequest) {
+        let path = request.url?.path ?? ""
+        let body: [String: Any]
+        if let data = request.httpBody,
+           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            body = object
+        } else {
+            body = [:]
+        }
+
+        lock.lock()
+        _paths.append(path)
+        _bodies.append(body)
+        lock.unlock()
+    }
+
     var paths: [String] {
         lock.lock()
         let copy = _paths
+        lock.unlock()
+        return copy
+    }
+
+    var bodies: [[String: Any]] {
+        lock.lock()
+        let copy = _bodies
         lock.unlock()
         return copy
     }
@@ -149,7 +173,7 @@ private func disableTraktScrobble(settings: SettingsManager) async throws {
 private func makeTrackingSession(tracker: RequestTracker) -> URLSession {
     makeScrobbleStubSession { request in
         let path = request.url?.path ?? ""
-        tracker.record(path)
+        tracker.record(request)
         let response = HTTPURLResponse(
             url: request.url!,
             statusCode: 200,
@@ -268,6 +292,62 @@ struct ScrobbleCoordinatorActiveTests {
         )
         await coordinator.startPlayback(mediaId: "tt1234567", mediaType: .movie, progress: 5.0)
         #expect(tracker.contains("/scrobble/start"))
+    }
+
+    @Test("active session sends pause resume and stop scrobbles with normalized progress")
+    func activeSessionSendsPauseResumeAndStop() async throws {
+        let (settings, secretStore) = try await makeSettingsManager()
+        try await enableTraktScrobble(settings: settings)
+        try await settings.setBool(key: SettingsKeys.traktSyncHistory, value: true)
+
+        let tracker = RequestTracker()
+        let session = makeTrackingSession(tracker: tracker)
+        let coordinator = ScrobbleCoordinator(
+            settingsManager: settings,
+            secretStore: secretStore,
+            session: session
+        )
+
+        await coordinator.startPlayback(mediaId: "tt1234567", mediaType: .movie, progress: 0.25)
+        await coordinator.pausePlayback(progress: 25.0)
+        await coordinator.resumePlayback(progress: 150.0)
+        await coordinator.stopPlayback(progress: 0.8)
+
+        #expect(tracker.paths == [
+            "/scrobble/start",
+            "/scrobble/pause",
+            "/scrobble/start",
+            "/scrobble/stop",
+        ])
+        let progressValues = tracker.bodies.compactMap { $0["progress"] as? Double }
+        #expect(progressValues == [25.0, 25.0, 100.0, 80.0])
+    }
+
+    @Test("stop scrobble failures are recorded without blocking reset")
+    func stopScrobbleErrorIsRecorded() async throws {
+        let (settings, secretStore) = try await makeSettingsManager()
+        try await enableTraktScrobble(settings: settings)
+        try await settings.setBool(key: SettingsKeys.traktSyncHistory, value: false)
+
+        let session = makeScrobbleStubSession { request in
+            let url = request.url!
+            let statusCode = url.path.contains("/scrobble/stop") ? 500 : 200
+            let response = HTTPURLResponse(url: url, statusCode: statusCode, httpVersion: nil, headerFields: nil)!
+            return (response, Data(#"{"id":1,"action":"scrobble"}"#.utf8))
+        }
+        let coordinator = ScrobbleCoordinator(
+            settingsManager: settings,
+            secretStore: secretStore,
+            session: session
+        )
+
+        await coordinator.startPlayback(mediaId: "tt1234567", mediaType: .movie, progress: 0)
+        await coordinator.stopPlayback(progress: 50)
+
+        #expect(await coordinator.lastErrorMessage?.contains("stop scrobble failed") == true)
+
+        await coordinator.pausePlayback(progress: 60)
+        #expect(await coordinator.lastErrorMessage?.contains("stop scrobble failed") == true)
     }
 
     @Test("pausePlayback only works after startPlayback has been called")
@@ -620,6 +700,35 @@ struct ScrobbleCoordinatorErrorResilienceTests {
 
         let lastError = await coordinator.lastErrorMessage
         #expect(lastError?.contains("history sync failed") == true)
+    }
+
+    @Test("pause and resume scrobble failures are recorded after successful start")
+    func pauseAndResumeErrorsAreRecorded() async throws {
+        let (settings, secretStore) = try await makeSettingsManager()
+        try await enableTraktScrobble(settings: settings)
+
+        let session = makeScrobbleStubSession { request in
+            let path = request.url!.path
+            let body = request.httpBody.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+            let statusCode = path.contains("/scrobble/pause")
+                || (path.contains("/scrobble/start") && body.contains(#""progress":50"#))
+                ? 500
+                : 200
+            let response = HTTPURLResponse(url: request.url!, statusCode: statusCode, httpVersion: nil, headerFields: nil)!
+            return (response, Data(#"{"id":1,"action":"scrobble"}"#.utf8))
+        }
+        let coordinator = ScrobbleCoordinator(
+            settingsManager: settings,
+            secretStore: secretStore,
+            session: session
+        )
+
+        await coordinator.startPlayback(mediaId: "tt1234567", mediaType: .movie, progress: 0.1)
+        await coordinator.pausePlayback(progress: 25)
+        #expect(await coordinator.lastErrorMessage?.contains("pause scrobble failed") == true)
+
+        await coordinator.resumePlayback(progress: 50)
+        #expect(await coordinator.lastErrorMessage?.contains("resume scrobble failed") == true)
     }
 
     @Test("history sync still runs when start scrobble failed but playback meaningfully completed")

@@ -469,7 +469,7 @@ struct IndexerSettingsView: View {
         return persisted
     }
 
-    private struct IndexerDraft {
+    struct IndexerDraft {
         var editingID: String?
         var name: String
         var indexerType: IndexerConfig.IndexerType

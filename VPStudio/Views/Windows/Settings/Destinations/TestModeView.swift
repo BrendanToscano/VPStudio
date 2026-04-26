@@ -120,7 +120,7 @@ private struct TestScreenTile: View {
 
 // MARK: - Test Screen Definitions
 
-private enum TestScreen: String, CaseIterable, Identifiable {
+enum TestScreen: String, CaseIterable, Identifiable {
     case discover
     case search
     case searchResults
@@ -192,7 +192,7 @@ private enum TestScreen: String, CaseIterable, Identifiable {
 
 // MARK: - Test Screen Sheet
 
-private struct TestScreenSheet: View {
+struct TestScreenSheet: View {
     let screen: TestScreen
     @Environment(\.dismiss) private var dismiss
 

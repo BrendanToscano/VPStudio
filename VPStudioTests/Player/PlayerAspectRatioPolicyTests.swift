@@ -50,7 +50,30 @@ struct PlayerAspectRatioPolicyTests {
         #expect(AspectRatioSelection(qaValue: "16x9") == .sixteenByNine)
         #expect(AspectRatioSelection(qaValue: "auto") == .auto)
         #expect(AspectRatioSelection(qaValue: "4:3") == .fourByThree)
+        #expect(AspectRatioSelection(qaValue: "  CINEMASCOPE  ") == .twentyOneByNine)
+        #expect(AspectRatioSelection(qaValue: "unlock") == .freeform)
+        #expect(AspectRatioSelection(qaValue: "native") == .auto)
         #expect(AspectRatioSelection(qaValue: "unknown") == nil)
+    }
+
+    @Test
+    func selectionMetadataMatchesControlSemantics() {
+        #expect(AspectRatioSelection.auto.label == "Auto (Native)")
+        #expect(AspectRatioSelection.sixteenByNine.icon == "rectangle")
+        #expect(AspectRatioSelection.twentyOneByNine.icon == "aspectratio")
+        #expect(AspectRatioSelection.fourByThree.icon == "rectangle.portrait")
+        #expect(AspectRatioSelection.freeform.icon == "rectangle.dashed")
+        #expect(AspectRatioSelection.auto.locksWindowRatio)
+        #expect(AspectRatioSelection.freeform.locksWindowRatio == false)
+    }
+
+    @Test
+    func ratioRejectsDegenerateSizesAndUsesWidthOverHeight() throws {
+        #expect(PlayerAspectRatioPolicy.ratio(from: .zero) == nil)
+        #expect(PlayerAspectRatioPolicy.ratio(from: CGSize(width: 1920, height: 0)) == nil)
+        #expect(PlayerAspectRatioPolicy.ratio(from: CGSize(width: -1920, height: 1080)) == nil)
+        let resolved = try #require(PlayerAspectRatioPolicy.ratio(from: CGSize(width: 1920, height: 1080)))
+        #expect(abs(resolved - (16.0 / 9.0)) < 0.0001)
     }
 
     @Test
@@ -59,5 +82,12 @@ struct PlayerAspectRatioPolicyTests {
         let size = PlayerAspectRatioPolicy.windowAspectSize(for: 16.0 / 9.0)
         #expect(size?.height == 9)
         #expect(size?.width == 16)
+    }
+
+    @Test
+    func windowAspectSizeUsesNineUnitHeightForArbitraryRatio() {
+        let size = PlayerAspectRatioPolicy.windowAspectSize(for: 2.0)
+        #expect(size?.height == 9)
+        #expect(size?.width == 18)
     }
 }

@@ -106,16 +106,21 @@ private func formBodyValue(named name: String, in request: URLRequest) -> String
         .value
 }
 
+private func uniqueSyncClientID(_ prefix: String) -> String {
+    "\(prefix)-\(UUID().uuidString)"
+}
+
 // MARK: - TraktSyncService Tests
 
 @Suite("TraktSyncService - OAuth")
 struct TraktOAuthTests {
 
     @Test func getAuthorizationURLContainsClientId() async {
-        let service = TraktSyncService(clientId: "my-client-id", clientSecret: "secret")
+        let clientID = uniqueSyncClientID("my-client-id")
+        let service = TraktSyncService(clientId: clientID, clientSecret: "secret")
         let url = await service.getAuthorizationURL()
         #expect(url != nil)
-        #expect(url!.absoluteString.contains("my-client-id"))
+        #expect(url!.absoluteString.contains(clientID))
         #expect(url!.absoluteString.contains("response_type=code"))
         #expect(url!.absoluteString.contains("redirect_uri=urn"))
         #expect(queryValue(named: "state", in: url)?.isEmpty == false)
@@ -124,7 +129,7 @@ struct TraktOAuthTests {
     }
 
     @Test func getAuthorizationURLHostIsTrakt() async {
-        let service = TraktSyncService(clientId: "client", clientSecret: "secret")
+        let service = TraktSyncService(clientId: uniqueSyncClientID("trakt-host"), clientSecret: "secret")
         let url = await service.getAuthorizationURL()
         #expect(url?.host == "trakt.tv")
     }
@@ -145,7 +150,7 @@ struct TraktOAuthTests {
             return (response, Data(body.utf8))
         }
 
-        let service = TraktSyncService(clientId: "client", clientSecret: "secret", session: session)
+        let service = TraktSyncService(clientId: uniqueSyncClientID("trakt-exchange"), clientSecret: "secret", session: session)
         _ = await service.getAuthorizationURL()
         try await service.exchangeCode("auth-code-123")
         let tokens = await service.currentTokens()
@@ -191,7 +196,7 @@ struct TraktOAuthTests {
     }
 
     @Test func exchangeCodeThrowsWhenNoAuthorizationSessionExists() async {
-        let service = TraktSyncService(clientId: "client", clientSecret: "secret")
+        let service = TraktSyncService(clientId: uniqueSyncClientID("trakt-missing-session"), clientSecret: "secret")
 
         do {
             try await service.exchangeCode("the-code")
@@ -205,7 +210,7 @@ struct TraktOAuthTests {
     }
 
     @Test func exchangeCodeRejectsMismatchedReturnedState() async {
-        let service = TraktSyncService(clientId: "client", clientSecret: "secret")
+        let service = TraktSyncService(clientId: uniqueSyncClientID("trakt-state-mismatch"), clientSecret: "secret")
         _ = await service.getAuthorizationURL()
 
         do {
@@ -852,7 +857,7 @@ struct SimklOAuthTests {
     }
 
     @Test func exchangeAuthorizationCodeRejectsMissingAuthorizationSession() async {
-        let service = SimklSyncService(clientId: "simkl-client", clientSecret: "simkl-secret")
+        let service = SimklSyncService(clientId: uniqueSyncClientID("simkl-missing-session"), clientSecret: "simkl-secret")
 
         do {
             _ = try await service.exchangeAuthorizationCode("auth-code")
@@ -866,7 +871,7 @@ struct SimklOAuthTests {
     }
 
     @Test func exchangeAuthorizationCodeRejectsMismatchedReturnedState() async {
-        let service = SimklSyncService(clientId: "simkl-client", clientSecret: "simkl-secret")
+        let service = SimklSyncService(clientId: uniqueSyncClientID("simkl-state-mismatch"), clientSecret: "simkl-secret")
         _ = await service.getAuthorizationURL()
 
         do {

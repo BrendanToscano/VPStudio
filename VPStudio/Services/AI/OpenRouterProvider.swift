@@ -11,13 +11,13 @@ struct OpenRouterProvider: AIProvider, Sendable {
 
     init(
         apiKey: String,
-        model: String = "openrouter/google/gemini-2.5-flash-lite-preview",
+        model: String = "google/gemini-2.5-flash-lite-preview",
         baseURL: String = "https://openrouter.ai/api/v1/chat/completions",
         session: URLSession = AIHTTPTransport.defaultSession,
         sleep: @escaping AIHTTPSleep = AIHTTPTransport.defaultSleep
     ) {
         self.apiKey = apiKey
-        self.model = model
+        self.model = AIModelCatalog.providerNativeOpenRouterModelID(model)
         self.baseURL = baseURL
         self.session = session
         self.sleep = sleep
@@ -82,7 +82,7 @@ extension OpenRouterProvider {
     /// GET https://openrouter.ai/api/v1/models
     static let knownModels: [AIModelDefinition] = [
         AIModelDefinition(
-            id: "openrouter/google/gemini-2.5-flash-lite-preview",
+            id: "google/gemini-2.5-flash-lite-preview",
             displayName: "Gemini 2.5 Flash Lite (OpenRouter)",
             provider: .openRouter,
             inputCostPer1MTokens: 0.10,
@@ -91,7 +91,7 @@ extension OpenRouterProvider {
             isDefault: true
         ),
         AIModelDefinition(
-            id: "openrouter/anthropic/claude-3.5-haiku",
+            id: "anthropic/claude-3.5-haiku",
             displayName: "Claude 3.5 Haiku (OpenRouter)",
             provider: .openRouter,
             inputCostPer1MTokens: 0.80,
@@ -100,7 +100,7 @@ extension OpenRouterProvider {
             isDefault: false
         ),
         AIModelDefinition(
-            id: "openrouter/openai/gpt-4o-mini",
+            id: "openai/gpt-4o-mini",
             displayName: "GPT-4o Mini (OpenRouter)",
             provider: .openRouter,
             inputCostPer1MTokens: 0.15,
@@ -109,7 +109,7 @@ extension OpenRouterProvider {
             isDefault: false
         ),
         AIModelDefinition(
-            id: "openrouter/meta-llama/llama-3.1-8b-instruct",
+            id: "meta-llama/llama-3.1-8b-instruct",
             displayName: "Llama 3.1 8B (OpenRouter)",
             provider: .openRouter,
             inputCostPer1MTokens: 0.04,
@@ -118,7 +118,7 @@ extension OpenRouterProvider {
             isDefault: false
         ),
         AIModelDefinition(
-            id: "openrouter/mistralai/mistral-nemo",
+            id: "mistralai/mistral-nemo",
             displayName: "Mistral Nemo (OpenRouter)",
             provider: .openRouter,
             inputCostPer1MTokens: 0.15,
@@ -127,7 +127,7 @@ extension OpenRouterProvider {
             isDefault: false
         ),
         AIModelDefinition(
-            id: "openrouter/qwen/qwen-2.5-72b-instruct",
+            id: "qwen/qwen-2.5-72b-instruct",
             displayName: "Qwen 2.5 72B (OpenRouter)",
             provider: .openRouter,
             inputCostPer1MTokens: 0.90,

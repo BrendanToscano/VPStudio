@@ -647,20 +647,14 @@ struct SetupWizardView: View {
                 )
 
                 // Save AI key if a provider is selected and key is provided
-                if selectedAIProvider != .none, !normalizedAiKey.isEmpty {
-                    let aiSettingsKey: String = switch selectedAIProvider {
-                    case .openAI: SettingsKeys.openAIApiKey
-                    case .anthropic: SettingsKeys.anthropicApiKey
-                    case .gemini: SettingsKeys.geminiApiKey
-                    case .openRouter: SettingsKeys.openRouterApiKey
-                    case .none: ""
-                    }
-                    if !aiSettingsKey.isEmpty {
-                        try await appState.settingsManager.setValue(
-                            normalizedAiKey,
-                            forKey: aiSettingsKey
-                        )
-                    }
+                if SetupWizardValidationPolicy.shouldSaveAIKey(
+                    provider: selectedAIProvider,
+                    apiKey: normalizedAiKey
+                ), let aiSettingsKey = SetupWizardValidationPolicy.settingsKey(for: selectedAIProvider) {
+                    try await appState.settingsManager.setValue(
+                        normalizedAiKey,
+                        forKey: aiSettingsKey
+                    )
                 }
                 NotificationCenter.default.post(name: .settingsDidChange, object: nil)
                 NotificationCenter.default.post(name: .discoverAISettingsDidChange, object: nil)
@@ -692,17 +686,17 @@ struct SetupWizardView: View {
     }
 
     private var continueButtonTitle: String {
-        if currentStep == 1, debridApiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return "Skip for Now"
-        }
-        return "Continue"
+        SetupWizardValidationPolicy.continueButtonTitle(
+            currentStep: currentStep,
+            debridApiKey: debridApiKey
+        )
     }
 
     private var continueButtonIcon: String {
-        if currentStep == 1, debridApiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return "forward"
-        }
-        return "arrow.right"
+        SetupWizardValidationPolicy.continueButtonIcon(
+            currentStep: currentStep,
+            debridApiKey: debridApiKey
+        )
     }
 }
 
@@ -1036,33 +1030,18 @@ private struct WizardCompletionContent: View {
 
             // Summary
             VStack(spacing: 8) {
-                if !debridApiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    WizardSummaryRow(
-                        icon: "link",
-                        text: "\(selectedService.displayName) connected"
-                    )
-                }
-                if !tmdbApiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    WizardSummaryRow(
-                        icon: "film",
-                        text: "TMDB metadata configured"
-                    )
-                }
-                if selectedAIProvider != .none {
-                    WizardSummaryRow(
-                        icon: "brain",
-                        text: "\(selectedAIProvider.displayName) AI enabled"
-                    )
-                }
-                WizardSummaryRow(
-                    icon: "4k.tv",
-                    text: "Quality set to \(selectedQuality.rawValue)"
-                )
-                if selectedSubtitleLanguage != .none {
-                    WizardSummaryRow(
-                        icon: "captions.bubble",
-                        text: "\(selectedSubtitleLanguage.displayName) subtitles"
-                    )
+                ForEach(
+                    SetupWizardValidationPolicy.completionSummaryRows(
+                        selectedService: selectedService,
+                        debridApiKey: debridApiKey,
+                        tmdbApiKey: tmdbApiKey,
+                        selectedAIProvider: selectedAIProvider,
+                        selectedQuality: selectedQuality,
+                        selectedSubtitleLanguage: selectedSubtitleLanguage
+                    ),
+                    id: \.text
+                ) { row in
+                    WizardSummaryRow(icon: row.icon, text: row.text)
                 }
             }
             .opacity(summaryOpacity)
@@ -1193,10 +1172,66 @@ enum SubtitleLanguageOption: String, CaseIterable, Identifiable, Sendable {
 }
 
 enum SetupWizardValidationPolicy {
+    struct SummaryRow: Equatable, Sendable {
+        let icon: String
+        let text: String
+    }
+
     static let requiredTMDBMessage = "TMDB API key is required to continue."
 
     static func canContinueFromMetadataStep(tmdbApiKey: String) -> Bool {
         !tmdbApiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    static func trimmedValue(_ value: String) -> String {
+        value.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    static func continueButtonTitle(currentStep: Int, debridApiKey: String) -> String {
+        currentStep == 1 && trimmedValue(debridApiKey).isEmpty ? "Skip for Now" : "Continue"
+    }
+
+    static func continueButtonIcon(currentStep: Int, debridApiKey: String) -> String {
+        currentStep == 1 && trimmedValue(debridApiKey).isEmpty ? "forward" : "arrow.right"
+    }
+
+    static func settingsKey(for provider: AIProviderOption) -> String? {
+        switch provider {
+        case .openAI: SettingsKeys.openAIApiKey
+        case .anthropic: SettingsKeys.anthropicApiKey
+        case .gemini: SettingsKeys.geminiApiKey
+        case .openRouter: SettingsKeys.openRouterApiKey
+        case .none: nil
+        }
+    }
+
+    static func shouldSaveAIKey(provider: AIProviderOption, apiKey: String) -> Bool {
+        provider != .none && !trimmedValue(apiKey).isEmpty
+    }
+
+    static func completionSummaryRows(
+        selectedService: DebridServiceType,
+        debridApiKey: String,
+        tmdbApiKey: String,
+        selectedAIProvider: AIProviderOption,
+        selectedQuality: VideoQuality,
+        selectedSubtitleLanguage: SubtitleLanguageOption
+    ) -> [SummaryRow] {
+        var rows: [SummaryRow] = []
+        if !trimmedValue(debridApiKey).isEmpty {
+            rows.append(SummaryRow(icon: "link", text: "\(selectedService.displayName) connected"))
+        }
+        if !trimmedValue(tmdbApiKey).isEmpty {
+            rows.append(SummaryRow(icon: "film", text: "TMDB metadata configured"))
+        }
+        if selectedAIProvider != .none {
+            rows.append(SummaryRow(icon: "brain", text: "\(selectedAIProvider.displayName) AI enabled"))
+        }
+        rows.append(SummaryRow(icon: "4k.tv", text: "Quality set to \(selectedQuality.rawValue)"))
+        if selectedSubtitleLanguage != .none {
+            rows.append(SummaryRow(icon: "captions.bubble", text: "\(selectedSubtitleLanguage.displayName) subtitles"))
+        }
+        return rows
     }
 }
 

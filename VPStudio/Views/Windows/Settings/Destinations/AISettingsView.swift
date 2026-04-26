@@ -2,6 +2,52 @@ import SwiftUI
 
 // MARK: - AI Settings
 
+enum AISettingsPolicy {
+    static let discoverProviderRequiredMessage = "Configure an AI provider before enabling the Discover AI row."
+
+    static func providerSelectionLabel(for provider: AIProviderKind) -> String {
+        switch provider {
+        case .anthropic:
+            return "Anthropic Claude"
+        case .openAI:
+            return "OpenAI"
+        case .gemini:
+            return "Gemini"
+        case .openRouter:
+            return "OpenRouter"
+        case .ollama:
+            return "Ollama (Local)"
+        case .local:
+            return "On-Device (MLX)"
+        }
+    }
+
+    static func formattedCost(_ cost: Double) -> String {
+        if cost < 0.01 {
+            return String(format: "$%.4f", cost)
+        } else {
+            return String(format: "$%.2f", cost)
+        }
+    }
+
+    static func formattedTokens(_ count: Int) -> String {
+        if count >= 1_000_000 {
+            return String(format: "%.1fM", Double(count) / 1_000_000.0)
+        } else if count >= 1_000 {
+            return String(format: "%.1fK", Double(count) / 1_000.0)
+        } else {
+            return "\(count)"
+        }
+    }
+
+    static func validModelSelection(currentModelID: String, models: [AIModelDefinition]) -> String {
+        if models.contains(where: { $0.id == currentModelID }) {
+            return currentModelID
+        }
+        return models.first(where: \.isDefault)?.id ?? models.first?.id ?? currentModelID
+    }
+}
+
 struct AISettingsView: View {
     @Environment(AppState.self) private var appState
     @State private var anthropicKey = ""
@@ -245,7 +291,7 @@ struct AISettingsView: View {
             guard !isReloadingPersistedState else { return }
             guard !newValue || canEnableDiscoverAI else {
                 discoverAIEnabled = false
-                surfaceError = .unknown("Configure an AI provider before enabling the Discover AI row.")
+                surfaceError = .unknown(AISettingsPolicy.discoverProviderRequiredMessage)
                 return
             }
             Task {
@@ -429,11 +475,11 @@ struct AISettingsView: View {
     private var usageCostsSection: some View {
         Section("Usage & Costs") {
             LabeledContent("Session Cost") {
-                Text(formattedCost(sessionUsage.totalCostUSD))
+                Text(AISettingsPolicy.formattedCost(sessionUsage.totalCostUSD))
                     .monospacedDigit()
             }
             LabeledContent("Lifetime Cost") {
-                Text(formattedCost(lifetimeUsage.totalCostUSD))
+                Text(AISettingsPolicy.formattedCost(lifetimeUsage.totalCostUSD))
                     .monospacedDigit()
             }
             LabeledContent("Total Requests") {
@@ -449,9 +495,9 @@ struct AISettingsView: View {
                                 .foregroundStyle(.secondary)
                             Spacer()
                             VStack(alignment: .trailing, spacing: 2) {
-                                Text(formattedCost(usage.costUSD))
+                                Text(AISettingsPolicy.formattedCost(usage.costUSD))
                                     .monospacedDigit()
-                                Text("\(usage.requestCount) requests · \(formattedTokens(usage.inputTokens + usage.outputTokens)) tokens")
+                                Text("\(usage.requestCount) requests · \(AISettingsPolicy.formattedTokens(usage.inputTokens + usage.outputTokens)) tokens")
                                     .font(.caption)
                                     .foregroundStyle(.tertiary)
                             }
@@ -773,20 +819,7 @@ struct AISettingsView: View {
     }
 
     private func providerSelectionLabel(for provider: AIProviderKind) -> String {
-        switch provider {
-        case .anthropic:
-            return "Anthropic Claude"
-        case .openAI:
-            return "OpenAI"
-        case .gemini:
-            return "Gemini"
-        case .openRouter:
-            return "OpenRouter"
-        case .ollama:
-            return "Ollama (Local)"
-        case .local:
-            return "On-Device (MLX)"
-        }
+        AISettingsPolicy.providerSelectionLabel(for: provider)
     }
 
     @ViewBuilder
@@ -865,26 +898,6 @@ struct AISettingsView: View {
         }
     }
 
-    // MARK: - Cost Formatting
-
-    private func formattedCost(_ cost: Double) -> String {
-        if cost < 0.01 {
-            return String(format: "$%.4f", cost)
-        } else {
-            return String(format: "$%.2f", cost)
-        }
-    }
-
-    private func formattedTokens(_ count: Int) -> String {
-        if count >= 1_000_000 {
-            return String(format: "%.1fM", Double(count) / 1_000_000.0)
-        } else if count >= 1_000 {
-            return String(format: "%.1fK", Double(count) / 1_000.0)
-        } else {
-            return "\(count)"
-        }
-    }
-
     // MARK: - Model Fetching
 
     @MainActor
@@ -948,9 +961,7 @@ struct AISettingsView: View {
 
     /// Ensures the current selection exists in the model list to avoid invalid Picker tags.
     private func ensureSelectionValid(modelID: inout String, in models: [AIModelDefinition]) {
-        if !models.contains(where: { $0.id == modelID }) {
-            modelID = models.first(where: \.isDefault)?.id ?? models.first?.id ?? modelID
-        }
+        modelID = AISettingsPolicy.validModelSelection(currentModelID: modelID, models: models)
     }
 
     // MARK: - Data Loading

@@ -53,6 +53,22 @@ private final class IndexerConnectivityURLProtocolStub: URLProtocol, @unchecked 
 
 @Suite
 struct IndexerConnectivityTests {
+    @Test func connectivityErrorDescriptionsAreActionable() {
+        let connectivityErrors: [IndexerConnectivityError] = [
+            .invalidBaseURL,
+            .missingAPIKey,
+            .invalidResponse,
+            .badStatusCode(503),
+            .incompatibleManifest,
+        ]
+
+        for error in connectivityErrors {
+            #expect(error.errorDescription?.isEmpty == false)
+        }
+        #expect(IndexerConnectivityError.badStatusCode(503).errorDescription?.contains("503") == true)
+        #expect(IndexerRequestError.rateLimited.errorDescription?.contains("rate limit") == true)
+    }
+
     @Test func torznabConnectionSuccessSendsHeaderApiKeyAndCapsQuery() async throws {
         final class RequestState: @unchecked Sendable {
             var headerValue: String?
@@ -260,6 +276,46 @@ struct IndexerConnectivityTests {
         #expect(state.capturedPath.hasSuffix("/custom-api/dmm/search"))
     }
 
+    @Test func zileanRequestUsesDefaultPathAndPreservesAlreadyExpandedEndpoint() throws {
+        let defaultRequest = try IndexerConnectivityTester.makeRequest(for: IndexerConfig(
+            id: "zilean-default",
+            name: "Zilean Default",
+            indexerType: .zilean,
+            baseURL: "https://zilean.example",
+            apiKey: nil,
+            isActive: true,
+            priority: 0
+        ))
+        let expandedRequest = try IndexerConnectivityTester.makeRequest(for: IndexerConfig(
+            id: "zilean-expanded",
+            name: "Zilean Expanded",
+            indexerType: .zilean,
+            baseURL: "https://zilean.example/root",
+            apiKey: nil,
+            isActive: true,
+            priority: 0,
+            endpointPath: "/api/dmm/search"
+        ))
+
+        #expect(defaultRequest.url?.path == "/api/dmm/search")
+        #expect(expandedRequest.url?.path == "/root/api/dmm/search")
+    }
+
+    @Test func stremioRequestUsesDefaultManifestPath() throws {
+        let request = try IndexerConnectivityTester.makeRequest(for: IndexerConfig(
+            id: "stremio-default",
+            name: "Stremio Default",
+            indexerType: .stremio,
+            baseURL: "https://stremio-addon.example",
+            apiKey: nil,
+            isActive: true,
+            priority: 0
+        ))
+
+        #expect(request.url?.path == "/manifest.json")
+        #expect(request.url?.query == nil)
+    }
+
     @Test func stremioConnectionTargetsManifestEndpoint() async throws {
         final class RequestState: @unchecked Sendable {
             var capturedPath: String = ""
@@ -326,6 +382,63 @@ struct IndexerConnectivityTests {
         }
     }
 
+    @Test func stremioConnectionAcceptsSeriesSearchCatalogCaseInsensitively() async throws {
+        let session = makeStubSession { request in
+            let url = try #require(request.url)
+            let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            let body = #"{"catalogs":[{"id":"series-search","type":"SERIES","extra":[{"name":"Search"}]}]}"#
+            return (response, Data(body.utf8))
+        }
+
+        let config = IndexerConfig(
+            id: "stremio-series",
+            name: "Stremio Series",
+            indexerType: .stremio,
+            baseURL: "https://stremio-addon.example",
+            apiKey: nil,
+            isActive: true,
+            priority: 0,
+            providerSubtype: .stremioAddon,
+            endpointPath: "/manifest.json",
+            categoryFilter: nil,
+            apiKeyTransport: .query
+        )
+
+        try await IndexerConnectivityTester.testConnection(for: config, session: session)
+    }
+
+    @Test func stremioConnectionRejectsCatalogsWithoutSearchExtra() async {
+        let session = makeStubSession { request in
+            let url = try #require(request.url)
+            let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            let body = #"{"catalogs":[{"id":"movie","type":"movie","extra":[{"name":"genre"}]}]}"#
+            return (response, Data(body.utf8))
+        }
+
+        let config = IndexerConfig(
+            id: "stremio-no-search",
+            name: "Stremio No Search",
+            indexerType: .stremio,
+            baseURL: "https://stremio-addon.example",
+            apiKey: nil,
+            isActive: true,
+            priority: 0,
+            providerSubtype: .stremioAddon,
+            endpointPath: "/manifest.json",
+            categoryFilter: nil,
+            apiKeyTransport: .query
+        )
+
+        do {
+            try await IndexerConnectivityTester.testConnection(for: config, session: session)
+            Issue.record("Expected IndexerConnectivityError.incompatibleManifest")
+        } catch IndexerConnectivityError.incompatibleManifest {
+            #expect(Bool(true))
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+    }
+
     @Test func ytsConnectionUsesReachableFallbackHost() throws {
         let config = IndexerConfig(
             id: "yts-1",
@@ -348,6 +461,205 @@ struct IndexerConnectivityTests {
             .value == "1")
     }
 
+    @Test func builtInIndexerRequestsUseExpectedPathsAndJSONPayloads() async throws {
+        final class RequestState: @unchecked Sendable {
+            var paths: [String] = []
+            var queries: [[URLQueryItem]] = []
+        }
+        let state = RequestState()
+        let session = makeStubSession { request in
+            let url = try #require(request.url)
+            state.paths.append(url.path)
+            state.queries.append(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? [])
+            let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (response, Data(#"[]"#.utf8))
+        }
+
+        try await IndexerConnectivityTester.testConnection(
+            for: IndexerConfig(id: "apibay", name: "APIBay", indexerType: .apiBay, baseURL: nil, apiKey: nil, isActive: true, priority: 0),
+            session: session
+        )
+        try await IndexerConnectivityTester.testConnection(
+            for: IndexerConfig(id: "yts", name: "YTS", indexerType: .yts, baseURL: nil, apiKey: nil, isActive: true, priority: 0),
+            session: session
+        )
+        try await IndexerConnectivityTester.testConnection(
+            for: IndexerConfig(id: "eztv", name: "EZTV", indexerType: .eztv, baseURL: nil, apiKey: nil, isActive: true, priority: 0),
+            session: session
+        )
+
+        #expect(state.paths.contains("/q.php"))
+        #expect(state.paths.contains("/api/v2/list_movies.json"))
+        #expect(state.paths.contains("/api/get-torrents"))
+        #expect(state.queries.flatMap { $0 }.contains(URLQueryItem(name: "q", value: "test")))
+        #expect(state.queries.flatMap { $0 }.contains(URLQueryItem(name: "limit", value: "1")))
+    }
+
+    @Test func jsonPayloadValidationRejectsNonJSONObjectPayloads() async {
+        let session = makeStubSession { request in
+            let url = try #require(request.url)
+            let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (response, Data("not json".utf8))
+        }
+
+        let config = IndexerConfig(
+            id: "zilean-invalid",
+            name: "Zilean Invalid",
+            indexerType: .zilean,
+            baseURL: "https://zilean.example",
+            apiKey: nil,
+            isActive: true,
+            priority: 0
+        )
+
+        do {
+            try await IndexerConnectivityTester.testConnection(for: config, session: session)
+            Issue.record("Expected IndexerConnectivityError.invalidResponse")
+        } catch IndexerConnectivityError.invalidResponse {
+            #expect(Bool(true))
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+    }
+
+    @Test func torznabCapsValidationAcceptsErrorRootAndRejectsUnexpectedRoot() async throws {
+        let errorSession = makeStubSession { request in
+            let url = try #require(request.url)
+            let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (response, Data("<error code=\"100\" description=\"bad api key\" />".utf8))
+        }
+        let badRootSession = makeStubSession { request in
+            let url = try #require(request.url)
+            let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (response, Data("<rss></rss>".utf8))
+        }
+        let config = IndexerConfig(
+            id: "torznab-caps",
+            name: "Torznab Caps",
+            indexerType: .torznab,
+            baseURL: "https://indexer.example",
+            apiKey: "key",
+            isActive: true,
+            priority: 0
+        )
+
+        try await IndexerConnectivityTester.testConnection(for: config, session: errorSession)
+        do {
+            try await IndexerConnectivityTester.testConnection(for: config, session: badRootSession)
+            Issue.record("Expected IndexerConnectivityError.invalidResponse")
+        } catch IndexerConnectivityError.invalidResponse {
+            #expect(Bool(true))
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+    }
+
+    @Test func torznabCapsValidationRejectsMalformedXML() async {
+        let session = makeStubSession { request in
+            let url = try #require(request.url)
+            let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (response, Data("<caps><broken></caps>".utf8))
+        }
+        let config = IndexerConfig(
+            id: "torznab-malformed",
+            name: "Torznab Malformed",
+            indexerType: .torznab,
+            baseURL: "https://indexer.example",
+            apiKey: "key",
+            isActive: true,
+            priority: 0
+        )
+
+        do {
+            try await IndexerConnectivityTester.testConnection(for: config, session: session)
+            Issue.record("Expected malformed caps XML to be rejected")
+        } catch IndexerConnectivityError.invalidResponse {
+            #expect(Bool(true))
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+    }
+
+    @Test func requestLimiterRetriesRetryableStatusAndMapsPersistent429() async throws {
+        final class RequestState: @unchecked Sendable { var count = 0 }
+        let transient = RequestState()
+        let transientSession = makeStubSession { request in
+            transient.count += 1
+            let url = try #require(request.url)
+            let status = transient.count == 1 ? 503 : 200
+            let response = HTTPURLResponse(url: url, statusCode: status, httpVersion: nil, headerFields: ["Retry-After": "0.001"])!
+            return (response, Data(#"{"ok":true}"#.utf8))
+        }
+        let rateLimitedSession = makeStubSession { request in
+            let url = try #require(request.url)
+            let response = HTTPURLResponse(url: url, statusCode: 429, httpVersion: nil, headerFields: ["Retry-After": "0.001"])!
+            return (response, Data())
+        }
+        let limiter = IndexerRequestLimiter(minimumRequestInterval: 0.001, maximumBackoffInterval: 0.001, maximumAttempts: 2)
+        let request = URLRequest(url: URL(string: "https://indexer.example/api")!)
+
+        let (_, response) = try await limiter.data(for: request, session: transientSession)
+        #expect((response as? HTTPURLResponse)?.statusCode == 200)
+        #expect(transient.count == 2)
+
+        do {
+            _ = try await IndexerRequestLimiter(minimumRequestInterval: 0.001, maximumBackoffInterval: 0.001, maximumAttempts: 2)
+                .data(for: request, session: rateLimitedSession)
+            Issue.record("Expected IndexerRequestError.rateLimited")
+        } catch IndexerRequestError.rateLimited {
+            #expect(Bool(true))
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+    }
+
+    @Test func requestLimiterHonorsHTTPDateRetryAfterHeader() async throws {
+        final class RequestState: @unchecked Sendable { var count = 0 }
+        let state = RequestState()
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "EEE',' dd MMM yyyy HH':'mm':'ss zzz"
+        let retryAfter = formatter.string(from: Date(timeIntervalSinceNow: 60))
+
+        let session = makeStubSession { request in
+            state.count += 1
+            let url = try #require(request.url)
+            let status = state.count == 1 ? 503 : 200
+            let response = HTTPURLResponse(
+                url: url,
+                statusCode: status,
+                httpVersion: nil,
+                headerFields: ["Retry-After": retryAfter]
+            )!
+            return (response, Data(#"{"ok":true}"#.utf8))
+        }
+        let limiter = IndexerRequestLimiter(minimumRequestInterval: 0.001, maximumBackoffInterval: 0.001, maximumAttempts: 2)
+        let request = URLRequest(url: URL(string: "https://indexer.example/api")!)
+
+        let (_, response) = try await limiter.data(for: request, session: session)
+
+        #expect((response as? HTTPURLResponse)?.statusCode == 200)
+        #expect(state.count == 2)
+    }
+
+    @Test func requestLimiterMapsTransportTimeoutAfterRetries() async {
+        let session = makeThrowingStubSession { _ in
+            throw URLError(.timedOut)
+        }
+        let limiter = IndexerRequestLimiter(minimumRequestInterval: 0.001, maximumBackoffInterval: 0.001, maximumAttempts: 2)
+        let request = URLRequest(url: URL(string: "https://indexer.example/api")!)
+
+        do {
+            _ = try await limiter.data(for: request, session: session)
+            Issue.record("Expected timeout URLError")
+        } catch let error as URLError {
+            #expect(error.code == .timedOut)
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+    }
+
     private func makeStubSession(
         handler: @escaping (URLRequest) throws -> (HTTPURLResponse, Data)
     ) -> URLSession {
@@ -356,5 +668,9 @@ struct IndexerConnectivityTests {
         config.protocolClasses = [IndexerConnectivityURLProtocolStub.self]
         config.httpAdditionalHeaders = [IndexerConnectivityURLProtocolStub.handlerHeader: handlerID]
         return URLSession(configuration: config)
+    }
+
+    private func makeThrowingStubSession(handler: @escaping (URLRequest) throws -> (HTTPURLResponse, Data)) -> URLSession {
+        makeStubSession(handler: handler)
     }
 }

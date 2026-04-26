@@ -40,6 +40,38 @@ struct EnvironmentLoaderTaskLifecycleTests {
         #expect(source.contains("assetLoadTask = nil"))
     }
 
+    @Test
+    func builtInCinemaEnvironmentIsVisibleInSharedPickerEvenWithoutImportedAssets() throws {
+        let source = try contents(of: "VPStudio/Views/Windows/Discover/EnvironmentPreviewRow.swift")
+
+        #expect(source.contains("var onSelectCinema: (() -> Void)? = nil"))
+        #expect(source.contains("CinemaEnvironmentPreviewCard("))
+        #expect(source.contains("Text(\"Cinema Environment\")"))
+        #expect(source.contains("Text(\"No imported environments\")"))
+        #expect(source.contains("Text(\"No Environments\")") == false)
+    }
+
+    @Test
+    func playerEnvironmentPickerPassesCinemaOpenAction() throws {
+        let source = try contents(of: "VPStudio/Views/Windows/Player/PlayerView.swift")
+
+        #expect(source.contains("onSelectCinema: {"))
+        #expect(source.contains("openCinemaEnvironmentAfterMenuDismissal()"))
+    }
+
+    @Test
+    func mainEnvironmentSurfacesExposeBuiltInCinemaEnvironment() throws {
+        let contentSource = try contents(of: "VPStudio/Views/Windows/ContentView.swift")
+        let settingsSource = try contents(of: "VPStudio/Views/Windows/Settings/Destinations/EnvironmentSettingsView.swift")
+
+        #expect(contentSource.contains("CinemaEnvironmentPreviewCard("))
+        #expect(contentSource.contains("selectCinemaEnvironment()"))
+        #expect(contentSource.contains("openImmersiveSpace(id: EnvironmentType.cinemaEnvironment.immersiveSpaceId)"))
+        #expect(settingsSource.contains("builtInCinemaRow"))
+        #expect(settingsSource.contains("Text(\"Cinema Environment\")"))
+        #expect(settingsSource.contains("Text(\"Built-In\")"))
+    }
+
     private func contents(of relativePath: String) throws -> String {
         let absolutePath = repoRootURL().appendingPathComponent(relativePath).path
         return try String(contentsOfFile: absolutePath, encoding: .utf8)

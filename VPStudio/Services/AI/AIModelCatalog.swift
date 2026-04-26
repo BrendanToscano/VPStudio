@@ -197,7 +197,7 @@ enum AIModelCatalog {
     // MARK: OpenRouter Models
 
     static let openRouterGeminiFlashLite = AIModelDefinition(
-        id: "openrouter/google/gemini-2.5-flash-lite-preview",
+        id: "google/gemini-2.5-flash-lite-preview",
         displayName: "Gemini 2.5 Flash Lite (OpenRouter)",
         provider: .openRouter,
         inputCostPer1MTokens: 0.10,
@@ -207,7 +207,7 @@ enum AIModelCatalog {
     )
 
     static let openRouterClaudeHaiku = AIModelDefinition(
-        id: "openrouter/anthropic/claude-3.5-haiku",
+        id: "anthropic/claude-3.5-haiku",
         displayName: "Claude 3.5 Haiku (OpenRouter)",
         provider: .openRouter,
         inputCostPer1MTokens: 0.80,
@@ -217,7 +217,7 @@ enum AIModelCatalog {
     )
 
     static let openRouterGPT4oMini = AIModelDefinition(
-        id: "openrouter/openai/gpt-4o-mini",
+        id: "openai/gpt-4o-mini",
         displayName: "GPT-4o Mini (OpenRouter)",
         provider: .openRouter,
         inputCostPer1MTokens: 0.15,
@@ -227,7 +227,7 @@ enum AIModelCatalog {
     )
 
     static let openRouterLlama3 = AIModelDefinition(
-        id: "openrouter/meta-llama/llama-3.1-8b-instruct",
+        id: "meta-llama/llama-3.1-8b-instruct",
         displayName: "Llama 3.1 8B (OpenRouter)",
         provider: .openRouter,
         inputCostPer1MTokens: 0.04,
@@ -237,7 +237,7 @@ enum AIModelCatalog {
     )
 
     static let openRouterMistralNemo = AIModelDefinition(
-        id: "openrouter/mistralai/mistral-nemo",
+        id: "mistralai/mistral-nemo",
         displayName: "Mistral Nemo (OpenRouter)",
         provider: .openRouter,
         inputCostPer1MTokens: 0.15,
@@ -247,7 +247,7 @@ enum AIModelCatalog {
     )
 
     static let openRouterQwen = AIModelDefinition(
-        id: "openrouter/qwen/qwen-2.5-72b-instruct",
+        id: "qwen/qwen-2.5-72b-instruct",
         displayName: "Qwen 2.5 72B (OpenRouter)",
         provider: .openRouter,
         inputCostPer1MTokens: 0.90,
@@ -315,7 +315,23 @@ enum AIModelCatalog {
 
     /// Looks up a model by its ID across all providers.
     static func model(byID id: String) -> AIModelDefinition? {
-        allModels.first { $0.id == id }
+        if let exactMatch = allModels.first(where: { $0.id == id }) {
+            return exactMatch
+        }
+
+        let normalizedOpenRouterID = providerNativeOpenRouterModelID(id)
+        guard normalizedOpenRouterID != id else { return nil }
+        return allModels.first { $0.provider == .openRouter && $0.id == normalizedOpenRouterID }
+    }
+
+    /// Converts legacy app-prefixed OpenRouter IDs to the provider-native IDs accepted by OpenRouter.
+    static func providerNativeOpenRouterModelID(_ id: String) -> String {
+        let trimmed = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        let legacyPrefix = "openrouter/"
+        if trimmed.range(of: legacyPrefix, options: [.anchored, .caseInsensitive]) != nil {
+            return String(trimmed.dropFirst(legacyPrefix.count))
+        }
+        return trimmed
     }
 
     // MARK: Cost Estimation
@@ -341,12 +357,15 @@ enum AIModelCatalog {
 enum AIModelFetcher {
 
     /// Fetches available models from the OpenAI API.
-    static func fetchOpenAIModels(apiKey: String) async -> [AIModelDefinition] {
+    static func fetchOpenAIModels(
+        apiKey: String,
+        session: URLSession = .shared
+    ) async -> [AIModelDefinition] {
         guard !apiKey.isEmpty else { return [] }
         var request = URLRequest(url: URL(string: "https://api.openai.com/v1/models")!)
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.timeoutInterval = 15
-        guard let (data, response) = try? await URLSession.shared.data(for: request),
+        guard let (data, response) = try? await session.data(for: request),
               let http = response as? HTTPURLResponse, http.statusCode == 200 else { return [] }
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let items = json["data"] as? [[String: Any]] else { return [] }
@@ -373,13 +392,16 @@ enum AIModelFetcher {
     }
 
     /// Fetches available models from the Anthropic API.
-    static func fetchAnthropicModels(apiKey: String) async -> [AIModelDefinition] {
+    static func fetchAnthropicModels(
+        apiKey: String,
+        session: URLSession = .shared
+    ) async -> [AIModelDefinition] {
         guard !apiKey.isEmpty else { return [] }
         var request = URLRequest(url: URL(string: "https://api.anthropic.com/v1/models?limit=50")!)
         request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
         request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
         request.timeoutInterval = 15
-        guard let (data, response) = try? await URLSession.shared.data(for: request),
+        guard let (data, response) = try? await session.data(for: request),
               let http = response as? HTTPURLResponse, http.statusCode == 200 else { return [] }
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let items = json["data"] as? [[String: Any]] else { return [] }
@@ -402,13 +424,16 @@ enum AIModelFetcher {
     }
 
     /// Fetches locally installed models from an Ollama instance.
-    static func fetchOllamaModels(baseURL: String) async -> [AIModelDefinition] {
+    static func fetchOllamaModels(
+        baseURL: String,
+        session: URLSession = .shared
+    ) async -> [AIModelDefinition] {
         let endpoint = baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         guard AIOllamaEndpointPolicy.isAllowedBaseURL(endpoint) else { return [] }
         guard let url = URL(string: "\(endpoint)/api/tags") else { return [] }
         var request = URLRequest(url: url)
         request.timeoutInterval = 10
-        guard let (data, response) = try? await URLSession.shared.data(for: request),
+        guard let (data, response) = try? await session.data(for: request),
               let http = response as? HTTPURLResponse, http.statusCode == 200 else { return [] }
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let models = json["models"] as? [[String: Any]] else { return [] }
@@ -450,7 +475,9 @@ enum AIModelFetcher {
               let items = json["data"] as? [[String: Any]] else { return [] }
 
         return items.compactMap { item -> AIModelDefinition? in
-            guard let id = item["id"] as? String, !id.isEmpty else { return nil }
+            guard let rawID = item["id"] as? String else { return nil }
+            let id = AIModelCatalog.providerNativeOpenRouterModelID(rawID)
+            guard !id.isEmpty else { return nil }
             let catalogMatch = AIModelCatalog.model(byID: id)
             let displayName = (item["name"] as? String)
                 ?? catalogMatch?.displayName
@@ -480,7 +507,10 @@ enum AIModelFetcher {
     }
 
     /// Fetches available models from the Google Gemini API.
-    static func fetchGeminiModels(apiKey: String) async -> [AIModelDefinition] {
+    static func fetchGeminiModels(
+        apiKey: String,
+        session: URLSession = .shared
+    ) async -> [AIModelDefinition] {
         let trimmedAPIKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedAPIKey.isEmpty else { return [] }
         var components = URLComponents(string: "https://generativelanguage.googleapis.com")
@@ -491,7 +521,7 @@ enum AIModelFetcher {
         request.timeoutInterval = 15
         request.cachePolicy = .reloadIgnoringLocalCacheData
         request.httpShouldHandleCookies = false
-        guard let (data, response) = try? await URLSession.shared.data(for: request),
+        guard let (data, response) = try? await session.data(for: request),
               let http = response as? HTTPURLResponse, http.statusCode == 200 else { return [] }
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let items = json["models"] as? [[String: Any]] else { return [] }

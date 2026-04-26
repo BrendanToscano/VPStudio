@@ -57,6 +57,50 @@ enum DetailRefreshLoadingPresentationPolicy {
     }
 }
 
+enum DetailPresentationPolicy {
+    static let activeSessionToastText = "A video is already playing"
+
+    static func yearText(_ year: Int?) -> String? {
+        year.map(String.init)
+    }
+
+    static func imdbRatingText(_ rating: Double?) -> String? {
+        guard let rating, rating > 0 else { return nil }
+        return String(format: "%.1f", rating)
+    }
+
+    static func runtimeText(_ runtimeString: String?) -> String? {
+        guard let runtimeString, !runtimeString.isEmpty else { return nil }
+        return runtimeString
+    }
+
+    static func feedbackDraftValue(currentValue: Double?, scaleMode: FeedbackScaleMode) -> Double {
+        if let currentValue {
+            return scaleMode.clamp(currentValue)
+        }
+        return scaleMode.maximumValue
+    }
+
+    static func shareItem(
+        previewID: String,
+        previewTitle: String,
+        previewType: MediaType,
+        previewTMDBID: Int?,
+        mediaTitle: String?,
+        mediaTMDBID: Int?
+    ) -> String {
+        let baseTitle = mediaTitle ?? previewTitle
+        if previewID.hasPrefix("tt") {
+            return "\(baseTitle)\nhttps://www.imdb.com/title/\(previewID)/"
+        }
+        if let tmdbId = mediaTMDBID ?? previewTMDBID {
+            let path = previewType == .movie ? "movie" : "tv"
+            return "\(baseTitle)\nhttps://www.themoviedb.org/\(path)/\(tmdbId)"
+        }
+        return baseTitle
+    }
+}
+
 struct DetailView: View {
     let preview: MediaPreview
     let initialAction: DetailInitialAction
@@ -268,7 +312,7 @@ struct DetailView: View {
                 HStack(spacing: 8) {
                     Image(systemName: "play.circle.fill")
                         .font(.caption.weight(.semibold))
-                    Text("A video is already playing")
+                    Text(DetailPresentationPolicy.activeSessionToastText)
                         .font(.caption.weight(.semibold))
                 }
                 .foregroundStyle(.white)
@@ -293,15 +337,15 @@ struct DetailView: View {
     private func metadataRow(_ vm: DetailViewModel) -> some View {
         HStack(spacing: 16) {
             if let year = vm.mediaItem?.year {
-                Label(String(year), systemImage: "calendar")
+                Label(DetailPresentationPolicy.yearText(year) ?? "", systemImage: "calendar")
                     .font(.subheadline)
             }
-            if let rating = vm.mediaItem?.imdbRating, rating > 0 {
-                Label(String(format: "%.1f", rating), systemImage: "star.fill")
+            if let rating = DetailPresentationPolicy.imdbRatingText(vm.mediaItem?.imdbRating) {
+                Label(rating, systemImage: "star.fill")
                     .font(.subheadline)
                     .foregroundStyle(.yellow)
             }
-            if let runtime = vm.mediaItem?.runtimeString, !runtime.isEmpty {
+            if let runtime = DetailPresentationPolicy.runtimeText(vm.mediaItem?.runtimeString) {
                 Label(runtime, systemImage: "clock")
                     .font(.subheadline)
             }
@@ -313,23 +357,21 @@ struct DetailView: View {
     }
 
     private func prepareFeedbackDraft(_ vm: DetailViewModel) {
-        if let current = vm.currentFeedbackValue {
-            draftFeedbackValue = vm.feedbackScaleMode.clamp(current)
-        } else {
-            draftFeedbackValue = vm.feedbackScaleMode.maximumValue
-        }
+        draftFeedbackValue = DetailPresentationPolicy.feedbackDraftValue(
+            currentValue: vm.currentFeedbackValue,
+            scaleMode: vm.feedbackScaleMode
+        )
     }
 
     private func detailShareItem(_ vm: DetailViewModel) -> String {
-        let baseTitle = vm.mediaItem?.title ?? preview.title
-        if preview.id.hasPrefix("tt") {
-            return "\(baseTitle)\nhttps://www.imdb.com/title/\(preview.id)/"
-        }
-        if let tmdbId = vm.mediaItem?.tmdbId ?? preview.tmdbId {
-            let path = preview.type == .movie ? "movie" : "tv"
-            return "\(baseTitle)\nhttps://www.themoviedb.org/\(path)/\(tmdbId)"
-        }
-        return baseTitle
+        DetailPresentationPolicy.shareItem(
+            previewID: preview.id,
+            previewTitle: preview.title,
+            previewType: preview.type,
+            previewTMDBID: preview.tmdbId,
+            mediaTitle: vm.mediaItem?.title,
+            mediaTMDBID: vm.mediaItem?.tmdbId
+        )
     }
 
     private func castBestAvailable(_ vm: DetailViewModel) {

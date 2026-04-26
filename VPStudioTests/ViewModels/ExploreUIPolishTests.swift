@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 import Testing
 @testable import VPStudio
 
@@ -209,6 +210,23 @@ struct ExploreUIPolishTests {
         ]
         let actualIds = Set(ExploreGenreCatalog.cards.map(\.id))
         #expect(actualIds == expectedIds)
+    }
+
+    @Test func genreTilePolicyUsesReferenceSnapshotNames() {
+        for card in ExploreGenreCatalog.cards {
+            #expect(ExploreGenreTilePolicy.imageName(for: card) == "genre-ref-\(card.id)")
+            #expect(ExploreGenreTilePolicy.accessibilityLabel(for: card) == "\(card.title), \(card.subtitle)")
+        }
+    }
+
+    @Test func genreTilePolicyKeepsScreenshotGeometryStable() {
+        #expect(ExploreGenreTilePolicy.columns == 7)
+        #expect(ExploreGenreTilePolicy.tileWidth == 128)
+        #expect(ExploreGenreTilePolicy.columnSpacing == 16)
+        #expect(ExploreGenreTilePolicy.rowSpacing == 15)
+        #expect(ExploreGenreTilePolicy.cornerRadius == 17)
+        #expect(abs(Double(ExploreGenreTilePolicy.referenceAspectRatio) - (227.0 / 251.0)) < 0.000_001)
+        #expect(ExploreGenreTilePolicy.gridColumns().count == ExploreGenreTilePolicy.columns)
     }
 
     // MARK: - SearchLanguageOption

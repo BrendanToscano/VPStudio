@@ -256,7 +256,7 @@ struct ViewModelTaskLifecycleTests {
         #expect(source.contains("return Button {"))
         #expect(source.contains("viewModel.selectEpisode(episode)"))
         #expect(source.contains(".contextMenu {"))
-        #expect(source.contains(".accessibilityLabel(\"Episode"))
+        #expect(source.contains(".accessibilityLabel(SeriesDetailPresentationPolicy.episodeAccessibilityLabel("))
         #expect(source.contains("Press and hold for watched options."))
     }
 

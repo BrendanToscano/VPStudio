@@ -155,6 +155,37 @@ struct PlayerLoadingTipsTests {
         #expect(validIds.contains(rotator.currentTip.id))
     }
 
+    @Test @MainActor func singleTipRotatorCanAdvanceWithoutChangingTip() {
+        let tip = PlayerLoadingTip(id: "only", text: "Only tip", icon: "hourglass")
+        let rotator = PlayerLoadingTipRotator(tips: [tip], interval: 0)
+
+        for _ in 0..<5 {
+            rotator.advance()
+            #expect(rotator.currentTip == tip)
+        }
+    }
+
+    @Test @MainActor func automaticStartAdvancesWithShortInterval() async throws {
+        let tips = [
+            PlayerLoadingTip(id: "a", text: "A", icon: "star"),
+            PlayerLoadingTip(id: "b", text: "B", icon: "globe"),
+        ]
+        let rotator = PlayerLoadingTipRotator(tips: tips, interval: 0.01)
+        let initial = rotator.currentTip
+
+        rotator.start()
+        defer { rotator.stop() }
+
+        for _ in 0..<50 {
+            try await Task.sleep(nanoseconds: 10_000_000)
+            if rotator.currentTip != initial {
+                return
+            }
+        }
+
+        Issue.record("Rotator did not advance after start()")
+    }
+
     // MARK: - Lifecycle
 
     @Test @MainActor func stopCancelsRotation() {

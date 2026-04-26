@@ -8,36 +8,46 @@ import SwiftUI
 /// or `assets` change — not on every engine time-tick that rebuilds the parent.
 struct PlayerEnvironmentMenu: View {
     let assets: [EnvironmentAsset]
+    let onSelectCinema: () -> Void
     let onSelect: (EnvironmentAsset) -> Void
     let onDismiss: () -> Void
 
     @Environment(AppState.self) private var appState
 
     var body: some View {
-        if !assets.isEmpty || appState.isImmersiveSpaceOpen {
-            Menu {
-                ForEach(assets, id: \.id) { asset in
-                    Button {
-                        onSelect(asset)
-                    } label: {
-                        if asset.isActive {
-                            Label(asset.name, systemImage: "checkmark")
-                        } else {
-                            Label(asset.name, systemImage: asset.sourceType == .bundled ? "circle.fill" : "pano")
-                        }
-                    }
-                }
-                if appState.isImmersiveSpaceOpen {
-                    Divider()
-                    Button("Exit Environment", systemImage: "xmark.circle") {
-                        onDismiss()
-                    }
-                }
+        Menu {
+            Button {
+                onSelectCinema()
             } label: {
-                Image(systemName: appState.isImmersiveSpaceOpen ? "mountain.2.fill" : "mountain.2")
-                    .font(.title3)
-                    .foregroundStyle(appState.isImmersiveSpaceOpen ? .blue : .primary)
+                if appState.activeEnvironment == .cinemaEnvironment,
+                   appState.isImmersiveSpaceOpen {
+                    Label("Cinema Environment", systemImage: "checkmark")
+                } else {
+                    Label("Cinema Environment", systemImage: "theatermasks")
+                }
             }
+            Divider()
+            ForEach(assets, id: \.id) { asset in
+                Button {
+                    onSelect(asset)
+                } label: {
+                    if asset.isActive {
+                        Label(asset.name, systemImage: "checkmark")
+                    } else {
+                        Label(asset.name, systemImage: asset.sourceType == .bundled ? "circle.fill" : "pano")
+                    }
+                }
+            }
+            if appState.isImmersiveSpaceOpen {
+                Divider()
+                Button("Exit Environment", systemImage: "xmark.circle") {
+                    onDismiss()
+                }
+            }
+        } label: {
+            Image(systemName: appState.isImmersiveSpaceOpen ? "mountain.2.fill" : "mountain.2")
+                .font(.title3)
+                .foregroundStyle(appState.isImmersiveSpaceOpen ? .blue : .primary)
         }
     }
 }
@@ -49,6 +59,7 @@ struct PlayerEnvironmentMenu: View {
 /// engine time-tick that rebuilds the parent view.
 struct PlayerEnvironmentButton: View {
     let assets: [EnvironmentAsset]
+    let onSelectCinema: () -> Void
     let onSelect: (EnvironmentAsset) -> Void
     let onDismiss: () -> Void
 
@@ -56,6 +67,17 @@ struct PlayerEnvironmentButton: View {
 
     var body: some View {
         Menu {
+            Button {
+                onSelectCinema()
+            } label: {
+                if appState.activeEnvironment == .cinemaEnvironment,
+                   appState.isImmersiveSpaceOpen {
+                    Label("Cinema Environment", systemImage: "checkmark")
+                } else {
+                    Label("Cinema Environment", systemImage: "theatermasks")
+                }
+            }
+            Divider()
             if assets.isEmpty {
                 Text("No environments available")
             } else {
@@ -111,8 +133,7 @@ struct PlayerEnvironmentButton: View {
     }
 
     private func assetIcon(_ asset: EnvironmentAsset) -> String {
-        let ext = URL(fileURLWithPath: asset.assetPath).pathExtension.lowercased()
-        return ["hdr", "exr"].contains(ext) ? "pano" : "cube.transparent"
+        PlayerCinemaEnvironmentPolicy.iconName(forAssetPath: asset.assetPath)
     }
 }
 #endif

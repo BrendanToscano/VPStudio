@@ -23,9 +23,11 @@ struct EnvironmentSettingsView: View {
     var body: some View {
         List {
             Section("Curated Environments") {
+                builtInCinemaRow
+
                 let bundled = assets.filter { $0.sourceType == .bundled }
                 if bundled.isEmpty {
-                    Text("Import a .hdr, .exr, .usdz, or .reality asset to customize.")
+                    Text("Import a .hdr, .exr, .usdz, or .reality asset to add custom environments.")
                         .foregroundStyle(.secondary)
                 } else {
                     ForEach(bundled) { asset in
@@ -143,6 +145,36 @@ struct EnvironmentSettingsView: View {
         } message: { deletion in
             Text("Delete \(deletion.name)? This removes the imported environment from disk.")
         }
+    }
+
+    @ViewBuilder
+    private var builtInCinemaRow: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "theatermasks")
+                .font(.title3)
+                .frame(width: 24)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Cinema Environment")
+                    .font(.headline)
+                Text("Built-In")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text("Available from the player and Environments tab.")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+
+            Spacer()
+
+            if appState.activeEnvironment == .cinemaEnvironment,
+               appState.isImmersiveSpaceOpen {
+                Label("Active", systemImage: "checkmark.circle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.blue)
+            }
+        }
+        .padding(.vertical, 4)
     }
 
     @ViewBuilder

@@ -129,9 +129,16 @@ actor IndexerManager {
     private(set) var lastSearchErrors: [(indexer: String, error: String)] = []
     private var hasInitialized = false
 
-    init(database: DatabaseManager, secretStore: any SecretStore = KeychainSecretStore(serviceName: "com.vpstudio.credentials")) {
+    init(
+        database: DatabaseManager,
+        secretStore: any SecretStore = KeychainSecretStore(serviceName: "com.vpstudio.credentials"),
+        indexers: [any TorrentIndexer] = [],
+        hasInitialized: Bool = false
+    ) {
         self.database = database
         self.secretStore = secretStore
+        self.indexers = indexers
+        self.hasInitialized = hasInitialized
     }
 
     func initialize() async throws {

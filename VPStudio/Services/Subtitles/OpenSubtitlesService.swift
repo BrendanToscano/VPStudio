@@ -212,10 +212,11 @@ actor OpenSubtitlesService {
     private func decodeSubtitleContent(from data: Data) -> String? {
         let encodings: [String.Encoding] = [.utf8, .utf16, .utf16LittleEndian, .utf16BigEndian, .isoLatin1]
         for encoding in encodings {
-            if encoding == .isoLatin1 && !isLikelyTextSubtitleData(data) {
+            if (encoding == .utf8 || encoding == .isoLatin1), !isLikelyTextSubtitleData(data) {
                 continue
             }
-            if let content = String(data: data, encoding: encoding) {
+            if let content = String(data: data, encoding: encoding),
+               isLikelySubtitleText(content) {
                 return content.trimmingLeadingBOM()
             }
         }
@@ -232,6 +233,22 @@ actor OpenSubtitlesService {
             }
         }
         return Double(controlCount) / Double(data.count) < 0.05
+    }
+
+    private func isLikelySubtitleText(_ content: String) -> Bool {
+        guard !content.isEmpty else { return true }
+        var controlCount = 0
+        var totalCount = 0
+        for scalar in content.unicodeScalars {
+            totalCount += 1
+            if CharacterSet.controlCharacters.contains(scalar),
+               scalar != "\t",
+               scalar != "\n",
+               scalar != "\r" {
+                controlCount += 1
+            }
+        }
+        return totalCount == 0 || Double(controlCount) / Double(totalCount) < 0.05
     }
 
     private func writeTemporarySubtitleFile(

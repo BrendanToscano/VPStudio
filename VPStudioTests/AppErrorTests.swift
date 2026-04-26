@@ -67,6 +67,16 @@ struct AppErrorInitMappingTests {
         #expect(mapped == .network(.offline))
     }
 
+    @Test func urlErrorBadURLUsesFailingURLWhenAvailable() {
+        let failingURL = URL(string: "bad://url")!
+        let urlErr = URLError(
+            .badURL,
+            userInfo: [NSURLErrorFailingURLErrorKey: failingURL]
+        )
+        let mapped = AppError(urlErr)
+        #expect(mapped == .network(.invalidURL("bad://url")))
+    }
+
     @Test func urlErrorOtherCodeMappedToTransport() {
         let urlErr = URLError(.cannotConnectToHost)
         let mapped = AppError(urlErr)
@@ -86,6 +96,11 @@ struct AppErrorInitMappingTests {
         let tmdbErr = TMDBError.unauthorized
         let mapped = AppError(tmdbErr)
         #expect(mapped == .network(.unauthorized))
+    }
+
+    @Test func tmdbErrorInvalidURLAndInvalidResponseMapped() {
+        #expect(AppError(TMDBError.invalidURL("/bad")) == .network(.invalidURL("/bad")))
+        #expect(AppError(TMDBError.invalidResponse) == .network(.invalidResponse))
     }
 
     @Test func tmdbErrorNotFoundMapped() {
@@ -147,6 +162,17 @@ struct AppErrorInitMappingTests {
         }
         let mapped = AppError(Named())
         #expect(mapped == .unknown("named error"))
+    }
+
+    @Test func tmdbSetupRequiredMarksActionableSetupErrorsOnly() {
+        let setup = AppError.tmdbSetupRequired(feature: "Search")
+        let plain = AppError.unknown("Search needs a TMDB API key.")
+        let network = AppError.network(.unauthorized)
+
+        #expect(setup.requiresTMDBSetupAction)
+        #expect(setup.errorDescription?.contains("Search needs a TMDB API key") == true)
+        #expect(!plain.requiresTMDBSetupAction)
+        #expect(!network.requiresTMDBSetupAction)
     }
 }
 

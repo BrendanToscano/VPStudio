@@ -304,6 +304,20 @@ struct VPPlayerEngineTrackSelectionTests {
         #expect(engine.selectedAudioTrack == 7)
     }
 
+    @Test @MainActor func loadAudioTracksClearsSelectionWhenTracksAreEmpty() {
+        let engine = VPPlayerEngine()
+        let tracks: [VPPlayerEngine.TrackInfo] = [
+            .init(id: 7, name: "Stereo", language: "en", codec: "aac"),
+        ]
+
+        engine.loadAudioTracks(tracks)
+        engine.selectAudioTrack(7)
+        engine.loadAudioTracks([])
+
+        #expect(engine.audioTracks.isEmpty)
+        #expect(engine.selectedAudioTrack == 0)
+    }
+
     @Test @MainActor func selectSubtitleTrackRejectsInvalidIndex() {
         let engine = VPPlayerEngine()
         // No subtitle tracks loaded, so index 5 is out of bounds
@@ -381,6 +395,19 @@ struct VPPlayerEngineChapterTests {
         let engine = VPPlayerEngine()
         engine.currentTime = 50
         #expect(engine.nextChapterTime() == nil)
+    }
+
+    @Test @MainActor func nextChapterTimeJumpsToFirstChapterWhenBeforeTimeline() {
+        let engine = VPPlayerEngine()
+        let delayedChapters: [VPPlayerEngine.ChapterInfo] = [
+            .init(id: 10, title: "Cold Open", startTime: 30, endTime: 120),
+            .init(id: 11, title: "Feature", startTime: 120, endTime: 600),
+        ]
+
+        engine.loadChapters(delayedChapters)
+        engine.currentTime = 5
+
+        #expect(engine.nextChapterTime() == 30)
     }
 
     @Test @MainActor func previousChapterRestartsCurrent() {

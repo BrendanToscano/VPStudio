@@ -38,14 +38,18 @@ struct LocalGenerationResult: Sendable {
 // MARK: - CoreML Implementation
 
 struct CoreMLInferenceAdapter: LocalInferenceAdapting {
+    static func modelArtifactURL(in directory: URL, fileManager: FileManager = .default) throws -> URL? {
+        let contents = try fileManager.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+        return contents.first { $0.pathExtension == "mlmodelc" || $0.pathExtension == "mlpackage" }
+    }
+
+    static func prompt(system: String, userMessage: String) -> String {
+        "<|system|>\n\(system)<|end|>\n<|user|>\n\(userMessage)<|end|>\n<|assistant|>\n"
+    }
 
     func loadModel(from directory: URL) async throws -> LoadedLocalModel {
         // Find .mlmodelc or .mlpackage in directory
-        let fm = FileManager.default
-        let contents = try fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
-        guard let modelURL = contents.first(where: {
-            $0.pathExtension == "mlmodelc" || $0.pathExtension == "mlpackage"
-        }) else {
+        guard let modelURL = try Self.modelArtifactURL(in: directory) else {
             throw LocalInferenceError.inferenceError("No CoreML model found in \(directory.lastPathComponent)")
         }
 
@@ -69,7 +73,7 @@ struct CoreMLInferenceAdapter: LocalInferenceAdapting {
         userMessage: String,
         maxTokens: Int
     ) async throws -> LocalGenerationResult {
-        let prompt = "<|system|>\n\(system)<|end|>\n<|user|>\n\(userMessage)<|end|>\n<|assistant|>\n"
+        let prompt = Self.prompt(system: system, userMessage: userMessage)
         let inputTokens = model.tokenizer.encode(text: prompt)
         var tokens = inputTokens
         var generatedCount = 0
@@ -128,6 +132,8 @@ struct CoreMLInferenceAdapter: LocalInferenceAdapting {
 // MARK: - Model Downloader
 
 enum LocalModelDownloader {
+    static let snapshotMatchingPatterns = ["*.mlmodelc/*", "*.mlpackage/*", "*.json", "*.jinja", "tokenizer*"]
+
     /// Downloads a HuggingFace model repo snapshot to local storage.
     static func download(
         repoID: String,
@@ -137,7 +143,7 @@ enum LocalModelDownloader {
         let repo = Hub.Repo(id: repoID)
         return try await HubApi.shared.snapshot(
             from: repo,
-            matching: ["*.mlmodelc/*", "*.mlpackage/*", "*.json", "*.jinja", "tokenizer*"],
+            matching: snapshotMatchingPatterns,
             progressHandler: progressHandler
         )
     }

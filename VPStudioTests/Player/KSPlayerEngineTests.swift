@@ -247,3 +247,49 @@ struct KSPlayerEngineTuningProfileTests {
         #endif
     }
 }
+
+@Suite("KSPlayerEngine - Prepare")
+@MainActor
+struct KSPlayerEnginePrepareTests {
+    @Test func prepareReturnsKSPlayerSessionWithDefaultOptions() async throws {
+        let engine = KSPlayerEngine()
+        let stream = Fixtures.stream(
+            url: "https://cdn.example.com/movie.mp4",
+            quality: .hd1080p,
+            hdr: .sdr,
+            fileName: "Movie.1080p.WEBDL.mp4"
+        )
+
+        let prepared = try await engine.prepare(stream: stream)
+
+        #expect(engine.canHandle(stream: stream))
+        #expect(prepared.engineKind == .ksPlayer)
+        #expect(prepared.avPlayer == nil)
+        #expect(prepared.ksPlayerCoordinator != nil)
+        #expect(prepared.ksOptions?.hardwareDecode == true)
+        #expect(prepared.ksOptions?.asynchronousDecompression == true)
+        #expect(prepared.ksOptions?.autoSelectEmbedSubtitle == true)
+        #expect(prepared.ksOptions?.formatContextOptions["rw_timeout"] as? Int == 30_000_000)
+    }
+
+    @Test func prepareAppliesHighDemandTuningOptions() async throws {
+        let engine = KSPlayerEngine()
+        let stream = Fixtures.stream(
+            url: "https://cdn.example.com/movie.mkv",
+            quality: .uhd4k,
+            audio: .trueHD,
+            hdr: .hdr10Plus,
+            fileName: "Movie.2160p.HDR10Plus.TrueHD.Remux.mkv"
+        )
+
+        let prepared = try await engine.prepare(stream: stream)
+        let expected = KSPlayerEngine.tuningProfile(for: stream)
+
+        #expect(prepared.engineKind == PlayerEngineKind.ksPlayer)
+        #expect(prepared.ksOptions?.preferredForwardBufferDuration == expected.preferredForwardBufferDuration)
+        #expect(prepared.ksOptions?.maxBufferDuration == expected.maxBufferDuration)
+        #expect(prepared.ksOptions?.probesize == expected.probesize)
+        #expect(prepared.ksOptions?.maxAnalyzeDuration == expected.maxAnalyzeDuration)
+        #expect(prepared.ksOptions?.autoSelectEmbedSubtitle == expected.autoSelectEmbedSubtitle)
+    }
+}

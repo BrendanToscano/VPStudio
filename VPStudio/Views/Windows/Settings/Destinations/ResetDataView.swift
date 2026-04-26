@@ -1,24 +1,60 @@
 import SwiftUI
 
+enum ResetDataPolicy {
+    struct DeletionItem: Equatable, Sendable {
+        let icon: String
+        let title: String
+    }
+
+    static let requiredConfirmationPhrase = "RESET"
+    static let resetButtonTitle = "Reset Everything"
+    static let progressAccessibilityLabel = "Reset in progress"
+
+    static let deletionItems: [DeletionItem] = [
+        DeletionItem(icon: "key.fill", title: "API Keys & Credentials"),
+        DeletionItem(icon: "clock.fill", title: "Watch History & Library"),
+        DeletionItem(icon: "arrow.down.circle.fill", title: "Downloads"),
+        DeletionItem(icon: "mountain.2.fill", title: "Environment Assets"),
+        DeletionItem(icon: "gearshape.fill", title: "All Settings"),
+    ]
+
+    static func normalizedConfirmationText(_ text: String) -> String {
+        text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    static func canExecuteReset(confirmationText: String, isResetting: Bool = false) -> Bool {
+        guard !isResetting else { return false }
+        return normalizedConfirmationText(confirmationText)
+            .caseInsensitiveCompare(requiredConfirmationPhrase) == .orderedSame
+    }
+}
+
+enum ResetDataStep: Int, CaseIterable {
+    case warning = 0
+    case secondConfirmation = 1
+    case finalConfirmation = 2
+}
+
 struct ResetDataView: View {
     @Environment(AppState.self) private var appState
     @Environment(\.dismiss) private var dismiss
 
-    @State private var step: ResetStep = .warning
-    @State private var confirmationText = ""
+    @State private var step: ResetDataStep
+    @State private var confirmationText: String
     @State private var isResetting = false
     @State private var resetError: String?
     @State private var didRunQAAutoReset = false
 
-    private enum ResetStep: Int, CaseIterable {
-        case warning = 0
-        case secondConfirmation = 1
-        case finalConfirmation = 2
+    init(initialStep: ResetDataStep = .warning, initialConfirmationText: String = "") {
+        _step = State(initialValue: initialStep)
+        _confirmationText = State(initialValue: initialConfirmationText)
     }
 
     private var canExecuteReset: Bool {
-        confirmationText.trimmingCharacters(in: .whitespacesAndNewlines)
-            .caseInsensitiveCompare("RESET") == .orderedSame
+        ResetDataPolicy.canExecuteReset(
+            confirmationText: confirmationText,
+            isResetting: isResetting
+        )
     }
 
     var body: some View {
@@ -198,11 +234,9 @@ struct ResetDataView: View {
             .padding(.horizontal, 32)
 
             VStack(alignment: .leading, spacing: 10) {
-                deletionBullet(icon: "key.fill", text: "API Keys & Credentials")
-                deletionBullet(icon: "clock.fill", text: "Watch History & Library")
-                deletionBullet(icon: "arrow.down.circle.fill", text: "Downloads")
-                deletionBullet(icon: "mountain.2.fill", text: "Environment Assets")
-                deletionBullet(icon: "gearshape.fill", text: "All Settings")
+                ForEach(ResetDataPolicy.deletionItems, id: \.title) { item in
+                    deletionBullet(icon: item.icon, text: item.title)
+                }
             }
             .padding(16)
             .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
@@ -293,12 +327,12 @@ struct ResetDataView: View {
                 Text("Final Confirmation")
                     .font(.title2.weight(.bold))
 
-                Text("Type **RESET** to confirm")
+                Text("Type **\(ResetDataPolicy.requiredConfirmationPhrase)** to confirm")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
 
-            TextField("Type RESET", text: $confirmationText)
+            TextField("Type \(ResetDataPolicy.requiredConfirmationPhrase)", text: $confirmationText)
                 .textFieldStyle(.plain)
                 .font(.body.weight(.medium).monospaced())
                 .multilineTextAlignment(.center)
@@ -361,18 +395,19 @@ struct ResetDataView: View {
                         if isResetting {
                             ProgressView()
                                 .controlSize(.small)
+                                .accessibilityLabel(ResetDataPolicy.progressAccessibilityLabel)
                         } else {
-                            Text("Reset Everything")
+                            Text(ResetDataPolicy.resetButtonTitle)
                                 .font(.subheadline.weight(.semibold))
                         }
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 10)
                     .background(
-                        canExecuteReset && !isResetting ? AnyShapeStyle(.red) : AnyShapeStyle(.red.opacity(0.22)),
+                        canExecuteReset ? AnyShapeStyle(.red) : AnyShapeStyle(.red.opacity(0.22)),
                         in: RoundedRectangle(cornerRadius: 12)
                     )
-                    .foregroundStyle(canExecuteReset && !isResetting ? .white : .red.opacity(0.5))
+                    .foregroundStyle(canExecuteReset ? .white : .red.opacity(0.5))
                     .overlay {
                         RoundedRectangle(cornerRadius: 12)
                             .strokeBorder(

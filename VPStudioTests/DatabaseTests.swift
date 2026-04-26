@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import GRDB
 @testable import VPStudio
 
 private func makeTemporaryDatabase(named fileName: String) async throws -> (DatabaseManager, URL) {
@@ -237,6 +238,46 @@ struct DatabaseWatchHistoryTests {
         #expect(stored.quality == nil)
         #expect(stored.debridService == "realdebrid")
         #expect(stored.streamURL == nil)
+    }
+
+    @Test func fetchWatchHistoryNormalizesMalformedPersistedRow() async throws {
+        let (db, tempDir) = try await makeTemporaryDatabase(named: "watch-history-malformed-row.sqlite")
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        try await db.writeInTransaction { database in
+            try database.execute(
+                sql: """
+                INSERT INTO watch_history
+                    (id, mediaId, episodeId, title, progress, duration, quality, debridService, streamURL, watchedAt, isCompleted)
+                VALUES
+                    (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                arguments: [
+                    "malformed-watch-history",
+                    "movie-malformed",
+                    " episode-1 ",
+                    "Malformed",
+                    -25.0,
+                    -100.0,
+                    "  ",
+                    "  premiumize  ",
+                    "\nhttps://cdn.example.com/tokenized.mkv\n",
+                    "not-a-date",
+                    "not-a-bool",
+                ]
+            )
+        }
+
+        let stored = try #require(try await db.fetchWatchHistory(mediaId: "movie-malformed"))
+        #expect(stored.id == "malformed-watch-history")
+        #expect(stored.episodeId == " episode-1 ")
+        #expect(stored.progress == 0)
+        #expect(stored.duration == 0)
+        #expect(stored.quality == nil)
+        #expect(stored.debridService == "premiumize")
+        #expect(stored.streamURL == "https://cdn.example.com/tokenized.mkv")
+        #expect(stored.isCompleted == false)
+        #expect(abs(stored.watchedAt.timeIntervalSinceNow) < 5)
     }
 }
 
@@ -609,6 +650,59 @@ struct DatabaseDownloadTaskTests {
         let updated = try #require(try await db.fetchDownloadTask(id: task.id))
         #expect(updated.resumeDataBase64 == nil)
     }
+
+    @Test func fetchDownloadTaskNormalizesMalformedPersistedRow() async throws {
+        let (db, tempDir) = try await makeTemporaryDatabase(named: "downloads-malformed-row.sqlite")
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        try await db.writeInTransaction { database in
+            try database.execute(
+                sql: """
+                INSERT INTO download_tasks
+                    (id, mediaId, episodeId, streamURL, fileName, status, progress, bytesWritten, totalBytes, destinationPath, errorMessage, mediaTitle, mediaType, posterPath, seasonNumber, episodeNumber, episodeTitle, recoveryContextJSON, expectedBytes, resumeDataBase64, createdAt, updatedAt)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                arguments: [
+                    "dl-malformed",
+                    "media-malformed",
+                    nil,
+                    "  https://signed.example.com/video.mkv  ",
+                    "   ",
+                    "not-a-status",
+                    2.5,
+                    -500,
+                    -1000,
+                    "/downloads/video.mkv",
+                    "bad row",
+                    "Malformed Movie",
+                    "movie",
+                    "/poster.jpg",
+                    nil,
+                    nil,
+                    nil,
+                    "{not-json",
+                    -42,
+                    "not-base64",
+                    "not-a-date",
+                    "also-not-a-date",
+                ]
+            )
+        }
+
+        let task = try #require(try await db.fetchDownloadTask(id: "dl-malformed"))
+
+        #expect(task.status == .queued)
+        #expect(task.progress == 1)
+        #expect(task.bytesWritten == 0)
+        #expect(task.totalBytes == nil)
+        #expect(task.expectedBytes == nil)
+        #expect(task.fileName == "download-dl-malformed.mp4")
+        #expect(task.persistedStreamURL == "https://signed.example.com/video.mkv")
+        #expect(task.resumeDataBase64 == nil)
+        #expect(task.recoveryContext == nil)
+        #expect(abs(task.createdAt.timeIntervalSinceNow) < 5)
+        #expect(task.updatedAt == task.createdAt)
+    }
 }
 
 // MARK: - Database Environment Assets Tests
@@ -883,6 +977,82 @@ struct DatabaseTasteProfileTests {
 
         let fetched = try await db.fetchUserTasteProfile()
         #expect(fetched == nil)
+    }
+
+    @Test func fetchTasteProfileFallsBackForMissingAndMalformedJSONColumns() async throws {
+        let (db, tempDir) = try await makeTemporaryDatabase(named: "taste-profile-malformed-json.sqlite")
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let malformedJSON = Data("not-json".utf8)
+        let validLanguages = try JSONEncoder().encode(["en", "fr"])
+        let updatedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        try await db.writeInTransaction { database in
+            try database.execute(
+                sql: """
+                INSERT INTO user_taste_profiles
+                    (id, likedGenres, dislikedGenres, preferredDecades, preferredLanguages, eventCount, updatedAt)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                arguments: [
+                    "default",
+                    malformedJSON,
+                    nil,
+                    malformedJSON,
+                    validLanguages,
+                    7,
+                    updatedAt,
+                ]
+            )
+        }
+
+        let profile = try #require(try await db.fetchUserTasteProfile())
+
+        #expect(profile.likedGenres == [])
+        #expect(profile.dislikedGenres == [])
+        #expect(profile.preferredDecades == [])
+        #expect(profile.preferredLanguages == ["en", "fr"])
+        #expect(profile.eventCount == 7)
+        #expect(profile.updatedAt == updatedAt)
+    }
+
+    @Test func fetchTasteEventFallsBackForUnknownEnumsAndMalformedMetadata() async throws {
+        let (db, tempDir) = try await makeTemporaryDatabase(named: "taste-event-malformed-json.sqlite")
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let createdAt = Date(timeIntervalSince1970: 1_700_000_001)
+        try await db.writeInTransaction { database in
+            try database.execute(
+                sql: """
+                INSERT INTO taste_events
+                    (id, userId, mediaId, episodeId, eventType, signalStrength, watchedState, feedbackScale, feedbackValue, source, metadata, createdAt)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                arguments: [
+                    "evt-malformed",
+                    "default",
+                    "movie-1",
+                    nil,
+                    "unknown-event",
+                    0.25,
+                    "unknown-state",
+                    "unknown-scale",
+                    5.0,
+                    "unknown-source",
+                    Data("not-json".utf8),
+                    createdAt,
+                ]
+            )
+        }
+
+        let event = try #require(try await db.fetchTasteEvents(limit: 1).first)
+
+        #expect(event.id == "evt-malformed")
+        #expect(event.eventType == .browsed)
+        #expect(event.watchedState == nil)
+        #expect(event.feedbackScale == .likeDislike)
+        #expect(event.source == nil)
+        #expect(event.metadata == [:])
+        #expect(event.createdAt == createdAt)
     }
 }
 

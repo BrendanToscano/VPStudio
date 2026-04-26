@@ -4,7 +4,7 @@ import Foundation
 
 // MARK: - Database Layer Tests
 
-@Suite("Episode Watch Tracking - Database")
+@Suite("Episode Watch Tracking - Database", .serialized)
 struct EpisodeWatchTrackingDatabaseTests {
 
     private func makeDatabase() async throws -> DatabaseManager {
@@ -298,7 +298,7 @@ struct EpisodeWatchTrackingDatabaseTests {
 
 // MARK: - ViewModel Layer Tests
 
-@Suite("Episode Watch Tracking - ViewModel")
+@Suite("Episode Watch Tracking - ViewModel", .serialized)
 struct EpisodeWatchTrackingViewModelTests {
     private struct StubDetailMetadataProvider: DetailMetadataProviding {
         let seasons: [Season]

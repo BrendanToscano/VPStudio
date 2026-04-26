@@ -35,6 +35,9 @@ let package = Package(
             exclude: [
                 "Assets.xcassets",
                 "App/VPStudioApp.swift",
+                "Views/Windows/Player/PlayerView_Bug5_Fix.patch",
+                "Views/Windows/Player/PlayerView_Bug5_Fix2.patch",
+                "Views/Windows/Player/PlayerView_Bug5_Fix3.patch",
             ],
             resources: [
                 .process("Resources"),

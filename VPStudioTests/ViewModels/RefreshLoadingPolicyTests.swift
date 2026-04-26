@@ -165,6 +165,71 @@ struct RefreshLoadingPolicyTests {
     }
 
     @Test
+    func detailPresentationPolicyFormatsMetadataAndFeedbackDefaults() {
+        #expect(DetailPresentationPolicy.activeSessionToastText == "A video is already playing")
+        #expect(DetailPresentationPolicy.yearText(nil) == nil)
+        #expect(DetailPresentationPolicy.yearText(1999) == "1999")
+        #expect(DetailPresentationPolicy.imdbRatingText(nil) == nil)
+        #expect(DetailPresentationPolicy.imdbRatingText(0) == nil)
+        #expect(DetailPresentationPolicy.imdbRatingText(7.94) == "7.9")
+        #expect(DetailPresentationPolicy.runtimeText(nil) == nil)
+        #expect(DetailPresentationPolicy.runtimeText("") == nil)
+        #expect(DetailPresentationPolicy.runtimeText("2h 12m") == "2h 12m")
+
+        #expect(DetailPresentationPolicy.feedbackDraftValue(
+            currentValue: nil,
+            scaleMode: .likeDislike
+        ) == 1)
+        #expect(DetailPresentationPolicy.feedbackDraftValue(
+            currentValue: 14,
+            scaleMode: .oneToTen
+        ) == 10)
+        #expect(DetailPresentationPolicy.feedbackDraftValue(
+            currentValue: -4,
+            scaleMode: .oneToHundred
+        ) == 1)
+    }
+
+    @Test
+    func detailPresentationPolicyBuildsStableShareItems() {
+        #expect(DetailPresentationPolicy.shareItem(
+            previewID: "tt0111161",
+            previewTitle: "Fallback Title",
+            previewType: .movie,
+            previewTMDBID: 278,
+            mediaTitle: "The Shawshank Redemption",
+            mediaTMDBID: nil
+        ) == "The Shawshank Redemption\nhttps://www.imdb.com/title/tt0111161/")
+
+        #expect(DetailPresentationPolicy.shareItem(
+            previewID: "movie-278",
+            previewTitle: "Fallback Title",
+            previewType: .movie,
+            previewTMDBID: 278,
+            mediaTitle: nil,
+            mediaTMDBID: nil
+        ) == "Fallback Title\nhttps://www.themoviedb.org/movie/278")
+
+        #expect(DetailPresentationPolicy.shareItem(
+            previewID: "tv-1396",
+            previewTitle: "Breaking Bad",
+            previewType: .series,
+            previewTMDBID: nil,
+            mediaTitle: "Better Title",
+            mediaTMDBID: 1396
+        ) == "Better Title\nhttps://www.themoviedb.org/tv/1396")
+
+        #expect(DetailPresentationPolicy.shareItem(
+            previewID: "local",
+            previewTitle: "Local Only",
+            previewType: .movie,
+            previewTMDBID: nil,
+            mediaTitle: nil,
+            mediaTMDBID: nil
+        ) == "Local Only")
+    }
+
+    @Test
     func seriesSeasonLoadingPresentationKeepsEpisodesShellVisible() {
         #expect(
             SeriesSeasonLoadingPresentationPolicy.shouldShowEpisodesSection(

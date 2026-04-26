@@ -109,7 +109,7 @@ struct LibraryCSVImportSheet: View {
 
                 if !multiImportSummaries.isEmpty {
                     Section("Import Results (\(multiImportSummaries.count) file\(multiImportSummaries.count == 1 ? "" : "s"))") {
-                        let totals = aggregatedSummary(multiImportSummaries)
+                        let totals = Self.aggregatedSummary(multiImportSummaries)
                         VStack(alignment: .leading, spacing: 4) {
                             Text("Total rows: \(totals.rowsImported)/\(totals.rowsRead) imported (\(totals.rowsSkipped) skipped)")
                             Text("Created: \(totals.mediaItemsCreated) media \u{00B7} Updated: \(totals.mediaItemsUpdated)")
@@ -358,7 +358,7 @@ struct LibraryCSVImportSheet: View {
             }
 
             if !summaries.isEmpty {
-                let aggregate = aggregatedSummary(summaries)
+                let aggregate = Self.aggregatedSummary(summaries)
                 trace("aggregate files=\(summaries.count) \(Self.summaryLogLine(aggregate))")
                 onImportComplete(aggregate)
             }
@@ -514,7 +514,7 @@ struct LibraryCSVImportSheet: View {
         }
     }
 
-    private func aggregatedSummary(_ summaries: [LibraryCSVImportSummary]) -> LibraryCSVImportSummary {
+    nonisolated static func aggregatedSummary(_ summaries: [LibraryCSVImportSummary]) -> LibraryCSVImportSummary {
         var total = LibraryCSVImportSummary(
             detectedFormat: .generic,
             rowsRead: 0, rowsImported: 0, rowsSkipped: 0,
@@ -536,22 +536,22 @@ struct LibraryCSVImportSheet: View {
         return total
     }
 
-    private static func hasLibraryChanges(in summary: LibraryCSVImportSummary) -> Bool {
+    nonisolated static func hasLibraryChanges(in summary: LibraryCSVImportSummary) -> Bool {
         summary.watchlistImported > 0 || summary.favoritesImported > 0 || summary.historyImported > 0
     }
 
-    private static func noLibraryChangesNotice(anyRatingsImported: Bool) -> String {
+    nonisolated static func noLibraryChangesNotice(anyRatingsImported: Bool) -> String {
         if anyRatingsImported {
             return "Import finished, but no new library items were added. Ratings were imported."
         }
         return "Import finished, but no new library items were added. The imported titles may already exist."
     }
 
-    private static func summaryLogLine(_ summary: LibraryCSVImportSummary) -> String {
+    nonisolated static func summaryLogLine(_ summary: LibraryCSVImportSummary) -> String {
         "rows=\(summary.rowsImported)/\(summary.rowsRead) skipped=\(summary.rowsSkipped) W=\(summary.watchlistImported) F=\(summary.favoritesImported) H=\(summary.historyImported) R=\(summary.ratingsImported)"
     }
 
-    private static func debugFileStats(at url: URL) -> String {
+    nonisolated static func debugFileStats(at url: URL) -> String {
         guard let data = try? Data(contentsOf: url, options: [.mappedIfSafe]) else {
             return "read=failed path=\(url.path)"
         }

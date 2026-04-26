@@ -155,6 +155,82 @@ struct TorznabXMLParsingTests {
             Issue.record("Unexpected error type: \(error)")
         }
     }
+
+    @Test func parsesMagnetURLAndDownloadURLAttributes() async throws {
+        let xml = """
+        <?xml version="1.0"?>
+        <rss><channel>
+        <item>
+        <title>Movie.2025.1080p</title>
+        <torznab:attr name="magneturl" value="magnet:?xt=urn:btih:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"/>
+        <torznab:attr name="ignored" value="unused"/>
+        </item>
+        <item>
+        <title>Movie.2025.720p</title>
+        <torznab:attr name="downloadurl" value="https://downloads.example/BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB/file.torrent"/>
+        </item>
+        </channel></rss>
+        """
+
+        let session = makeStubSession(xml: xml)
+        let indexer = makeIndexer(session: session)
+        let results = try await indexer.searchByQuery(query: "Movie", type: .movie)
+
+        #expect(results.map(\.infoHash) == [
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        ])
+        #expect(results.first?.magnetURI == "magnet:?xt=urn:btih:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+        #expect(results.last?.magnetURI == nil)
+    }
+
+    @Test func decodesNumericEntitiesInTitleAndLinkMagnet() async throws {
+        let xml = """
+        <?xml version="1.0"?>
+        <rss><channel>
+        <item>
+        <title>Movie &#x32;&#48;&#50;&#53;</title>
+        <link>magnet:?xt=urn:btih:CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC&amp;dn=Movie&#32;2025</link>
+        </item>
+        </channel></rss>
+        """
+
+        let session = makeStubSession(xml: xml)
+        let indexer = makeIndexer(session: session)
+        let results = try await indexer.searchByQuery(query: "Movie", type: .movie)
+
+        let result = try #require(results.first)
+        #expect(result.title == "Movie 2025")
+        #expect(result.infoHash == "cccccccccccccccccccccccccccccccccccccccc")
+        #expect(result.magnetURI == "magnet:?xt=urn:btih:CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC&dn=Movie 2025")
+    }
+
+    @Test func htmlPayloadThrowsInvalidXMLPayload() async {
+        let session = makeStubSession(xml: "<html><body>login</body></html>")
+        let indexer = makeIndexer(session: session)
+
+        do {
+            _ = try await indexer.searchByQuery(query: "Movie", type: .movie)
+            Issue.record("Expected invalid payload error")
+        } catch let error as IndexerParseError {
+            switch error {
+            case .invalidPayload(let indexer, let reason):
+                #expect(indexer == "TestIndexer")
+                #expect(reason == "expected Torznab XML but received HTML")
+            }
+        } catch {
+            Issue.record("Unexpected error type: \(error)")
+        }
+    }
+
+    @Test func bomPrefixedJSONPayloadIsDetectedAsJSON() async throws {
+        let session = makeStubSession(xml: "\u{FEFF}  [{\"title\":\"BOM Movie\",\"infoHash\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}]")
+        let indexer = makeIndexer(session: session)
+
+        let results = try await indexer.searchByQuery(query: "Movie", type: .movie)
+
+        #expect(results.map(\.infoHash) == ["eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"])
+    }
 }
 
 // MARK: - Helper

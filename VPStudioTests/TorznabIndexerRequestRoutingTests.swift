@@ -128,6 +128,172 @@ struct TorznabIndexerRequestRoutingTests {
 
         #expect(results.map(\.infoHash) == ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"])
     }
+
+    @Test func torznabImdbSearchUsesNativeSearchParametersAndQueryApiKey() async throws {
+        final class RequestState: @unchecked Sendable {
+            var queryItems: [URLQueryItem] = []
+            var apiKeyHeader: String?
+        }
+        let state = RequestState()
+        let xml = """
+        <rss version="2.0">
+          <channel>
+            <item>
+              <title>Series S02E07</title>
+              <guid>cccccccccccccccccccccccccccccccccccccccc</guid>
+            </item>
+          </channel>
+        </rss>
+        """
+
+        let session = makeStubSession { request in
+            let url = try #require(request.url)
+            state.queryItems = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            state.apiKeyHeader = request.value(forHTTPHeaderField: "X-Api-Key")
+            let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (response, Data(xml.utf8))
+        }
+
+        let indexer = TorznabIndexer(
+            name: "Torznab",
+            baseURL: "https://torznab.example/root",
+            endpointPath: "",
+            apiKey: "query-key",
+            categoryFilter: "5000,5040",
+            apiKeyTransport: .query,
+            session: session
+        )
+
+        let results = try await indexer.search(imdbId: "tt0944947", type: .series, season: 2, episode: 7)
+
+        #expect(results.map(\.infoHash) == ["cccccccccccccccccccccccccccccccccccccccc"])
+        #expect(state.apiKeyHeader == nil)
+        #expect(state.queryItems.first(where: { $0.name == "t" })?.value == "search")
+        #expect(state.queryItems.first(where: { $0.name == "imdbid" })?.value == "tt0944947")
+        #expect(state.queryItems.first(where: { $0.name == "season" })?.value == "2")
+        #expect(state.queryItems.first(where: { $0.name == "ep" })?.value == "7")
+        #expect(state.queryItems.first(where: { $0.name == "cat" })?.value == "5000,5040")
+        #expect(state.queryItems.first(where: { $0.name == "apikey" })?.value == "query-key")
+    }
+
+    @Test func prowlarrDictionaryResultsPayloadMapsTorrentFields() async throws {
+        let json = """
+        {
+          "results": [
+            {
+              "name": "Dune Part Two 2160p",
+              "hash": "dddddddddddddddddddddddddddddddddddddddd",
+              "size": "9876543210",
+              "seeders": "45",
+              "leechers": "6",
+              "magnetUrl": "magnet:?xt=urn:btih:dddddddddddddddddddddddddddddddddddddddd"
+            }
+          ]
+        }
+        """
+
+        let session = makeStubSession { request in
+            let url = try #require(request.url)
+            let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (response, Data(json.utf8))
+        }
+
+        let indexer = TorznabIndexer(
+            name: "Prowlarr",
+            baseURL: "https://prowlarr.example",
+            endpointPath: "/api/v1/search",
+            session: session
+        )
+
+        let results = try await indexer.searchByQuery(query: "Dune", type: .movie)
+
+        let result = try #require(results.first)
+        #expect(result.title == "Dune Part Two 2160p")
+        #expect(result.infoHash == "dddddddddddddddddddddddddddddddddddddddd")
+        #expect(result.sizeBytes == 9_876_543_210)
+        #expect(result.seeders == 45)
+        #expect(result.leechers == 6)
+        #expect(result.magnetURI == "magnet:?xt=urn:btih:dddddddddddddddddddddddddddddddddddddddd")
+    }
+
+    @Test func prowlarrJSONMissingResultsArrayThrowsInvalidPayload() async throws {
+        let session = makeStubSession { request in
+            let url = try #require(request.url)
+            let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (response, Data(#"{"items":[]}"#.utf8))
+        }
+
+        let indexer = TorznabIndexer(
+            name: "Prowlarr",
+            baseURL: "https://prowlarr.example",
+            endpointPath: "/api/v1/search",
+            session: session
+        )
+
+        do {
+            _ = try await indexer.searchByQuery(query: "Dune", type: .movie)
+            Issue.record("Expected invalid payload error")
+        } catch let error as IndexerParseError {
+            switch error {
+            case .invalidPayload(let indexer, let reason):
+                #expect(indexer == "Prowlarr")
+                #expect(reason == "JSON payload missing a results array")
+            }
+        } catch {
+            Issue.record("Unexpected error type: \(error)")
+        }
+    }
+
+    @Test func prowlarrJSONWithoutUsableHashesThrowsInvalidPayload() async throws {
+        let session = makeStubSession { request in
+            let url = try #require(request.url)
+            let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (response, Data(#"[{"title":"No hash","seeders":12}]"#.utf8))
+        }
+
+        let indexer = TorznabIndexer(
+            name: "Prowlarr",
+            baseURL: "https://prowlarr.example",
+            endpointPath: "/api/v1/search",
+            session: session
+        )
+
+        do {
+            _ = try await indexer.searchByQuery(query: "Dune", type: .movie)
+            Issue.record("Expected invalid payload error")
+        } catch let error as IndexerParseError {
+            switch error {
+            case .invalidPayload(let indexer, let reason):
+                #expect(indexer == "Prowlarr")
+                #expect(reason == "JSON payload did not include any usable torrent hashes")
+            }
+        } catch {
+            Issue.record("Unexpected error type: \(error)")
+        }
+    }
+
+    @Test func nonSuccessStatusThrowsBadServerResponse() async {
+        let session = makeStubSession { request in
+            let url = try #require(request.url)
+            let response = HTTPURLResponse(url: url, statusCode: 503, httpVersion: nil, headerFields: nil)!
+            return (response, Data("temporarily unavailable".utf8))
+        }
+
+        let indexer = TorznabIndexer(
+            name: "Torznab",
+            baseURL: "https://torznab.example",
+            session: session
+        )
+
+        do {
+            _ = try await indexer.searchByQuery(query: "Dune", type: .movie)
+            Issue.record("Expected bad server response")
+        } catch let error as URLError {
+            #expect(error.code == .badServerResponse)
+        } catch {
+            Issue.record("Unexpected error type: \(error)")
+        }
+    }
 }
 
 private enum TorznabRequestStubError: Error {

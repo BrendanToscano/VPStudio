@@ -40,6 +40,12 @@ struct CSVExportEscapeTests {
     @Test func formulaPrefixIsNeutralizedBeforeQuoting() {
         #expect(LibraryCSVExportService.escapeCSV("=SUM(A1,A2)") == "\"'=SUM(A1,A2)\"")
     }
+
+    @Test func formulaNeutralizationHonorsLeadingSpacesAndExistingApostrophe() {
+        #expect(LibraryCSVExportService.escapeCSV("  -cmd") == "'  -cmd")
+        #expect(LibraryCSVExportService.escapeCSV("\tcmd") == "'\tcmd")
+        #expect(LibraryCSVExportService.escapeCSV("'=SUM(A1:A2)") == "'=SUM(A1:A2)")
+    }
 }
 
 // MARK: - Export Summary Tests
@@ -211,6 +217,87 @@ struct CSVExportIntegrationTests {
         try? FileManager.default.removeItem(at: dirURL)
     }
 
+    @Test func exportAllWritesHistoryCSVWhenCompletedHistoryExists() async throws {
+        let db = try await makeTempDatabase()
+
+        try await db.saveMediaItem(
+            MediaItem(
+                id: "tt0300001",
+                type: .movie,
+                title: "History Movie",
+                year: 2021,
+                genres: ["Mystery"],
+                imdbRating: 6.8,
+                runtime: 101
+            )
+        )
+        try await db.saveWatchHistory(
+            WatchHistory(
+                id: "history-completed",
+                mediaId: "tt0300001",
+                title: "Fallback History Title",
+                progress: 101,
+                duration: 101,
+                watchedAt: Date(timeIntervalSince1970: 1_700_172_800),
+                isCompleted: true
+            )
+        )
+
+        let service = LibraryCSVExportService(database: db)
+        let (dirURL, summary) = try await service.exportAll()
+        defer { try? FileManager.default.removeItem(at: dirURL) }
+
+        #expect(summary.filesWritten == 1)
+        #expect(summary.totalItemsExported == 1)
+        #expect(summary.folderNames == ["History"])
+
+        let historyFile = dirURL.appendingPathComponent("History.csv")
+        let content = try String(contentsOf: historyFile, encoding: .utf8)
+        #expect(content.contains("tt0300001"))
+        #expect(content.contains("History Movie"))
+        #expect(content.contains("movie"))
+    }
+
+    @Test func exportAllDisambiguatesSanitizedFolderNameCollisions() async throws {
+        let db = try await makeTempDatabase()
+
+        let slashFolder = try await db.createLibraryFolder(name: "A/B", listType: .watchlist)
+        let backslashFolder = try await db.createLibraryFolder(name: "A\\B", listType: .watchlist)
+
+        let first = MediaItem(id: "tt0300010", type: .movie, title: "Slash", year: 2022, genres: [])
+        let second = MediaItem(id: "tt0300011", type: .movie, title: "Backslash", year: 2022, genres: [])
+        try await db.saveMediaItem(first)
+        try await db.saveMediaItem(second)
+        try await db.addToLibrary(
+            UserLibraryEntry(
+                id: "tt0300010-watchlist",
+                mediaId: first.id,
+                folderId: slashFolder.id,
+                listType: .watchlist,
+                addedAt: Date()
+            )
+        )
+        try await db.addToLibrary(
+            UserLibraryEntry(
+                id: "tt0300011-watchlist",
+                mediaId: second.id,
+                folderId: backslashFolder.id,
+                listType: .watchlist,
+                addedAt: Date()
+            )
+        )
+
+        let service = LibraryCSVExportService(database: db)
+        let (dirURL, _) = try await service.exportAll()
+        defer { try? FileManager.default.removeItem(at: dirURL) }
+
+        let files = try FileManager.default.contentsOfDirectory(at: dirURL, includingPropertiesForKeys: nil)
+        let fileNames = Set(files.map(\.lastPathComponent))
+
+        #expect(fileNames.contains("Watchlist - A-B.csv"))
+        #expect(fileNames.contains("Watchlist - A-B (1).csv"))
+    }
+
     @Test func exportSingleFolder() async throws {
         let db = try await makeTempDatabase()
 
@@ -233,6 +320,59 @@ struct CSVExportIntegrationTests {
         #expect(csv.contains("tt7777777"))
         #expect(csv.contains("Test Show"))
         #expect(csv.contains("tvSeries"))
+    }
+
+    @Test func exportFolderConvertsNonDefaultRatingScalesForIMDb() async throws {
+        let db = try await makeTempDatabase()
+
+        let highPercent = MediaItem(id: "tt0300100", type: .movie, title: "Percent Rating", year: 2024, genres: [])
+        let disliked = MediaItem(id: "tt0300101", type: .movie, title: "Disliked Rating", year: 2024, genres: [])
+        let liked = MediaItem(id: "tt0300102", type: .movie, title: "Liked Rating", year: 2024, genres: [])
+        for item in [highPercent, disliked, liked] {
+            try await db.saveMediaItem(item)
+            try await db.addToLibrary(
+                UserLibraryEntry(
+                    id: "\(item.id)-watchlist",
+                    mediaId: item.id,
+                    folderId: LibraryFolder.systemFolderID(for: .watchlist),
+                    listType: .watchlist,
+                    addedAt: Date()
+                )
+            )
+        }
+
+        try await db.saveTasteEvent(
+            TasteEvent(
+                mediaId: highPercent.id,
+                eventType: .rated,
+                feedbackScale: .oneToHundred,
+                feedbackValue: 100
+            )
+        )
+        try await db.saveTasteEvent(
+            TasteEvent(
+                mediaId: disliked.id,
+                eventType: .rated,
+                feedbackScale: .likeDislike,
+                feedbackValue: 0
+            )
+        )
+        try await db.saveTasteEvent(
+            TasteEvent(
+                mediaId: liked.id,
+                eventType: .rated,
+                feedbackScale: .likeDislike,
+                feedbackValue: 1
+            )
+        )
+
+        let service = LibraryCSVExportService(database: db)
+        let (csv, count) = try await service.exportFolder(listType: .watchlist, folderId: nil)
+
+        #expect(count == 3)
+        #expect(csv.contains("tt0300100,10,"))
+        #expect(csv.contains("tt0300101,3,"))
+        #expect(csv.contains("tt0300102,8,"))
     }
 
     @Test func exportIMDbURLFormat() async throws {
