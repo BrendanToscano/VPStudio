@@ -42,8 +42,8 @@ struct SidebarTabIconValueTests {
 @Suite("EnvironmentType - Specific Values")
 struct EnvironmentTypeSpecificValueTests {
 
-    @Test func allCasesCountIsTwo() {
-        #expect(EnvironmentType.allCases.count == 2)
+    @Test func allCasesCountIsThree() {
+        #expect(EnvironmentType.allCases.count == 3)
     }
 
     @Test func hdriSkyboxIconIsPano() {
@@ -54,6 +54,10 @@ struct EnvironmentTypeSpecificValueTests {
         #expect(EnvironmentType.customEnvironment.icon == "cube.transparent")
     }
 
+    @Test func cinemaEnvironmentIconIsTheatermasks() {
+        #expect(EnvironmentType.cinemaEnvironment.icon == "theatermasks")
+    }
+
     @Test func hdriSkyboxImmersiveSpaceIdIsHdriSkybox() {
         #expect(EnvironmentType.hdriSkybox.immersiveSpaceId == "hdriSkybox")
     }
@@ -62,12 +66,20 @@ struct EnvironmentTypeSpecificValueTests {
         #expect(EnvironmentType.customEnvironment.immersiveSpaceId == "customEnvironment")
     }
 
+    @Test func cinemaEnvironmentImmersiveSpaceIdIsCinemaEnvironment() {
+        #expect(EnvironmentType.cinemaEnvironment.immersiveSpaceId == "cinemaEnvironment")
+    }
+
     @Test func hdriSkyboxDescriptionContainsHdri() {
         #expect(EnvironmentType.hdriSkybox.description.contains("HDRI"))
     }
 
     @Test func customEnvironmentDescriptionContains3D() {
         #expect(EnvironmentType.customEnvironment.description.contains("3D"))
+    }
+
+    @Test func cinemaEnvironmentDescriptionContainsCinema() {
+        #expect(EnvironmentType.cinemaEnvironment.description.contains("cinema"))
     }
 }
 

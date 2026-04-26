@@ -85,6 +85,23 @@ struct PlayerStreamLinkRecoveryTests {
         )
     }
 
+    @Test func logicalAttemptKeyUsesResolvedDebridServiceWhenContextHasNoPreference() {
+        let context = StreamRecoveryContext(
+            infoHash: "hash-no-preference",
+            seasonNumber: nil,
+            episodeNumber: nil
+        )
+        let stream = Fixtures.stream(
+            debridService: DebridServiceType.offcloud.rawValue,
+            recoveryContext: context
+        )
+
+        #expect(
+            PlayerStreamLinkRecovery.attemptTrackingKey(for: stream) ==
+            "offcloud|hash-no-preference|s-|e-"
+        )
+    }
+
     @Test func logicalAttemptKeyFallsBackToResolvedStreamIdentityWithoutRecoveryContext() {
         let original = Fixtures.stream(url: "https://cdn.example.com/direct/original.mkv?token=expired")
         let refreshed = Fixtures.stream(url: "https://cdn.example.com/direct/refreshed.mkv?token=fresh")
@@ -99,6 +116,12 @@ struct PlayerStreamLinkRecoveryTests {
             PlayerStreamLinkRecovery.attemptTrackingKey(for: original) !=
             PlayerStreamLinkRecovery.attemptTrackingKey(for: refreshed)
         )
+    }
+
+    @Test func defaultRefreshPlanWrapperUsesRuntimeQAConfigurationAndReturnsNilWithoutContext() {
+        let stream = Fixtures.stream()
+
+        #expect(PlayerStreamLinkRecovery.refreshPlan(for: stream, priorAttempts: 0) == nil)
     }
 
     @Test func qaSampleOverrideCanSwapInFreshTokenizedURL() {

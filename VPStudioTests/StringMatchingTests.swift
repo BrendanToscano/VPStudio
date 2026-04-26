@@ -74,6 +74,10 @@ struct StringMatchingTests {
         #expect("".containsStandaloneToken("sbs") == false)
     }
 
+    @Test func emptyTokenDoesNotMatch() {
+        #expect("movie.sbs.1080p".containsStandaloneToken("") == false)
+    }
+
     // MARK: - Special Characters
 
     @Test func matchesBracketDelimited() {

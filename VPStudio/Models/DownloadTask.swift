@@ -264,8 +264,8 @@ struct DownloadTask: Codable, Sendable, Identifiable, Equatable, FetchableRecord
         let parsedEpisodeNumber: Int? = row[Columns.episodeNumber]
         let parsedEpisodeTitle: String? = row[Columns.episodeTitle]
         let parsedRecoveryContext: String? = row[Columns.recoveryContextJSON]
-        let parsedCreatedAt = (row[Columns.createdAt] as Date?) ?? Date()
-        let parsedUpdatedAt = (row[Columns.updatedAt] as Date?) ?? parsedCreatedAt
+        let parsedCreatedAt = Self.valueAsDate(row[Columns.createdAt.rawValue]) ?? Date()
+        let parsedUpdatedAt = Self.valueAsDate(row[Columns.updatedAt.rawValue]) ?? parsedCreatedAt
 
         id = decodedID ?? UUID().uuidString
         mediaId = decodedMediaId ?? ""
@@ -315,6 +315,11 @@ struct DownloadTask: Codable, Sendable, Identifiable, Equatable, FetchableRecord
             return Int64(value)
         }
         return 0
+    }
+
+    private static func valueAsDate(_ value: DatabaseValueConvertible?) -> Date? {
+        guard let value else { return nil }
+        return Date.fromDatabaseValue(value.databaseValue)
     }
 
     init(

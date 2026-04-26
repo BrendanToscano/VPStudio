@@ -97,6 +97,86 @@ enum SeriesSeasonLoadingPresentationPolicy {
     }
 }
 
+enum SeriesDetailPresentationPolicy {
+    static func seasonCountText(_ count: Int) -> String? {
+        guard count > 0 else { return nil }
+        return "\(count) Season\(count == 1 ? "" : "s")"
+    }
+
+    static func runtimeText(minutes: Int?) -> String? {
+        guard let minutes, minutes > 0 else { return nil }
+        return "\(minutes) min"
+    }
+
+    static func imdbRatingText(_ rating: Double?) -> String? {
+        guard let rating, rating > 0 else { return nil }
+        return String(format: "%.1f IMDb", rating)
+    }
+
+    static func episodeContextText(season: Int, episodeNumber: Int) -> String {
+        "S\(season):E\(episodeNumber)"
+    }
+
+    static func episodeRuntimeText(minutes: Int?) -> String? {
+        guard let minutes, minutes > 0 else { return nil }
+        return "• \(minutes)m"
+    }
+
+    static func episodeTitle(_ title: String?, episodeNumber: Int) -> String {
+        guard let title, !title.isEmpty else { return "Episode \(episodeNumber)" }
+        return title
+    }
+
+    static func episodeAccessibilityLabel(episodeNumber: Int, title: String?) -> String {
+        "Episode \(episodeNumber), \(title ?? "Untitled")"
+    }
+
+    static func episodeAccessibilityValue(isWatched: Bool, isSelected: Bool) -> String {
+        switch (isWatched, isSelected) {
+        case (true, true):
+            return "Watched, selected"
+        case (true, false):
+            return "Watched"
+        case (false, true):
+            return "Selected"
+        case (false, false):
+            return "Not watched"
+        }
+    }
+
+    static func episodeWatchLabel(isWatched: Bool) -> String {
+        isWatched ? "Watched" : "Not watched"
+    }
+
+    static func episodeWatchActionTitle(isWatched: Bool) -> String {
+        isWatched ? "Mark Episode as Unwatched" : "Mark Episode as Watched"
+    }
+
+    static func watchStatusIcon(for state: DetailWatchStatusState) -> String {
+        switch state {
+        case .watched:
+            return "checkmark.circle.fill"
+        case .inProgress:
+            return "play.circle.fill"
+        case .notWatched:
+            return "circle"
+        case .selectionRequired:
+            return "rectangle.and.hand.point.up.left.fill"
+        }
+    }
+
+    static func selectedEpisodeWatchState(hasSelectedEpisode: Bool, isSelectedEpisodeCompleted: Bool) -> DetailWatchStatusState {
+        guard hasSelectedEpisode else { return .selectionRequired }
+        return isSelectedEpisodeCompleted ? .watched : .notWatched
+    }
+
+    static func seriesWatchProgressLabel(watchedCount: Int, seasonEpisodeCounts: [Int]) -> String {
+        let totalCount = max(seasonEpisodeCounts.reduce(0, +), watchedCount)
+        guard totalCount > 0 else { return "Series Actions" }
+        return "\(watchedCount)/\(totalCount) watched"
+    }
+}
+
 /// A series‑detail layout matching the reference screenshot exactly:
 /// – Back arrow top-left, share/list/cast icons top-right
 /// – Hero image with gradient overlay
@@ -389,24 +469,23 @@ struct SeriesDetailLayout: View {
             }
             
             if !viewModel.seasons.isEmpty {
-                let seasonCount = viewModel.seasons.count
-                Text("\(seasonCount) Season\(seasonCount > 1 ? "s" : "")")
+                Text(SeriesDetailPresentationPolicy.seasonCountText(viewModel.seasons.count) ?? "")
                     .font(.subheadline)
                     .foregroundStyle(.white.opacity(0.85))
             }
 
-            if let runtime = viewModel.mediaItem?.runtime, runtime > 0 {
-                Text("\(runtime) min")
+            if let runtimeText = SeriesDetailPresentationPolicy.runtimeText(minutes: viewModel.mediaItem?.runtime) {
+                Text(runtimeText)
                     .font(.subheadline)
                     .foregroundStyle(.white.opacity(0.85))
             }
             
-            if let rating = viewModel.mediaItem?.imdbRating, rating > 0 {
+            if let ratingText = SeriesDetailPresentationPolicy.imdbRatingText(viewModel.mediaItem?.imdbRating) {
                 HStack(spacing: 4) {
                     Image(systemName: "star.fill")
                         .font(.caption)
                         .foregroundStyle(.yellow)
-                    Text(String(format: "%.1f IMDb", rating))
+                    Text(ratingText)
                         .font(.subheadline)
                         .foregroundStyle(.white.opacity(0.85))
                 }
@@ -524,7 +603,10 @@ struct SeriesDetailLayout: View {
         if let episode = viewModel.selectedEpisode {
             HStack(alignment: .center, spacing: 10) {
                 HStack(spacing: 8) {
-                    Text("S\(viewModel.selectedSeason):E\(episode.episodeNumber)")
+                    Text(SeriesDetailPresentationPolicy.episodeContextText(
+                        season: viewModel.selectedSeason,
+                        episodeNumber: episode.episodeNumber
+                    ))
                         .font(.caption)
                         .fontWeight(.semibold)
                         .foregroundStyle(.white.opacity(0.9))
@@ -535,8 +617,8 @@ struct SeriesDetailLayout: View {
                             .foregroundStyle(.white.opacity(0.7))
                     }
 
-                    if let runtime = episode.runtime, runtime > 0 {
-                        Text("• \(runtime)m")
+                    if let runtimeText = SeriesDetailPresentationPolicy.episodeRuntimeText(minutes: episode.runtime) {
+                        Text(runtimeText)
                             .font(.caption)
                             .foregroundStyle(.white.opacity(0.6))
                     }
@@ -581,7 +663,9 @@ struct SeriesDetailLayout: View {
                             Task { await viewModel.toggleCurrentWatchState() }
                         } label: {
                             Label(
-                                selectedEpisodeWatchState.isWatched ? "Mark Episode as Unwatched" : "Mark Episode as Watched",
+                                SeriesDetailPresentationPolicy.episodeWatchActionTitle(
+                                    isWatched: selectedEpisodeWatchState.isWatched
+                                ),
                                 systemImage: selectedEpisodeWatchState.isWatched ? "xmark.circle" : "checkmark.circle"
                             )
                         }
@@ -796,7 +880,10 @@ struct SeriesDetailLayout: View {
             
                 // Episode info
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(episode.title ?? "Episode \(episode.episodeNumber)")
+                    Text(SeriesDetailPresentationPolicy.episodeTitle(
+                        episode.title,
+                        episodeNumber: episode.episodeNumber
+                    ))
                         .font(.subheadline)
                         .fontWeight(.medium)
                         .foregroundStyle(.white)
@@ -811,7 +898,7 @@ struct SeriesDetailLayout: View {
                     HStack(spacing: 6) {
                         Image(systemName: isWatched ? "checkmark.circle.fill" : "circle")
                             .font(.caption2.weight(.semibold))
-                        Text(isWatched ? "Watched" : "Not watched")
+                        Text(SeriesDetailPresentationPolicy.episodeWatchLabel(isWatched: isWatched))
                             .font(.caption2.weight(.semibold))
                     }
                     .foregroundStyle(isWatched ? .green : .white.opacity(0.62))
@@ -825,13 +912,19 @@ struct SeriesDetailLayout: View {
                 Task { await viewModel.toggleEpisodeWatched(episode) }
             } label: {
                 Label(
-                    isWatched ? "Mark Episode as Unwatched" : "Mark Episode as Watched",
+                    SeriesDetailPresentationPolicy.episodeWatchActionTitle(isWatched: isWatched),
                     systemImage: isWatched ? "xmark.circle" : "checkmark.circle"
                 )
             }
         }
-        .accessibilityLabel("Episode \(episode.episodeNumber), \(episode.title ?? "Untitled")")
-        .accessibilityValue(isWatched ? (isSelected ? "Watched, selected" : "Watched") : (isSelected ? "Selected" : "Not watched"))
+        .accessibilityLabel(SeriesDetailPresentationPolicy.episodeAccessibilityLabel(
+            episodeNumber: episode.episodeNumber,
+            title: episode.title
+        ))
+        .accessibilityValue(SeriesDetailPresentationPolicy.episodeAccessibilityValue(
+            isWatched: isWatched,
+            isSelected: isSelected
+        ))
         .accessibilityHint("Opens this episode and refreshes available streams. Press and hold for watched options.")
     }
     
@@ -858,16 +951,7 @@ struct SeriesDetailLayout: View {
     }
 
     private func watchStatusIcon(for state: DetailWatchStatusState) -> String {
-        switch state {
-        case .watched:
-            return "checkmark.circle.fill"
-        case .inProgress:
-            return "play.circle.fill"
-        case .notWatched:
-            return "circle"
-        case .selectionRequired:
-            return "rectangle.and.hand.point.up.left.fill"
-        }
+        SeriesDetailPresentationPolicy.watchStatusIcon(for: state)
     }
 
     private func watchStatusColor(for state: DetailWatchStatusState) -> Color {
@@ -885,16 +969,22 @@ struct SeriesDetailLayout: View {
 
     private var selectedEpisodeWatchState: DetailWatchStatusState {
         guard let selectedEpisode = viewModel.selectedEpisode else {
-            return .selectionRequired
+            return SeriesDetailPresentationPolicy.selectedEpisodeWatchState(
+                hasSelectedEpisode: false,
+                isSelectedEpisodeCompleted: false
+            )
         }
-        return viewModel.episodeWatchStates[selectedEpisode.id]?.isCompleted == true ? .watched : .notWatched
+        return SeriesDetailPresentationPolicy.selectedEpisodeWatchState(
+            hasSelectedEpisode: true,
+            isSelectedEpisodeCompleted: viewModel.episodeWatchStates[selectedEpisode.id]?.isCompleted == true
+        )
     }
 
     private var seriesWatchProgressLabel: String {
-        let watchedCount = viewModel.episodeWatchStates.count
-        let totalCount = max(viewModel.seasons.reduce(0) { $0 + $1.episodeCount }, watchedCount)
-        guard totalCount > 0 else { return "Series Actions" }
-        return "\(watchedCount)/\(totalCount) watched"
+        SeriesDetailPresentationPolicy.seriesWatchProgressLabel(
+            watchedCount: viewModel.episodeWatchStates.count,
+            seasonEpisodeCounts: viewModel.seasons.map(\.episodeCount)
+        )
     }
 
     private func watchStatusBadge(for state: DetailWatchStatusState) -> some View {

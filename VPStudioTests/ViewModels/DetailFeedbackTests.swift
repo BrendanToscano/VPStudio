@@ -4,6 +4,24 @@ import Testing
 
 @Suite("Detail Feedback", .serialized)
 struct DetailFeedbackTests {
+    private final class NotificationFlag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = false
+
+        func markPosted() {
+            lock.lock()
+            value = true
+            lock.unlock()
+        }
+
+        func didPost() -> Bool {
+            lock.lock()
+            let posted = value
+            lock.unlock()
+            return posted
+        }
+    }
+
     private func makePreview(id: String = "preview-\(UUID().uuidString)", title: String = "Rating Candidate") -> MediaPreview {
         MediaPreview(
             id: id,
@@ -220,13 +238,13 @@ struct DetailFeedbackTests {
 
         await viewModel.submitFeedback(value: 6)
 
-        var notificationReceived = false
+        let notificationReceived = NotificationFlag()
         let token = NotificationCenter.default.addObserver(
             forName: .tasteProfileDidChange,
             object: nil,
             queue: .main
         ) { _ in
-            notificationReceived = true
+            notificationReceived.markPosted()
         }
         defer { NotificationCenter.default.removeObserver(token) }
 
@@ -234,7 +252,7 @@ struct DetailFeedbackTests {
 
         // Allow notification delivery
         try await Task.sleep(for: .milliseconds(50))
-        #expect(notificationReceived)
+        #expect(notificationReceived.didPost())
     }
 }
 

@@ -92,7 +92,7 @@ actor LocalDownloadService {
 
         let repo = model.huggingFaceRepo
         let catalogStore = self.catalogStore
-        let throttle = await ProgressNotifyThrottle()
+        let throttle = ProgressNotifyThrottle()
 
         let task = Task {
             do {
@@ -102,15 +102,17 @@ actor LocalDownloadService {
                 let localDir = try await self.snapshotDownloader(
                     repo,
                     { progress in
-                        Task { @MainActor in
+                        Task {
                             try? await catalogStore.updateProgress(
                                 id: id,
                                 progress: progress.fractionCompleted,
                                 downloadedBytes: Int64(progress.completedUnitCount),
                                 totalBytes: Int64(progress.totalUnitCount)
                             )
-                            if throttle.shouldNotify() {
-                                NotificationCenter.default.post(name: .localModelsDidChange, object: nil)
+                            if await throttle.shouldNotify() {
+                                await MainActor.run {
+                                    NotificationCenter.default.post(name: .localModelsDidChange, object: nil)
+                                }
                             }
                         }
                     }
@@ -136,7 +138,7 @@ actor LocalDownloadService {
         // Capture completion to clean up actor state
         Task {
             _ = await task.value
-            await clearActiveTaskIfCurrent(token: taskToken, modelID: id)
+            clearActiveTaskIfCurrent(token: taskToken, modelID: id)
         }
     }
 
@@ -230,9 +232,8 @@ actor LocalDownloadService {
 
 // MARK: - Thread-safe Progress Throttle
 
-/// Sendable throttle for progress notifications. Uses MainActor isolation to avoid data races.
-@MainActor
-final class ProgressNotifyThrottle: Sendable {
+/// Sendable throttle for progress notifications.
+actor ProgressNotifyThrottle {
     private var lastNotifyTime = Date.distantPast
 
     func shouldNotify(interval: TimeInterval = 2) -> Bool {

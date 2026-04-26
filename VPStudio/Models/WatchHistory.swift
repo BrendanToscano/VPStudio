@@ -79,8 +79,8 @@ struct WatchHistory: Codable, Sendable, Identifiable, Equatable, FetchableRecord
         quality = Self.normalizedOptionalString(row[Columns.quality] as String?)
         debridService = Self.normalizedOptionalString(row[Columns.debridService] as String?)
         streamURL = Self.normalizedOptionalString(row[Columns.streamURL] as String?)
-        watchedAt = (row[Columns.watchedAt] as Date?) ?? Date()
-        isCompleted = (row[Columns.isCompleted] as Bool?) ?? false
+        watchedAt = Self.valueAsDate(row[Columns.watchedAt.rawValue])
+        isCompleted = Self.valueAsBool(row[Columns.isCompleted.rawValue])
     }
 
     func encode(to container: inout PersistenceContainer) {
@@ -130,5 +130,15 @@ struct WatchHistory: Codable, Sendable, Identifiable, Equatable, FetchableRecord
             return nil
         }
         return trimmed
+    }
+
+    private static func valueAsDate(_ value: (any DatabaseValueConvertible)?) -> Date {
+        guard let value else { return Date() }
+        return Date.fromDatabaseValue(value.databaseValue) ?? Date()
+    }
+
+    private static func valueAsBool(_ value: (any DatabaseValueConvertible)?) -> Bool {
+        guard let value else { return false }
+        return Bool.fromDatabaseValue(value.databaseValue) ?? false
     }
 }

@@ -110,6 +110,7 @@ actor DownloadManager {
         maxConcurrentTransfers: Int = DownloadManager.defaultMaxConcurrentTransfers,
         minimumFreeSpaceBufferBytes: Int64 = 128 * 1_024 * 1_024,
         availableDiskSpace: @escaping AvailableDiskSpaceProvider = DownloadManager.defaultAvailableDiskSpace,
+        resumePersistedDownloadsOnInit: Bool = true,
         sleep: @escaping SleepClosure = { duration in
             try await Task.sleep(for: duration)
         }
@@ -135,7 +136,9 @@ actor DownloadManager {
         self.minimumFreeSpaceBufferBytes = max(0, minimumFreeSpaceBufferBytes)
         self.availableDiskSpace = availableDiskSpace
 
-        Task { await self.resumePersistedDownloads() }
+        if resumePersistedDownloadsOnInit {
+            Task { await self.resumePersistedDownloads() }
+        }
     }
 
     func enqueueDownload(stream: StreamInfo, mediaId: String, episodeId: String?, mediaTitle: String = "", mediaType: String = "movie", posterPath: String? = nil, seasonNumber: Int? = nil, episodeNumber: Int? = nil, episodeTitle: String? = nil) async throws -> DownloadTask {

@@ -859,6 +859,11 @@ final class AppState {
         }
     }
 
+    func completeImmersiveDismissIfStillPending() {
+        guard isImmersiveSpaceOpen || isImmersiveTransitionInFlight else { return }
+        immersiveSpaceDidDisappear()
+    }
+
     func consumeSuspendedImmersiveRestoreRequest() -> Bool {
         guard shouldRestoreImmersiveAfterSuspension else { return false }
         shouldRestoreImmersiveAfterSuspension = false
@@ -908,6 +913,9 @@ final class AppState {
             // Clear persisted UI state so reset behaves like a true fresh install.
             if let bundleIdentifier = Bundle.main.bundleIdentifier {
                 defaults.removePersistentDomain(forName: bundleIdentifier)
+            }
+            if let namespaceRotation {
+                defaults.set(namespaceRotation.next, forKey: Self.secretStoreNamespaceKey)
             }
             defaults.set(false, forKey: "onboarding.soft_setup_dismissed")
             defaults.set("", forKey: "settings.last_destination")
@@ -1036,6 +1044,7 @@ enum SidebarTab: String, CaseIterable, Identifiable {
 enum EnvironmentType: String, CaseIterable, Identifiable {
     case hdriSkybox = "HDRI Skybox"
     case customEnvironment = "Custom Environment"
+    case cinemaEnvironment = "Cinema Environment"
 
     var id: String { rawValue }
 
@@ -1043,6 +1052,7 @@ enum EnvironmentType: String, CaseIterable, Identifiable {
         switch self {
         case .hdriSkybox: return "pano"
         case .customEnvironment: return "cube.transparent"
+        case .cinemaEnvironment: return "theatermasks"
         }
     }
 
@@ -1050,6 +1060,7 @@ enum EnvironmentType: String, CaseIterable, Identifiable {
         switch self {
         case .hdriSkybox: return "hdriSkybox"
         case .customEnvironment: return "customEnvironment"
+        case .cinemaEnvironment: return "cinemaEnvironment"
         }
     }
 
@@ -1057,6 +1068,7 @@ enum EnvironmentType: String, CaseIterable, Identifiable {
         switch self {
         case .hdriSkybox: return "360-degree HDRI panoramic skybox"
         case .customEnvironment: return "User-imported 3D environment model"
+        case .cinemaEnvironment: return "Configurable cinema screen with persistent seating and lighting controls"
         }
     }
 }

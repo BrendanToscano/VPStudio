@@ -84,6 +84,84 @@ struct DetailScrollRegressionTests {
     }
 
     @Test
+    func seriesDetailPresentationPolicyFormatsMetadataAndEpisodeText() {
+        #expect(SeriesDetailPresentationPolicy.seasonCountText(0) == nil)
+        #expect(SeriesDetailPresentationPolicy.seasonCountText(1) == "1 Season")
+        #expect(SeriesDetailPresentationPolicy.seasonCountText(3) == "3 Seasons")
+
+        #expect(SeriesDetailPresentationPolicy.runtimeText(minutes: nil) == nil)
+        #expect(SeriesDetailPresentationPolicy.runtimeText(minutes: 0) == nil)
+        #expect(SeriesDetailPresentationPolicy.runtimeText(minutes: 42) == "42 min")
+        #expect(SeriesDetailPresentationPolicy.imdbRatingText(nil) == nil)
+        #expect(SeriesDetailPresentationPolicy.imdbRatingText(0) == nil)
+        #expect(SeriesDetailPresentationPolicy.imdbRatingText(8.26) == "8.3 IMDb")
+
+        #expect(SeriesDetailPresentationPolicy.episodeContextText(season: 2, episodeNumber: 7) == "S2:E7")
+        #expect(SeriesDetailPresentationPolicy.episodeRuntimeText(minutes: nil) == nil)
+        #expect(SeriesDetailPresentationPolicy.episodeRuntimeText(minutes: 0) == nil)
+        #expect(SeriesDetailPresentationPolicy.episodeRuntimeText(minutes: 51) == "\u{2022} 51m")
+        #expect(SeriesDetailPresentationPolicy.episodeTitle(nil, episodeNumber: 4) == "Episode 4")
+        #expect(SeriesDetailPresentationPolicy.episodeTitle("", episodeNumber: 4) == "Episode 4")
+        #expect(SeriesDetailPresentationPolicy.episodeTitle("Finale", episodeNumber: 4) == "Finale")
+    }
+
+    @Test
+    func seriesDetailPresentationPolicyFormatsWatchStates() {
+        #expect(SeriesDetailPresentationPolicy.episodeAccessibilityLabel(
+            episodeNumber: 5,
+            title: "The Return"
+        ) == "Episode 5, The Return")
+        #expect(SeriesDetailPresentationPolicy.episodeAccessibilityLabel(
+            episodeNumber: 5,
+            title: nil
+        ) == "Episode 5, Untitled")
+
+        #expect(SeriesDetailPresentationPolicy.episodeAccessibilityValue(isWatched: true, isSelected: true) == "Watched, selected")
+        #expect(SeriesDetailPresentationPolicy.episodeAccessibilityValue(isWatched: true, isSelected: false) == "Watched")
+        #expect(SeriesDetailPresentationPolicy.episodeAccessibilityValue(isWatched: false, isSelected: true) == "Selected")
+        #expect(SeriesDetailPresentationPolicy.episodeAccessibilityValue(isWatched: false, isSelected: false) == "Not watched")
+
+        #expect(SeriesDetailPresentationPolicy.episodeWatchLabel(isWatched: true) == "Watched")
+        #expect(SeriesDetailPresentationPolicy.episodeWatchLabel(isWatched: false) == "Not watched")
+        #expect(SeriesDetailPresentationPolicy.episodeWatchActionTitle(isWatched: true) == "Mark Episode as Unwatched")
+        #expect(SeriesDetailPresentationPolicy.episodeWatchActionTitle(isWatched: false) == "Mark Episode as Watched")
+
+        #expect(SeriesDetailPresentationPolicy.watchStatusIcon(for: .watched) == "checkmark.circle.fill")
+        #expect(SeriesDetailPresentationPolicy.watchStatusIcon(for: .inProgress) == "play.circle.fill")
+        #expect(SeriesDetailPresentationPolicy.watchStatusIcon(for: .notWatched) == "circle")
+        #expect(SeriesDetailPresentationPolicy.watchStatusIcon(for: .selectionRequired) == "rectangle.and.hand.point.up.left.fill")
+
+        #expect(SeriesDetailPresentationPolicy.selectedEpisodeWatchState(
+            hasSelectedEpisode: false,
+            isSelectedEpisodeCompleted: true
+        ) == .selectionRequired)
+        #expect(SeriesDetailPresentationPolicy.selectedEpisodeWatchState(
+            hasSelectedEpisode: true,
+            isSelectedEpisodeCompleted: true
+        ) == .watched)
+        #expect(SeriesDetailPresentationPolicy.selectedEpisodeWatchState(
+            hasSelectedEpisode: true,
+            isSelectedEpisodeCompleted: false
+        ) == .notWatched)
+    }
+
+    @Test
+    func seriesWatchProgressLabelUsesSeasonTotalOrWatchedFallback() {
+        #expect(SeriesDetailPresentationPolicy.seriesWatchProgressLabel(
+            watchedCount: 0,
+            seasonEpisodeCounts: []
+        ) == "Series Actions")
+        #expect(SeriesDetailPresentationPolicy.seriesWatchProgressLabel(
+            watchedCount: 4,
+            seasonEpisodeCounts: [10, 8]
+        ) == "4/18 watched")
+        #expect(SeriesDetailPresentationPolicy.seriesWatchProgressLabel(
+            watchedCount: 6,
+            seasonEpisodeCounts: [2, 1]
+        ) == "6/6 watched")
+    }
+
+    @Test
     @MainActor
     func successfulSeriesSearchMarksCurrentEpisodeContextAndClearsFreshness() async {
         let appState = AppState()

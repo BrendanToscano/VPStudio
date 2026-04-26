@@ -234,6 +234,9 @@ struct ContentView: View {
                 },
                 onDismiss: {
                     Task { await dismissEnvironmentIfNeeded(reason: .userInitiated) }
+                },
+                onSelectCinema: {
+                    Task { await openCinemaEnvironment() }
                 }
             )
             .environment(appState)
@@ -381,6 +384,25 @@ struct ContentView: View {
     // MARK: - visionOS Environment Logic
 
     #if os(visionOS)
+    private func openCinemaEnvironment() async {
+        if appState.activeEnvironment == .cinemaEnvironment, appState.isImmersiveSpaceOpen {
+            await dismissEnvironmentIfNeeded(reason: .userInitiated)
+            return
+        }
+
+        await dismissEnvironmentIfNeeded(reason: .switchingEnvironment)
+        guard appState.beginImmersiveTransition() else { return }
+        let result = await openImmersiveSpace(id: EnvironmentType.cinemaEnvironment.immersiveSpaceId)
+        switch result {
+        case .opened:
+            appState.spatialAudioManager.enterImmersiveMode()
+        case .error, .userCancelled:
+            appState.cancelImmersiveTransition()
+        @unknown default:
+            appState.cancelImmersiveTransition()
+        }
+    }
+
     private func openEnvironment(_ asset: EnvironmentAsset) async {
         if asset.id == appState.selectedEnvironmentAsset?.id, appState.isImmersiveSpaceOpen {
             await dismissEnvironmentIfNeeded(reason: .userInitiated)
@@ -647,11 +669,15 @@ struct EnvironmentsTabView: View {
                     )
                     .frame(maxWidth: .infinity)
                     .padding(.top, 60)
-                } else if environments.isEmpty {
-                    emptyState
                 } else {
                     let columns = [GridItem(.adaptive(minimum: 220, maximum: 280), spacing: 16)]
                     LazyVGrid(columns: columns, spacing: 16) {
+                        CinemaEnvironmentPreviewCard(
+                            isActive: appState.activeEnvironment == .cinemaEnvironment,
+                            isImmersiveOpen: appState.isImmersiveSpaceOpen,
+                            onSelect: { Task { await selectCinemaEnvironment() } }
+                        )
+
                         ForEach(environments) { asset in
                             EnvironmentPreviewCard(
                                 asset: asset,
@@ -660,6 +686,10 @@ struct EnvironmentsTabView: View {
                                 onSelect: { Task { await selectEnvironment(asset) } }
                             )
                         }
+                    }
+
+                    if environments.isEmpty {
+                        importPrompt
                     }
 
                     if appState.isImmersiveSpaceOpen {
@@ -687,20 +717,20 @@ struct EnvironmentsTabView: View {
         }
     }
 
-    private var emptyState: some View {
-        VStack(spacing: 16) {
+    private var importPrompt: some View {
+        VStack(spacing: 12) {
             Image(systemName: "mountain.2")
-                .font(.system(size: 48))
+                .font(.system(size: 34))
                 .foregroundStyle(.secondary)
-            Text("No Environments")
-                .font(.title3.weight(.semibold))
+            Text("No imported environments")
+                .font(.headline)
             Text("Download environments from Settings to use them here.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
         }
         .frame(maxWidth: .infinity)
-        .padding(.top, 60)
+        .padding(.vertical, 24)
     }
 
     @MainActor
@@ -738,6 +768,25 @@ struct EnvironmentsTabView: View {
         guard appState.beginImmersiveTransition() else { return }
         let spaceID = await appState.environmentCatalogManager.immersiveSpaceID(for: asset)
         let result = await openImmersiveSpace(id: spaceID)
+        switch result {
+        case .opened: break
+        case .error, .userCancelled: appState.cancelImmersiveTransition()
+        @unknown default: appState.cancelImmersiveTransition()
+        }
+    }
+
+    private func selectCinemaEnvironment() async {
+        if appState.activeEnvironment == .cinemaEnvironment, appState.isImmersiveSpaceOpen {
+            await exitEnvironment()
+            return
+        }
+        if appState.isImmersiveSpaceOpen {
+            guard appState.beginImmersiveTransition() else { return }
+            appState.stageImmersiveDismiss(reason: .switchingEnvironment)
+            await dismissImmersiveSpace()
+        }
+        guard appState.beginImmersiveTransition() else { return }
+        let result = await openImmersiveSpace(id: EnvironmentType.cinemaEnvironment.immersiveSpaceId)
         switch result {
         case .opened: break
         case .error, .userCancelled: appState.cancelImmersiveTransition()

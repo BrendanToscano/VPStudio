@@ -67,6 +67,38 @@ struct IMDbImportSettingsView: View {
     }
 }
 
+enum IMDbCSVImportPolicy {
+    static func importButtonTitle(hasSelectedFile: Bool, previewDetected: Bool, importInFlight: Bool) -> String {
+        guard hasSelectedFile else {
+            return previewDetected ? "Change CSV File" : "Preview CSV Before Importing"
+        }
+        return importInFlight ? "Importing..." : "Import Selected CSV"
+    }
+
+    static func targetFolderName(importToFolder: Bool, folderName: String) -> String? {
+        guard importToFolder else { return nil }
+        let trimmed = folderName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    static func normalizedHeaders(from headers: [String]) -> [String] {
+        headers.map { header in
+            header.lowercased().filter { $0.isLetter || $0.isNumber }
+        }
+    }
+
+    static func previewRows(from lines: ArraySlice<String>, limit: Int = 3) -> [[String]] {
+        var rows: [[String]] = []
+        for line in lines {
+            guard rows.count < limit else { break }
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty { continue }
+            rows.append(IMDbCSVImportSheet.parseCSVLine(trimmed))
+        }
+        return rows
+    }
+}
+
 // MARK: - IMDb-aware CSV Import Sheet
 
 struct IMDbCSVImportSheet: View {
@@ -131,9 +163,11 @@ struct IMDbCSVImportSheet: View {
                         }
                     } label: {
                         Label(
-                            selectedFileURL == nil
-                                ? (previewDetected ? "Change CSV File" : "Preview CSV Before Importing")
-                                : (csvImportInFlight ? "Importing..." : "Import Selected CSV"),
+                            IMDbCSVImportPolicy.importButtonTitle(
+                                hasSelectedFile: selectedFileURL != nil,
+                                previewDetected: previewDetected,
+                                importInFlight: csvImportInFlight
+                            ),
                             systemImage: "square.and.arrow.down"
                         )
                     }
@@ -225,7 +259,10 @@ struct IMDbCSVImportSheet: View {
                 destination: csvImportDestination,
                 importRatings: csvImportRatings,
                 promoteLikedRatingsToFavorites: csvPromoteLikedToFavorites,
-                targetFolderName: importToFolder && !folderName.isEmpty ? folderName : nil
+                targetFolderName: IMDbCSVImportPolicy.targetFolderName(
+                    importToFolder: importToFolder,
+                    folderName: folderName
+                )
             )
 
             let summary = try await appState.libraryCSVImportService.importCSV(from: url, options: options)
@@ -245,47 +282,48 @@ struct IMDbCSVImportSheet: View {
             let lines = text.components(separatedBy: .newlines)
             guard let headerLine = lines.first else { return }
 
-            let headers = parseCSVLine(headerLine)
+            let headers = Self.parseCSVLine(headerLine)
             previewHeaders = headers
 
             // Get first 3 data rows
-            var firstRows: [[String]] = []
-            for line in lines.dropFirst().prefix(3) {
-                let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-                if trimmed.isEmpty { continue }
-                firstRows.append(parseCSVLine(trimmed))
-            }
-            previewFirstRows = firstRows
+            previewFirstRows = IMDbCSVImportPolicy.previewRows(from: lines.dropFirst())
 
             // Auto-detect format and column mappings
-            let normalizedHeaders = headers.map { h in
-                h.lowercased().filter { $0.isLetter || $0.isNumber }
-            }
-            detectedMappings = detectColumnMappings(from: normalizedHeaders)
+            let normalizedHeaders = IMDbCSVImportPolicy.normalizedHeaders(from: headers)
+            detectedMappings = Self.detectColumnMappings(from: normalizedHeaders)
         } catch {
             csvImportError = "Could not read CSV: \(error.localizedDescription)"
         }
     }
 
-    private func parseCSVLine(_ line: String) -> [String] {
+    nonisolated static func parseCSVLine(_ line: String) -> [String] {
         var result: [String] = []
         var current = ""
         var inQuotes = false
-        for char in line {
+        var index = line.startIndex
+        while index < line.endIndex {
+            let char = line[index]
             if char == "\"" {
-                inQuotes.toggle()
+                let next = line.index(after: index)
+                if inQuotes, next < line.endIndex, line[next] == "\"" {
+                    current.append("\"")
+                    index = next
+                } else {
+                    inQuotes.toggle()
+                }
             } else if char == "," && !inQuotes {
                 result.append(current.trimmingCharacters(in: .whitespaces))
                 current = ""
             } else {
                 current.append(char)
             }
+            index = line.index(after: index)
         }
         result.append(current.trimmingCharacters(in: .whitespaces))
         return result
     }
 
-    private func detectColumnMappings(from headers: [String]) -> [String: String] {
+    nonisolated static func detectColumnMappings(from headers: [String]) -> [String: String] {
         var mappings: [String: String] = [:]
         let knownMappings: [Set<String>: String] = [
             ["title", "name", "primarytitle", "originaltitle", "movie", "show"]: "title",

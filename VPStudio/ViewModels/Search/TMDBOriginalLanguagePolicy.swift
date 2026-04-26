@@ -9,7 +9,10 @@ enum TMDBOriginalLanguagePolicy {
     /// - Do not send for Hindi / related Indian locales to avoid excluding English-titled content.
     /// - Otherwise, send ISO 639-1 code derived from the selected locale.
     static func shouldSendOriginalLanguage(for languageFilters: Set<String>) -> Bool {
-        guard languageFilters.count == 1, let localeCode = languageFilters.first else {
+        guard languageFilters.count == 1,
+              let localeCode = languageFilters.first,
+              !localeCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
             return false
         }
 

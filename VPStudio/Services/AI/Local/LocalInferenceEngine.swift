@@ -1,11 +1,20 @@
 import Foundation
 import os
 
+private func defaultLocalInferenceAvailableMemoryBytes() -> UInt64 {
+#if os(macOS)
+    ProcessInfo.processInfo.physicalMemory
+#else
+    UInt64(os_proc_available_memory())
+#endif
+}
+
 /// Actor owning model load/unload/generate lifecycle with memory-aware management.
 actor LocalInferenceEngine {
 
     private let catalogStore: LocalModelCatalogStore
     private let adapter: any LocalInferenceAdapting
+    private let availableMemoryProvider: @Sendable () -> UInt64
     private let logger = Logger(subsystem: "com.vpstudio", category: "local-inference")
 
     private var loadedModel: LoadedLocalModel?
@@ -20,9 +29,14 @@ actor LocalInferenceEngine {
     private var memoryPressureSource: DispatchSourceMemoryPressure?
     private var thermalObserver: NSObjectProtocol?
 
-    init(catalogStore: LocalModelCatalogStore, adapter: any LocalInferenceAdapting = CoreMLInferenceAdapter()) {
+    init(
+        catalogStore: LocalModelCatalogStore,
+        adapter: any LocalInferenceAdapting = CoreMLInferenceAdapter(),
+        availableMemoryProvider: @escaping @Sendable () -> UInt64 = defaultLocalInferenceAvailableMemoryBytes
+    ) {
         self.catalogStore = catalogStore
         self.adapter = adapter
+        self.availableMemoryProvider = availableMemoryProvider
     }
 
     // MARK: - Memory Pressure Monitoring
@@ -139,11 +153,7 @@ actor LocalInferenceEngine {
     }
 
     private func availableMemoryBytes() -> UInt64 {
-#if os(macOS)
-        ProcessInfo.processInfo.physicalMemory
-#else
-        UInt64(os_proc_available_memory())
-#endif
+        availableMemoryProvider()
     }
 
     /// Force unload on memory pressure — no hysteresis check.

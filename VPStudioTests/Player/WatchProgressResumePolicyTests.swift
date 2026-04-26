@@ -60,4 +60,22 @@ struct WatchProgressResumePolicyTests {
         let resume = WatchProgressResumePolicy.resumeTime(for: history)
         #expect(resume == 1_425)
     }
+
+    @Test func returnsProgressWhenDurationIsUnavailable() {
+        let history = WatchHistory(
+            id: "live-progress",
+            mediaId: "live",
+            episodeId: nil,
+            title: "Unknown Duration",
+            progress: 120,
+            duration: 0,
+            quality: "1080p",
+            debridService: "rd",
+            streamURL: nil,
+            watchedAt: Date(),
+            isCompleted: false
+        )
+
+        #expect(WatchProgressResumePolicy.resumeTime(for: history) == 120)
+    }
 }

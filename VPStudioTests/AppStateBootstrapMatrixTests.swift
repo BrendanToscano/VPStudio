@@ -48,6 +48,7 @@ struct AppStateBootstrapMatrixTests {
     @MainActor
     func bootstrapStateMatrix(data: CaseData) async throws {
         struct HookError: Error {}
+        let database = try DatabaseManager(inMemoryNamed: "bootstrap-matrix-\(data.id)-\(UUID().uuidString)")
 
         let environmentAsset = data.hasActiveEnvironment
             ? EnvironmentAsset(id: "env-\(data.id)", name: "Env", sourceType: .bundled, assetPath: "theater", isActive: true)
@@ -55,7 +56,10 @@ struct AppStateBootstrapMatrixTests {
 
         let hooks = AppState.TestHooks(
             migrate: {
-                if data.failMigrate { throw HookError() }
+                if data.failMigrate {
+                    throw HookError()
+                }
+                try await database.migrate()
             },
             initializeDebrid: {
                 if data.failDebridInit { throw HookError() }
@@ -79,7 +83,7 @@ struct AppStateBootstrapMatrixTests {
             }
         )
 
-        let appState = AppState(testHooks: hooks)
+        let appState = AppState(database: database, secretStore: TestSecretStore(), testHooks: hooks)
         await appState.bootstrap()
 
         #expect(appState.isBootstrapping == false)

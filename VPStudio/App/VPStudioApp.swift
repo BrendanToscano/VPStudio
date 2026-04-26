@@ -50,8 +50,10 @@ struct VPStudioApp: App {
     @State private var appState = AppState()
     @State private var sharedEngine = VPPlayerEngine()
     #if os(visionOS)
+    @State private var cinemaSettings = CinemaSettings()
     @State private var hdriImmersionStyle: ImmersionStyle = .full
     @State private var customEnvImmersionStyle: ImmersionStyle = .full
+    @State private var cinemaImmersionStyle: ImmersionStyle = .full
     #endif
 
     var body: some SwiftUI.Scene {
@@ -76,6 +78,9 @@ struct VPStudioApp: App {
                 )
                     .environment(appState)
                     .environment(sharedEngine)
+                    #if os(visionOS)
+                    .environment(cinemaSettings)
+                    #endif
             }
         }
         .defaultSize(width: 1400, height: 788)
@@ -101,6 +106,14 @@ struct VPStudioApp: App {
                 .environment(sharedEngine)
         }
         .immersionStyle(selection: $customEnvImmersionStyle, in: .full)
+        .upperLimbVisibility(.visible)
+
+        ImmersiveSpace(id: "cinemaEnvironment") {
+            CinemaImmersiveContent(settings: cinemaSettings)
+                .environment(appState)
+                .environment(sharedEngine)
+        }
+        .immersionStyle(selection: $cinemaImmersionStyle, in: .full)
         .upperLimbVisibility(.visible)
         #endif
     }

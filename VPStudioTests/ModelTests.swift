@@ -302,6 +302,17 @@ struct StreamInfoTests {
         #expect(stream.qualityBadge == "4K / DV / H.265 / Atmos")
     }
 
+    @Test func qualityBadgeIsEmptyWhenEveryDisplayValueIsUnknownOrSDR() {
+        let stream = StreamInfo(
+            streamURL: URL(string: "https://example.com/a.mkv")!,
+            quality: .unknown, codec: .unknown, audio: .unknown,
+            source: .unknown, hdr: .sdr, fileName: "a.mkv",
+            sizeBytes: 1000, debridService: "rd"
+        )
+
+        #expect(stream.qualityBadge == "")
+    }
+
     @Test func idIsStableAcrossURLChanges() {
         let a = StreamInfo(
             streamURL: URL(string: "https://example.com/a.mkv?token=abc")!,
@@ -316,6 +327,23 @@ struct StreamInfoTests {
             sizeBytes: 1000, debridService: "rd"
         )
         // Same logical stream with different tokens should have same ID
+        #expect(a.id == b.id)
+    }
+
+    @Test func idIsStableAcrossURLFragmentChanges() {
+        let a = StreamInfo(
+            streamURL: URL(string: "https://example.com/a.mkv#old")!,
+            quality: .hd1080p, codec: .h264, audio: .aac,
+            source: .webDL, hdr: .sdr, fileName: "same.mkv",
+            sizeBytes: 1000, debridService: "rd"
+        )
+        let b = StreamInfo(
+            streamURL: URL(string: "https://example.com/a.mkv#new")!,
+            quality: .hd1080p, codec: .h264, audio: .aac,
+            source: .webDL, hdr: .sdr, fileName: "same.mkv",
+            sizeBytes: 1000, debridService: "rd"
+        )
+
         #expect(a.id == b.id)
     }
 
@@ -350,6 +378,109 @@ struct StreamInfoTests {
             sizeBytes: 5000, debridService: "rd"
         )
         #expect(a.id != b.id)
+    }
+
+    @Test func withStreamURLReturnsCopyWithoutMutatingOriginal() {
+        let original = StreamInfo(
+            streamURL: URL(string: "https://example.com/old.mkv?token=old")!,
+            quality: .hd1080p, codec: .h264, audio: .aac,
+            source: .webDL, hdr: .sdr, fileName: "movie.mkv",
+            sizeBytes: 1000, debridService: "rd"
+        )
+
+        let updated = original.withStreamURL(URL(string: "https://example.com/new.mkv?token=new")!)
+
+        #expect(original.streamURL.absoluteString == "https://example.com/old.mkv?token=old")
+        #expect(updated.streamURL.absoluteString == "https://example.com/new.mkv?token=new")
+        #expect(original.id != updated.id)
+    }
+
+    @Test func remoteTransferIDReadsRecoveryContextTorrentId() throws {
+        let context = try #require(
+            StreamRecoveryContext(
+                infoHash: "ABCDEF",
+                preferredService: .realDebrid,
+                torrentId: " torrent-123 "
+            )
+        )
+        let stream = StreamInfo(
+            streamURL: URL(string: "https://example.com/a.mkv")!,
+            quality: .hd1080p, codec: .h264, audio: .aac,
+            source: .webDL, hdr: .sdr, fileName: "a.mkv",
+            sizeBytes: 1000,
+            debridService: "rd",
+            recoveryContext: context
+        )
+
+        #expect(stream.remoteTransferID == "torrent-123")
+        #expect(stream.withRecoveryContext(nil).remoteTransferID == nil)
+    }
+
+    @Test func withRecoveryContextReturnsCopyWithoutMutatingOriginal() throws {
+        let original = StreamInfo(
+            streamURL: URL(string: "https://example.com/a.mkv")!,
+            quality: .hd1080p, codec: .h264, audio: .aac,
+            source: .webDL, hdr: .sdr, fileName: "a.mkv",
+            sizeBytes: 1000,
+            debridService: "rd"
+        )
+        let context = try #require(StreamRecoveryContext(infoHash: "ABCDEF", torrentId: "torrent-456"))
+
+        let updated = original.withRecoveryContext(context)
+
+        #expect(original.recoveryContext == nil)
+        #expect(updated.recoveryContext == context)
+        #expect(updated.remoteTransferID == "torrent-456")
+    }
+
+    @Test func streamRecoveryContextNormalizesAndRejectsEmptyHash() throws {
+        #expect(StreamRecoveryContext(infoHash: " \n\t ") == nil)
+
+        let context = try #require(
+            StreamRecoveryContext(
+                infoHash: " ABCDEF ",
+                torrentId: "   ",
+                resolvedDebridService: " RealDebrid ",
+                resolvedFileName: " Movie.mkv ",
+                resolvedFileSizeBytes: -1
+            )
+        )
+
+        #expect(context.infoHash == "abcdef")
+        #expect(context.torrentId == nil)
+        #expect(context.resolvedDebridService == "RealDebrid")
+        #expect(context.resolvedFileName == "Movie.mkv")
+        #expect(context.resolvedFileSizeBytes == nil)
+    }
+
+    @Test func streamRecoveryContextEnrichmentOverwritesResolvedFields() throws {
+        let context = try #require(
+            StreamRecoveryContext(
+                infoHash: "abcdef",
+                preferredService: .premiumize,
+                seasonNumber: 2,
+                episodeNumber: 3,
+                torrentId: "torrent-1",
+                resolvedDebridService: "old",
+                resolvedFileName: "old.mkv",
+                resolvedFileSizeBytes: 1
+            )
+        )
+
+        let enriched = context.enrichedForDownloadPersistence(
+            fileName: "new.mkv",
+            sizeBytes: 2048,
+            debridService: "new-service"
+        )
+
+        #expect(enriched.infoHash == "abcdef")
+        #expect(enriched.preferredService == .premiumize)
+        #expect(enriched.seasonNumber == 2)
+        #expect(enriched.episodeNumber == 3)
+        #expect(enriched.torrentId == "torrent-1")
+        #expect(enriched.resolvedDebridService == "new-service")
+        #expect(enriched.resolvedFileName == "new.mkv")
+        #expect(enriched.resolvedFileSizeBytes == 2048)
     }
 }
 
@@ -488,6 +619,110 @@ struct WatchHistoryTests {
         )
         #expect(history.remainingString == "0m remaining")
     }
+
+    @Test func initializerNormalizesUnsafeValues() {
+        let history = WatchHistory(
+            id: "1",
+            mediaId: "m1",
+            episodeId: "s01e01",
+            title: "Movie",
+            progress: -25,
+            duration: -100,
+            quality: "  ",
+            debridService: "  real_debrid  ",
+            streamURL: "\nhttps://cdn.example.com/movie.mkv\n",
+            watchedAt: Date(),
+            isCompleted: false
+        )
+
+        #expect(history.progress == 0)
+        #expect(history.duration == 0)
+        #expect(history.quality == nil)
+        #expect(history.debridService == "real_debrid")
+        #expect(history.streamURL == "https://cdn.example.com/movie.mkv")
+    }
+
+    @Test func normalizedForPersistenceClampsProgressToDuration() {
+        let history = WatchHistory(
+            id: "1",
+            mediaId: "m1",
+            title: "Movie",
+            progress: 7_500,
+            duration: 7_200,
+            quality: "  4K  ",
+            debridService: nil,
+            streamURL: nil,
+            watchedAt: Date(),
+            isCompleted: true
+        )
+
+        let normalized = history.normalizedForPersistence
+
+        #expect(normalized.progress == 7_200)
+        #expect(normalized.duration == 7_200)
+        #expect(normalized.quality == "4K")
+    }
+
+    @Test func initializerKeepsPositiveProgressWhenDurationIsUnknown() {
+        let history = WatchHistory(
+            id: "1",
+            mediaId: "m1",
+            title: "Movie",
+            progress: 125,
+            duration: 0,
+            watchedAt: Date(),
+            isCompleted: false
+        )
+
+        #expect(history.progress == 125)
+        #expect(history.duration == 0)
+        #expect(history.progressPercent == 0)
+        #expect(history.progressString == "2m / 0m")
+    }
+
+    @Test func normalizedForPersistenceTrimsAllOptionalStrings() {
+        let history = WatchHistory(
+            id: "1",
+            mediaId: "m1",
+            episodeId: "s01e02",
+            title: "Episode",
+            progress: 20,
+            duration: 100,
+            quality: "\n1080p\n",
+            debridService: "  real_debrid  ",
+            streamURL: " https://cdn.example.com/episode.mkv ",
+            watchedAt: Date(),
+            isCompleted: false
+        )
+
+        let normalized = history.normalizedForPersistence
+
+        #expect(normalized.quality == "1080p")
+        #expect(normalized.debridService == "real_debrid")
+        #expect(normalized.streamURL == "https://cdn.example.com/episode.mkv")
+        #expect(normalized.episodeId == "s01e02")
+    }
+
+    @Test func normalizedForPersistenceDropsWhitespaceOnlyOptionalStrings() {
+        let history = WatchHistory(
+            id: "1",
+            mediaId: "m1",
+            title: "Movie",
+            progress: 20,
+            duration: 100,
+            quality: " ",
+            debridService: "\n",
+            streamURL: "\t",
+            watchedAt: Date(),
+            isCompleted: false
+        )
+
+        let normalized = history.normalizedForPersistence
+
+        #expect(normalized.quality == nil)
+        #expect(normalized.debridService == nil)
+        #expect(normalized.streamURL == nil)
+    }
 }
 
 // MARK: - Episode Tests
@@ -546,6 +781,40 @@ struct MediaItemTests {
         #expect(item.backdropURL?.absoluteString == "https://image.tmdb.org/t/p/original/bg.jpg")
     }
 
+    @Test func artworkDetectionTreatsBlankPathsAsMissing() {
+        let none = MediaItem(id: "1", type: .movie, title: "Test")
+        let blankPoster = MediaItem(id: "2", type: .movie, title: "Test", posterPath: "")
+        let blankBackdrop = MediaItem(id: "3", type: .movie, title: "Test", backdropPath: "")
+        let poster = MediaItem(id: "4", type: .movie, title: "Test", posterPath: "/poster.jpg")
+        let backdrop = MediaItem(id: "5", type: .movie, title: "Test", backdropPath: "/bg.jpg")
+
+        #expect(none.hasArtwork == false)
+        #expect(blankPoster.hasArtwork == false)
+        #expect(blankBackdrop.hasArtwork == false)
+        #expect(poster.hasArtwork == true)
+        #expect(backdrop.hasArtwork == true)
+    }
+
+    @Test func withIDReturnsCopyWithoutMutatingOriginal() {
+        let original = MediaItem(
+            id: "old",
+            type: .series,
+            title: "Show",
+            year: 2024,
+            posterPath: "/poster.jpg",
+            genres: ["Drama"],
+            tmdbId: 123
+        )
+
+        let copy = original.withID("new")
+
+        #expect(original.id == "old")
+        #expect(copy.id == "new")
+        #expect(copy.title == original.title)
+        #expect(copy.genres == original.genres)
+        #expect(copy.tmdbId == original.tmdbId)
+    }
+
     @Test func yearStringFormatsCorrectly() {
         let withYear = MediaItem(id: "1", type: .movie, title: "Test", year: 2025)
         #expect(withYear.yearString == "2025")
@@ -571,6 +840,25 @@ struct MediaItemTests {
 
         let noRuntime = MediaItem(id: "1", type: .movie, title: "Test", runtime: nil)
         #expect(noRuntime.runtimeString == "")
+    }
+
+    @Test func mediaPreviewURLsUsePreviewImageSizesAndNilFallbacks() {
+        let preview = MediaPreview(
+            id: "tt1",
+            type: .movie,
+            title: "Preview",
+            year: 2026,
+            posterPath: "/poster.jpg",
+            backdropPath: "/backdrop.jpg",
+            imdbRating: 8.1,
+            tmdbId: 42
+        )
+        let noArtwork = MediaPreview(id: "tt2", type: .series, title: "No Art")
+
+        #expect(preview.posterURL?.absoluteString == "https://image.tmdb.org/t/p/w342/poster.jpg")
+        #expect(preview.backdropURL?.absoluteString == "https://image.tmdb.org/t/p/w1280/backdrop.jpg")
+        #expect(noArtwork.posterURL == nil)
+        #expect(noArtwork.backdropURL == nil)
     }
 }
 
@@ -670,6 +958,21 @@ struct UserLibraryEntryTests {
 
     @Test func legacyCustomListTypeMapsToFavorites() {
         #expect(UserLibraryEntry.ListType.fromStoredValue("custom") == .favorites)
+    }
+
+    @Test func storedListTypeParsingHandlesKnownNilAndUnknownValues() {
+        #expect(UserLibraryEntry.ListType.fromStoredValue("watchlist") == .watchlist)
+        #expect(UserLibraryEntry.ListType.fromStoredValue("favorites") == .favorites)
+        #expect(UserLibraryEntry.ListType.fromStoredValue("history") == .history)
+        #expect(UserLibraryEntry.ListType.fromStoredValue(nil) == .favorites)
+        #expect(UserLibraryEntry.ListType.fromStoredValue("unknown") == .favorites)
+    }
+
+    @Test func listTypeDescriptionMirrorsDisplayNameAndTopTabsAreStable() {
+        #expect(UserLibraryEntry.ListType.watchlist.description == "Watchlist")
+        #expect(UserLibraryEntry.ListType.favorites.description == "Favorites")
+        #expect(UserLibraryEntry.ListType.history.description == "History")
+        #expect(UserLibraryEntry.ListType.libraryTopTabs == [.watchlist, .favorites, .history])
     }
 }
 
@@ -853,6 +1156,56 @@ struct DebridConfigSecretMigrationTests {
 
         #expect(resolved.apiTokenRef == "plaintext-token")
         #expect(try await secretStore.getSecret(for: expectedKey) == "plaintext-token")
+    }
+
+    @Test func blankTokenResolvesToNilAndDeletesPersistedSecret() async throws {
+        let secretStore = TestSecretStore()
+        let config = DebridConfig(
+            id: "blank",
+            serviceType: .allDebrid,
+            apiTokenRef: "   "
+        )
+        try await secretStore.setSecret("old-token", for: config.secretKey)
+
+        let resolvedToken = try await config.resolvedToken(using: secretStore)
+        let persisted = try await config.persistedCopy(using: secretStore)
+
+        #expect(resolvedToken == nil)
+        #expect(persisted.config.apiTokenRef == "")
+        #expect(persisted.changed)
+        #expect(try await secretStore.getSecret(for: config.secretKey) == nil)
+    }
+
+    @Test func persistedCopyCanonicalizesExistingSecretReferenceWithoutRewritingSecret() async throws {
+        let secretStore = TestSecretStore()
+        let referenceKey = SecretKey.debridToken(service: .premiumize, configId: "existing")
+        try await secretStore.setSecret("stored-token", for: referenceKey)
+        let config = DebridConfig(
+            id: "existing",
+            serviceType: .premiumize,
+            apiTokenRef: "  \(SecretReference.encode(key: referenceKey))  "
+        )
+
+        let persisted = try await config.persistedCopy(using: secretStore)
+        let resolved = try await persisted.config.resolvedToken(using: secretStore)
+
+        #expect(persisted.config.apiTokenRef == SecretReference.encode(key: referenceKey))
+        #expect(persisted.changed)
+        #expect(resolved == "stored-token")
+    }
+
+    @Test func deleteStoredSecretRemovesDebridTokenSecret() async throws {
+        let secretStore = TestSecretStore()
+        let config = DebridConfig(
+            id: "delete-me",
+            serviceType: .torBox,
+            apiTokenRef: "token"
+        )
+        try await secretStore.setSecret("token", for: config.secretKey)
+
+        try await config.deleteStoredSecret(using: secretStore)
+
+        #expect(try await secretStore.getSecret(for: config.secretKey) == nil)
     }
 
     @Test func resolvedTokenThrowsWhenPlaintextMigrationFails() async {

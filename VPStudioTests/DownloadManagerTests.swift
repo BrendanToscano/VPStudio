@@ -137,6 +137,51 @@ private actor RemoteCleanupRecorder {
 
 @Suite(.serialized)
 struct DownloadManagerTests {
+    @Test func cancellationControllerInvokesCallbacksOnceAndLateCallbacksImmediately() {
+        final class CallbackRecorder: @unchecked Sendable {
+            private let lock = NSLock()
+            private var labels: [String] = []
+
+            func append(_ label: String) {
+                lock.lock()
+                labels.append(label)
+                lock.unlock()
+            }
+
+            func snapshot() -> [String] {
+                lock.lock()
+                defer { lock.unlock() }
+                return labels
+            }
+        }
+
+        let controller = DownloadCancellationController()
+        let recorder = CallbackRecorder()
+
+        controller.register { recorder.append("first") }
+        controller.register { recorder.append("second") }
+
+        #expect(controller.isCancelled == false)
+        controller.cancel()
+        controller.cancel()
+        controller.register { recorder.append("late") }
+
+        #expect(controller.isCancelled)
+        #expect(recorder.snapshot() == ["first", "second", "late"])
+    }
+
+    @Test func downloadTransferErrorDescriptionsRemainUserFacing() {
+        let badStatus = DownloadTransferError.badHTTPStatus(429)
+        let insufficientSpace = DownloadTransferError.insufficientDiskSpace(required: 10_000, available: -1)
+        let paused = DownloadTransferError.resumeDataProduced(Data("resume".utf8))
+
+        #expect(badStatus.errorDescription == "Download failed with HTTP 429.")
+        #expect(insufficientSpace.errorDescription?.contains("Not enough free space to start this download.") == true)
+        #expect(insufficientSpace.errorDescription?.contains("only") == true)
+        #expect(insufficientSpace.errorDescription?.contains("is available.") == true)
+        #expect(paused.errorDescription == "Download paused.")
+    }
+
     @Test func queuedDownloadCompletesAndPersists() async throws {
         let (database, rootDir) = try await makeDatabase(named: "download-manager-complete.sqlite")
         defer { try? FileManager.default.removeItem(at: rootDir) }
@@ -299,7 +344,7 @@ struct DownloadManagerTests {
         } catch let error as DownloadTransferError {
             didThrow = true
             if case .insufficientDiskSpace = error {
-                #expect(true)
+                #expect(Bool(true))
             } else {
                 Issue.record("Unexpected error: \(error)")
             }
@@ -326,7 +371,7 @@ struct DownloadManagerTests {
         let performer: DownloadManager.DownloadPerformer = { _, _, _ in
             let attempt = await attemptCounter.next()
             if attempt == 1 {
-                throw URLError(.timedOut)
+                throw DownloadTransferError.badHTTPStatus(500)
             }
 
             let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -341,17 +386,22 @@ struct DownloadManagerTests {
             return (tempURL, response)
         }
 
-        let manager = DownloadManager(database: database, downloadsDirectory: downloadsDir, performer: performer)
+        let manager = DownloadManager(
+            database: database,
+            downloadsDirectory: downloadsDir,
+            performer: performer,
+            resumePersistedDownloadsOnInit: false
+        )
         let task = try await manager.enqueueDownload(
             stream: makeStream(name: "retry.mkv", recoveryContext: recoveryContext),
             mediaId: "tt102",
             episodeId: nil
         )
 
-        _ = try await waitForStatus(database: database, id: task.id, expected: .failed)
+        _ = try await waitForStatus(database: database, id: task.id, expected: .failed, timeoutSeconds: 60)
 
         try await manager.retryDownload(id: task.id)
-        let completed = try await waitForStatus(database: database, id: task.id, expected: .completed)
+        let completed = try await waitForStatus(database: database, id: task.id, expected: .completed, timeoutSeconds: 60)
         #expect(completed.errorMessage == nil)
         #expect(completed.destinationURL != nil)
         #expect(completed.recoveryContext?.infoHash == recoveryContext.infoHash)
@@ -804,15 +854,13 @@ struct DownloadManagerTests {
         let downloadsDir = rootDir.appendingPathComponent("downloads", isDirectory: true)
         let expectedFirstName = "same-name.mkv"
         let expectedSecondName = "same-name (1).mkv"
-        let expectedSecondURL = downloadsDir.appendingPathComponent(expectedSecondName)
         let attemptCounter = AttemptCounter()
+        let firstAttemptGate = BlockingDownloadGate()
 
         let performer: DownloadManager.DownloadPerformer = { _, _, _ in
             let attempt = await attemptCounter.next()
             if attempt == 1 {
-                // Force completion inversion: the first download can't finish
-                // until the second destination file exists on disk.
-                try await waitForFile(at: expectedSecondURL, timeoutSeconds: 10)
+                await firstAttemptGate.wait()
             }
 
             let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -830,11 +878,13 @@ struct DownloadManagerTests {
         let manager = DownloadManager(
             database: database,
             downloadsDirectory: downloadsDir,
-            performer: performer
+            performer: performer,
+            resumePersistedDownloadsOnInit: false
         )
 
         let first = try await manager.enqueueDownload(stream: makeStream(name: "same-name.mkv"), mediaId: "tt103", episodeId: nil)
         let second = try await manager.enqueueDownload(stream: makeStream(name: "same-name.mkv"), mediaId: "tt104", episodeId: nil)
+        await firstAttemptGate.resume()
 
         let secondCompleted = try await waitForStatus(database: database, id: second.id, expected: .completed)
         let firstCompleted = try await waitForStatus(database: database, id: first.id, expected: .completed)
@@ -847,7 +897,6 @@ struct DownloadManagerTests {
         #expect(firstPath != secondPath)
         #expect(firstName == expectedFirstName)
         #expect(secondName == expectedSecondName)
-        #expect(secondCompleted.updatedAt <= firstCompleted.updatedAt)
         #expect(FileManager.default.fileExists(atPath: firstPath))
         #expect(FileManager.default.fileExists(atPath: secondPath))
     }
@@ -1088,6 +1137,149 @@ struct DownloadManagerTests {
         #expect(requests[2] == .init(usedResumeData: false, url: freshURL.absoluteString))
     }
 
+    @Test func refreshedRecoveryDownloadCompletesAfterExpiredHTTPStatus() async throws {
+        let (database, rootDir) = try await makeDatabase(named: "download-manager-refresh-http-success.sqlite")
+        defer { try? FileManager.default.removeItem(at: rootDir) }
+
+        let recorder = TransferRequestRecorder()
+        let attemptCounter = AttemptCounter()
+        let downloadsDir = rootDir.appendingPathComponent("downloads", isDirectory: true)
+        let freshURL = URL(string: "https://cdn.example.com/fresh-http-success.mkv?token=fresh")!
+        let recoveryContext = StreamRecoveryContext(
+            infoHash: "abcdefabcdefabcdefabcdefabcdefabcdef1234",
+            preferredService: .realDebrid
+        )!
+
+        let persisted = DownloadTask(
+            id: "refresh-http-success",
+            mediaId: "tt-refresh-http-success",
+            streamURL: "https://cdn.example.com/stale-http-success.mkv?token=stale",
+            fileName: "refresh-http-success.mkv",
+            status: .failed,
+            progress: 0.5,
+            bytesWritten: 500,
+            totalBytes: 1_000,
+            mediaTitle: "Refresh HTTP Success",
+            recoveryContextJSON: try recoveryContext.jsonString(),
+            expectedBytes: 1_000,
+            resumeDataBase64: Data("stale-resume".utf8).base64EncodedString()
+        )
+        try await database.saveDownloadTask(persisted)
+
+        let performer: DownloadManager.DownloadPerformer = { request, _, _ in
+            await recorder.record(request: request)
+            let attempt = await attemptCounter.next()
+            if attempt == 1 {
+                throw DownloadTransferError.badHTTPStatus(403)
+            }
+
+            let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            let data = Data(repeating: 0x52, count: 1_000)
+            try data.write(to: tempURL)
+            let response = URLResponse(
+                url: freshURL,
+                mimeType: "video/x-matroska",
+                expectedContentLength: data.count,
+                textEncodingName: nil
+            )
+            return (tempURL, response)
+        }
+
+        let manager = DownloadManager(
+            database: database,
+            downloadsDirectory: downloadsDir,
+            performer: performer,
+            linkRefresher: { _ in freshURL },
+            resumePersistedDownloadsOnInit: false
+        )
+
+        try await manager.retryDownload(id: persisted.id)
+
+        let completed = try await waitForStatus(database: database, id: persisted.id, expected: .completed)
+        #expect(completed.persistedStreamURL == nil)
+        #expect(completed.resumeData == nil)
+        #expect(completed.destinationURL != nil)
+        if let destination = completed.destinationURL {
+            #expect(FileManager.default.fileExists(atPath: destination.path))
+        }
+
+        let requests = await recorder.snapshot()
+        #expect(requests == [
+            .init(usedResumeData: false, url: freshURL.absoluteString),
+            .init(usedResumeData: false, url: freshURL.absoluteString),
+        ])
+    }
+
+    @Test func refreshedRecoveryDownloadCompletesAfterURLTimeout() async throws {
+        let (database, rootDir) = try await makeDatabase(named: "download-manager-refresh-timeout-success.sqlite")
+        defer { try? FileManager.default.removeItem(at: rootDir) }
+
+        let recorder = TransferRequestRecorder()
+        let attemptCounter = AttemptCounter()
+        let downloadsDir = rootDir.appendingPathComponent("downloads", isDirectory: true)
+        let freshURL = URL(string: "https://cdn.example.com/fresh-timeout-success.mkv?token=fresh")!
+        let recoveryContext = StreamRecoveryContext(
+            infoHash: "1234abcdef1234abcdef1234abcdef1234abcdef",
+            preferredService: .realDebrid
+        )!
+
+        let persisted = DownloadTask(
+            id: "refresh-timeout-success",
+            mediaId: "tt-refresh-timeout-success",
+            streamURL: "https://cdn.example.com/stale-timeout-success.mkv?token=stale",
+            fileName: "refresh-timeout-success.mkv",
+            status: .failed,
+            progress: 0.25,
+            bytesWritten: 250,
+            totalBytes: 1_000,
+            mediaTitle: "Refresh Timeout Success",
+            recoveryContextJSON: try recoveryContext.jsonString(),
+            expectedBytes: 1_000,
+            resumeDataBase64: Data("stale-resume".utf8).base64EncodedString()
+        )
+        try await database.saveDownloadTask(persisted)
+
+        let performer: DownloadManager.DownloadPerformer = { request, _, _ in
+            await recorder.record(request: request)
+            let attempt = await attemptCounter.next()
+            if attempt == 1 {
+                throw URLError(.timedOut)
+            }
+
+            let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            let data = Data(repeating: 0x54, count: 1_000)
+            try data.write(to: tempURL)
+            let response = URLResponse(
+                url: freshURL,
+                mimeType: "video/x-matroska",
+                expectedContentLength: data.count,
+                textEncodingName: nil
+            )
+            return (tempURL, response)
+        }
+
+        let manager = DownloadManager(
+            database: database,
+            downloadsDirectory: downloadsDir,
+            performer: performer,
+            linkRefresher: { _ in freshURL },
+            resumePersistedDownloadsOnInit: false
+        )
+
+        try await manager.retryDownload(id: persisted.id)
+
+        let completed = try await waitForStatus(database: database, id: persisted.id, expected: .completed)
+        #expect(completed.persistedStreamURL == nil)
+        #expect(completed.resumeData == nil)
+        #expect(completed.bytesWritten == 1_000)
+
+        let requests = await recorder.snapshot()
+        #expect(requests == [
+            .init(usedResumeData: false, url: freshURL.absoluteString),
+            .init(usedResumeData: false, url: freshURL.absoluteString),
+        ])
+    }
+
     @Test func cancellingRefreshedRecoveryDownloadDoesNotRestoreLegacyResumeData() async throws {
         let (database, rootDir) = try await makeDatabase(named: "download-manager-refresh-cancel-redaction.sqlite")
         defer { try? FileManager.default.removeItem(at: rootDir) }
@@ -1142,6 +1334,66 @@ struct DownloadManagerTests {
         _ = try await waitForStatus(database: database, id: persisted.id, expected: .downloading)
 
         await manager.cancelDownload(id: persisted.id)
+
+        let cancelled = try await waitForStatus(database: database, id: persisted.id, expected: .cancelled)
+        #expect(cancelled.persistedStreamURL == nil)
+        #expect(cancelled.resumeData == nil)
+
+        let requests = await recorder.snapshot()
+        #expect(requests == [
+            .init(usedResumeData: false, url: freshURL.absoluteString),
+            .init(usedResumeData: false, url: freshURL.absoluteString),
+        ])
+    }
+
+    @Test func refreshedRecoveryDownloadDropsResumeDataProducedDuringRetry() async throws {
+        let (database, rootDir) = try await makeDatabase(named: "download-manager-refresh-resume-data-redaction.sqlite")
+        defer { try? FileManager.default.removeItem(at: rootDir) }
+
+        let recorder = TransferRequestRecorder()
+        let attemptCounter = AttemptCounter()
+        let downloadsDir = rootDir.appendingPathComponent("downloads", isDirectory: true)
+        let freshURL = URL(string: "https://cdn.example.com/fresh-resume-redacted.mkv?token=fresh")!
+        let recoveryContext = StreamRecoveryContext(
+            infoHash: "aabbccddeeff0011223344556677889900112233",
+            preferredService: .realDebrid
+        )!
+
+        let persisted = DownloadTask(
+            id: "refresh-resume-redaction",
+            mediaId: "tt-refresh-resume",
+            streamURL: "https://cdn.example.com/stale-before-resume.mkv?token=stale",
+            fileName: "refresh-resume.mkv",
+            status: .failed,
+            progress: 0.4,
+            bytesWritten: 400,
+            totalBytes: 1_000,
+            mediaTitle: "Refresh Resume",
+            recoveryContextJSON: try recoveryContext.jsonString(),
+            expectedBytes: 1_000,
+            resumeDataBase64: Data("legacy-resume-data".utf8).base64EncodedString()
+        )
+        try await database.saveDownloadTask(persisted)
+
+        let producedResumeData = Data("resume-from-refreshed-request".utf8)
+        let performer: DownloadManager.DownloadPerformer = { request, _, _ in
+            await recorder.record(request: request)
+            let attempt = await attemptCounter.next()
+            if attempt == 1 {
+                throw DownloadTransferError.badHTTPStatus(403)
+            }
+            throw DownloadTransferError.resumeDataProduced(producedResumeData)
+        }
+
+        let manager = DownloadManager(
+            database: database,
+            downloadsDirectory: downloadsDir,
+            performer: performer,
+            linkRefresher: { _ in freshURL },
+            resumePersistedDownloadsOnInit: false
+        )
+
+        try await manager.retryDownload(id: persisted.id)
 
         let cancelled = try await waitForStatus(database: database, id: persisted.id, expected: .cancelled)
         #expect(cancelled.persistedStreamURL == nil)

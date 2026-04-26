@@ -148,8 +148,8 @@ struct SearchViewModelTests {
             )
         }
 
-        func unblock(with result: MetadataSearchResult = MetadataSearchResult(items: [], page: 1, totalPages: 1, totalResults: 0)) async {
-            await resumeIfNeeded(returning: result)
+        func unblock(with result: MetadataSearchResult = MetadataSearchResult(items: [], page: 1, totalPages: 1, totalResults: 0)) {
+            resumeIfNeeded(returning: result)
         }
 
         private func resumeIfNeeded(returning result: MetadataSearchResult) {
@@ -598,7 +598,7 @@ struct SearchViewModelTests {
     func inFlightSearchDoesNotRetainViewModelAfterRelease() async throws {
         let stub = BlockingSearchMetadataStub()
         var viewModel: SearchViewModel? = SearchViewModel(metadataService: stub)
-        weak var weakViewModel = viewModel
+        weak let weakViewModel = viewModel
 
         viewModel?.query = "retention-test"
         viewModel?.search()

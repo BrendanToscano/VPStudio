@@ -17,38 +17,127 @@ enum QARuntimeOptions {
         case playFirstCompleted
     }
 
-    static let isEnabled: Bool = {
-        ProcessInfo.processInfo.environment.keys.contains { $0.hasPrefix("VPSTUDIO_QA_") || $0.hasPrefix("SIMCTL_CHILD_VPSTUDIO_QA_") }
-    }()
+    struct EnvironmentSnapshot: Sendable {
+        var values: [String: String]
+
+        init(_ values: [String: String] = ProcessInfo.processInfo.environment) {
+            self.values = values
+        }
+
+        var isQAEnabled: Bool {
+            values.keys.contains { $0.hasPrefix("VPSTUDIO_QA_") || $0.hasPrefix("SIMCTL_CHILD_VPSTUDIO_QA_") }
+        }
+
+        func value(_ key: String) -> String? {
+            values[key] ?? values["SIMCTL_CHILD_\(key)"]
+        }
+
+        func bool(_ key: String) -> Bool {
+            guard let value = value(key)?.lowercased() else { return false }
+            return ["1", "true", "yes", "on"].contains(value)
+        }
+
+        func string(_ key: String) -> String? {
+            guard let value = value(key)?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else {
+                return nil
+            }
+            return value
+        }
+
+        func double(_ key: String) -> Double? {
+            guard let value = value(key) else { return nil }
+            return Double(value)
+        }
+
+        func stringList(_ key: String) -> [String] {
+            guard let value = value(key) else { return [] }
+            return value
+                .split(whereSeparator: { $0 == "," || $0 == "\n" })
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+        }
+    }
+
+    static let environment = EnvironmentSnapshot()
+
+    static let isEnabled = environment.isQAEnabled
 
     private static func env(_ key: String) -> String? {
-        let env = ProcessInfo.processInfo.environment
-        return env[key] ?? env["SIMCTL_CHILD_\(key)"]
+        environment.value(key)
     }
 
     private static func bool(_ key: String) -> Bool {
-        guard let value = env(key)?.lowercased() else { return false }
-        return ["1", "true", "yes", "on"].contains(value)
+        environment.bool(key)
     }
 
     private static func string(_ key: String) -> String? {
-        guard let value = env(key)?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else {
-            return nil
-        }
-        return value
+        environment.string(key)
     }
 
     private static func double(_ key: String) -> Double? {
-        guard let value = env(key) else { return nil }
-        return Double(value)
+        environment.double(key)
     }
 
     private static func stringList(_ key: String) -> [String] {
-        guard let value = env(key) else { return [] }
-        return value
-            .split(whereSeparator: { $0 == "," || $0 == "\n" })
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
+        environment.stringList(key)
+    }
+
+    static func absoluteURL(from value: String) -> URL? {
+        guard let url = URL(string: value),
+              let scheme = url.scheme,
+              !scheme.isEmpty,
+              url.host != nil else {
+            return nil
+        }
+        return url
+    }
+
+    static func sampleURLs(from snapshot: EnvironmentSnapshot) -> [URL] {
+        let configured = snapshot.stringList("VPSTUDIO_QA_SAMPLE_URLS").compactMap(absoluteURL(from:))
+        if !configured.isEmpty {
+            return configured
+        }
+        if let sampleURL = snapshot.value("VPSTUDIO_QA_SAMPLE_URL").flatMap(absoluteURL(from:)) {
+            return [sampleURL]
+        }
+        return []
+    }
+
+    static func debridFixture(from snapshot: EnvironmentSnapshot) -> QADebridFixture? {
+        guard let hash = snapshot.string("VPSTUDIO_QA_DEBRID_FIXTURE_HASH")?.lowercased() else {
+            return nil
+        }
+
+        let streamURLs = snapshot.stringList("VPSTUDIO_QA_DEBRID_FIXTURE_URLS").compactMap(absoluteURL(from:))
+        guard !streamURLs.isEmpty else { return nil }
+
+        let serviceType = snapshot.string("VPSTUDIO_QA_DEBRID_FIXTURE_SERVICE")
+            .flatMap(DebridServiceType.init(rawValue:)) ?? .realDebrid
+        let fileName = snapshot.string("VPSTUDIO_QA_DEBRID_FIXTURE_FILE_NAME")
+            ?? "QA.Debrid.\(hash.prefix(8)).mp4"
+
+        return QADebridFixture(
+            hash: hash,
+            serviceType: serviceType,
+            streamURLs: streamURLs,
+            fileName: fileName
+        )
+    }
+
+    static func syntheticTorrent(from snapshot: EnvironmentSnapshot) -> TorrentResult? {
+        guard let fixture = debridFixture(from: snapshot) else { return nil }
+
+        var torrent = TorrentResult.fromSearch(
+            infoHash: fixture.hash,
+            title: snapshot.string("VPSTUDIO_QA_SYNTHETIC_TORRENT_TITLE") ?? fixture.fileName,
+            sizeBytes: 1_500_000_000,
+            seeders: 42,
+            leechers: 3,
+            indexerName: "QA Debrid Fixture"
+        )
+        torrent.isCached = true
+        torrent.cachedOnService = fixture.serviceType.rawValue
+        return torrent
     }
 
     static let searchQuery = env("VPSTUDIO_QA_SEARCH_QUERY")
@@ -73,58 +162,15 @@ enum QARuntimeOptions {
     static let autoAddFavorites = bool("VPSTUDIO_QA_AUTO_ADD_FAVORITES")
     static let autoRemoveWatchlist = bool("VPSTUDIO_QA_AUTO_REMOVE_WATCHLIST")
     static let autoRemoveFavorites = bool("VPSTUDIO_QA_AUTO_REMOVE_FAVORITES")
-    static let sampleURL = env("VPSTUDIO_QA_SAMPLE_URL").flatMap(URL.init(string:))
-    static let sampleURLs: [URL] = {
-        let configured = stringList("VPSTUDIO_QA_SAMPLE_URLS").compactMap(URL.init(string:))
-        if !configured.isEmpty {
-            return configured
-        }
-        if let sampleURL {
-            return [sampleURL]
-        }
-        return []
-    }()
-    static let sampleRefreshURL = env("VPSTUDIO_QA_SAMPLE_REFRESH_URL").flatMap(URL.init(string:))
-    static let sampleRefreshSignalURL = env("VPSTUDIO_QA_SAMPLE_REFRESH_SIGNAL_URL").flatMap(URL.init(string:))
+    static let sampleURL = env("VPSTUDIO_QA_SAMPLE_URL").flatMap(absoluteURL(from:))
+    static let sampleURLs = sampleURLs(from: environment)
+    static let sampleRefreshURL = env("VPSTUDIO_QA_SAMPLE_REFRESH_URL").flatMap(absoluteURL(from:))
+    static let sampleRefreshSignalURL = env("VPSTUDIO_QA_SAMPLE_REFRESH_SIGNAL_URL").flatMap(absoluteURL(from:))
     static let autoQueueSampleDownload = bool("VPSTUDIO_QA_AUTO_QUEUE_SAMPLE_DOWNLOAD")
     static let autoPlaySample = bool("VPSTUDIO_QA_AUTO_PLAY_SAMPLE")
-    static let debridFixture: QADebridFixture? = {
-        guard let hash = string("VPSTUDIO_QA_DEBRID_FIXTURE_HASH")?.lowercased() else {
-            return nil
-        }
-
-        let streamURLs = stringList("VPSTUDIO_QA_DEBRID_FIXTURE_URLS")
-            .compactMap { URL(string: $0) }
-        guard !streamURLs.isEmpty else { return nil }
-
-        let serviceType = string("VPSTUDIO_QA_DEBRID_FIXTURE_SERVICE")
-            .flatMap(DebridServiceType.init(rawValue:)) ?? .realDebrid
-        let fileName = string("VPSTUDIO_QA_DEBRID_FIXTURE_FILE_NAME")
-            ?? "QA.Debrid.\(hash.prefix(8)).mp4"
-
-        return QADebridFixture(
-            hash: hash,
-            serviceType: serviceType,
-            streamURLs: streamURLs,
-            fileName: fileName
-        )
-    }()
+    static let debridFixture = debridFixture(from: environment)
     static let autoPlaySyntheticTorrent = bool("VPSTUDIO_QA_AUTO_PLAY_SYNTHETIC_TORRENT")
-    static let syntheticTorrent: TorrentResult? = {
-        guard let fixture = debridFixture else { return nil }
-
-        var torrent = TorrentResult.fromSearch(
-            infoHash: fixture.hash,
-            title: string("VPSTUDIO_QA_SYNTHETIC_TORRENT_TITLE") ?? fixture.fileName,
-            sizeBytes: 1_500_000_000,
-            seeders: 42,
-            leechers: 3,
-            indexerName: "QA Debrid Fixture"
-        )
-        torrent.isCached = true
-        torrent.cachedOnService = fixture.serviceType.rawValue
-        return torrent
-    }()
+    static let syntheticTorrent = syntheticTorrent(from: environment)
 
     static let downloadAction = env("VPSTUDIO_QA_DOWNLOAD_ACTION").flatMap(DownloadAction.init(rawValue:))
     static let playerAutoCloseAfterSeconds = double("VPSTUDIO_QA_PLAYER_AUTOCLOSE_SECONDS")

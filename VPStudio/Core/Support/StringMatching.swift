@@ -12,6 +12,7 @@ extension String {
     /// - Parameter token: The token to search for (must already be lowercased if case-insensitivity
     ///   is required, since the receiver is searched case-insensitively regardless).
     func containsStandaloneToken(_ token: String) -> Bool {
+        guard !token.isEmpty else { return false }
         let escaped = NSRegularExpression.escapedPattern(for: token)
         let pattern = "(^|[^a-z0-9])\(escaped)([^a-z0-9]|$)"
         guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {

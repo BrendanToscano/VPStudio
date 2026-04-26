@@ -171,6 +171,113 @@ struct IndexerSettingsTests {
         #expect(remaining == nil)
     }
 
+    @Test func draftDefaultsNormalizeCustomIndexerFields() {
+        var draft = IndexerSettingsView.IndexerDraft.new()
+
+        #expect(draft.editingID == nil)
+        #expect(draft.indexerType == .jackett)
+        #expect(draft.isActive)
+        #expect(draft.showsAPIKeyField)
+        #expect(draft.showsAPIKeyTransportField)
+        #expect(draft.showsEndpointPathField)
+        #expect(draft.showsCategoryField)
+        #expect(draft.providerSubtype == .jackett)
+        #expect(draft.normalizedURL == nil)
+        #expect(draft.normalizedAPIKey == nil)
+        #expect(draft.normalizedEndpointPath == "/api/v2.0/indexers/all/results/torznab/api")
+        #expect(draft.normalizedCategoryFilter == nil)
+        #expect(draft.validationError == "Indexer name is required.")
+
+        draft.name = "  Jackett  "
+        draft.baseURL = "  https://jackett.example  "
+        draft.apiKey = "  token  "
+        draft.endpointPath = "api/custom"
+        draft.categoryFilter = "  2000,5000  "
+
+        #expect(draft.normalizedURL == "https://jackett.example")
+        #expect(draft.normalizedAPIKey == "token")
+        #expect(draft.normalizedEndpointPath == "/api/custom")
+        #expect(draft.normalizedCategoryFilter == "2000,5000")
+        #expect(draft.validationError == nil)
+    }
+
+    @Test func draftValidationCoversUrlApiKeyAndStremioManifestRules() {
+        var draft = IndexerSettingsView.IndexerDraft.new()
+        draft.name = "Custom"
+        draft.baseURL = "http://insecure.example"
+        draft.apiKey = "token"
+        #expect(draft.validationError == "Enter a valid HTTPS base URL.")
+
+        draft.baseURL = "https://secure.example"
+        draft.apiKey = "   "
+        #expect(draft.validationError == "API key is required for Jackett.")
+
+        draft.indexerType = .stremio
+        draft.applyDefaults(for: .stremio)
+        draft.apiKey = ""
+        draft.baseURL = "https://stremio.example"
+        #expect(draft.showsAPIKeyField == false)
+        #expect(draft.showsAPIKeyTransportField == false)
+        #expect(draft.showsCategoryField == false)
+        #expect(draft.providerSubtype == .stremioAddon)
+        #expect(draft.normalizedEndpointPath == "/manifest.json")
+        #expect(draft.validationError == nil)
+
+        draft.endpointPath = "/catalog/movie/top.json"
+        #expect(draft.validationError == "Stremio endpoint should usually point to /manifest.json.")
+    }
+
+    @Test func draftProviderMatrixAppliesDefaultsAndFieldVisibility() {
+        var draft = IndexerSettingsView.IndexerDraft.new()
+
+        let cases: [(IndexerConfig.IndexerType, String, IndexerConfig.APIKeyTransport, Bool, Bool, IndexerConfig.ProviderSubtype)] = [
+            (.jackett, "/api/v2.0/indexers/all/results/torznab/api", .header, true, true, .jackett),
+            (.prowlarr, "/api/v1/search", .header, true, false, .prowlarr),
+            (.torznab, "/api", .header, true, true, .customTorznab),
+            (.zilean, "/api", .query, false, false, .customTorznab),
+            (.stremio, "/manifest.json", .query, false, false, .stremioAddon),
+            (.apiBay, "", .query, false, false, .builtIn),
+            (.yts, "", .query, false, false, .builtIn),
+            (.eztv, "", .query, false, false, .builtIn),
+        ]
+
+        for (type, endpointPath, transport, showsKey, showsCategory, subtype) in cases {
+            draft.indexerType = type
+            draft.categoryFilter = "2000"
+            draft.applyDefaults(for: type)
+
+            #expect(draft.normalizedEndpointPath == endpointPath)
+            #expect(draft.apiKeyTransport == transport)
+            #expect(draft.showsAPIKeyField == showsKey)
+            #expect(draft.showsAPIKeyTransportField == showsKey)
+            #expect(draft.showsCategoryField == showsCategory)
+            #expect(draft.providerSubtype == subtype)
+            #expect(showsCategory ? draft.categoryFilter == "2000" : draft.categoryFilter.isEmpty)
+        }
+    }
+
+    @Test func draftFromExistingConfigPreservesEditableFields() {
+        var config = makeTorznab(id: "edit-me", name: "Editable", priority: 3, isActive: false)
+        config.baseURL = "https://torznab.example"
+        config.apiKey = "secret"
+        config.endpointPath = "/torznab/api"
+        config.categoryFilter = "5000"
+        config.apiKeyTransport = .query
+
+        let draft = IndexerSettingsView.IndexerDraft.from(config)
+
+        #expect(draft.editingID == "edit-me")
+        #expect(draft.name == "Editable")
+        #expect(draft.indexerType == .torznab)
+        #expect(draft.baseURL == "https://torznab.example")
+        #expect(draft.apiKey == "secret")
+        #expect(draft.isActive == false)
+        #expect(draft.endpointPath == "/torznab/api")
+        #expect(draft.categoryFilter == "5000")
+        #expect(draft.apiKeyTransport == .query)
+        #expect(draft.validationError == nil)
+    }
+
     private func makeDatabase(named fileName: String) async throws -> (DatabaseManager, URL) {
         let rootDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: rootDir, withIntermediateDirectories: true)

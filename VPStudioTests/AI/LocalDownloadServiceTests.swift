@@ -8,45 +8,89 @@ struct LocalDownloadServiceTests {
         private let lock = NSLock()
         private var continuations: [String: CheckedContinuation<URL, Error>] = [:]
         private var startedRepos: [String] = []
+        private var progressHandlers: [String: @Sendable (Progress) -> Void] = [:]
 
         func downloader(
             repo: String,
             progressHandler: @escaping @Sendable (Progress) -> Void
         ) async throws -> URL {
-            _ = progressHandler
-            lock.lock()
-            startedRepos.append(repo)
-            lock.unlock()
+            recordStarted(repo: repo)
+            storeProgressHandler(progressHandler, for: repo)
 
             return try await withCheckedThrowingContinuation { continuation in
-                lock.lock()
-                continuations[repo] = continuation
-                lock.unlock()
+                storeContinuation(continuation, for: repo)
             }
         }
 
         func waitUntilStarted(repo: String) async {
             while true {
-                lock.lock()
-                let started = startedRepos.contains(repo)
-                lock.unlock()
-                if started { return }
+                if readyToResume(repo: repo) { return }
                 await Task.yield()
             }
         }
 
         func started(repo: String) -> Bool {
             lock.lock()
+            defer { lock.unlock() }
             let didStart = startedRepos.contains(repo)
-            lock.unlock()
             return didStart
         }
 
-        func fail(repo: String, error: some Error) {
+        func startCount() -> Int {
             lock.lock()
-            let continuation = continuations.removeValue(forKey: repo)
-            lock.unlock()
+            defer { lock.unlock() }
+            return startedRepos.count
+        }
+
+        func readyToResume(repo: String) -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return startedRepos.contains(repo) && continuations[repo] != nil
+        }
+
+        func reportProgress(repo: String, completed: Int64, total: Int64) {
+            let handler: (@Sendable (Progress) -> Void)? = {
+                lock.lock()
+                defer { lock.unlock() }
+                return progressHandlers[repo]
+            }()
+            let progress = Progress(totalUnitCount: total)
+            progress.completedUnitCount = completed
+            handler?(progress)
+        }
+
+        func complete(repo: String, url: URL) {
+            let continuation = takeContinuation(for: repo)
+            continuation?.resume(returning: url)
+        }
+
+        func fail(repo: String, error: some Error) {
+            let continuation = takeContinuation(for: repo)
             continuation?.resume(throwing: error)
+        }
+
+        private func recordStarted(repo: String) {
+            lock.lock()
+            defer { lock.unlock() }
+            startedRepos.append(repo)
+        }
+
+        private func storeContinuation(_ continuation: CheckedContinuation<URL, Error>, for repo: String) {
+            lock.lock()
+            defer { lock.unlock() }
+            continuations[repo] = continuation
+        }
+
+        private func storeProgressHandler(_ progressHandler: @escaping @Sendable (Progress) -> Void, for repo: String) {
+            lock.lock()
+            defer { lock.unlock() }
+            progressHandlers[repo] = progressHandler
+        }
+
+        private func takeContinuation(for repo: String) -> CheckedContinuation<URL, Error>? {
+            lock.lock()
+            defer { lock.unlock() }
+            return continuations.removeValue(forKey: repo)
         }
     }
 
@@ -91,6 +135,38 @@ struct LocalDownloadServiceTests {
             createdAt: now,
             updatedAt: now
         )
+    }
+
+    private func waitForStatus(
+        store: LocalModelCatalogStore,
+        id: String,
+        status expected: LocalModelStatus
+    ) async throws -> LocalModelDescriptor {
+        for _ in 0..<200 {
+            if let model = try await store.model(id: id), model.status == expected {
+                return model
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let model = try #require(try await store.model(id: id))
+        Issue.record("Timed out waiting for \(id) to reach \(expected.rawValue); current status is \(model.status.rawValue)")
+        return model
+    }
+
+    private func waitForProgress(
+        store: LocalModelCatalogStore,
+        id: String,
+        minimumProgress: Double
+    ) async throws -> LocalModelDescriptor {
+        for _ in 0..<200 {
+            if let model = try await store.model(id: id), model.downloadProgress >= minimumProgress {
+                return model
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let model = try #require(try await store.model(id: id))
+        Issue.record("Timed out waiting for \(id) progress >= \(minimumProgress); current progress is \(model.downloadProgress)")
+        return model
     }
 
     @Test
@@ -165,5 +241,162 @@ struct LocalDownloadServiceTests {
         #expect(clearedState.token == nil)
 
         downloader.fail(repo: model.huggingFaceRepo, error: CancellationError())
+    }
+
+    @Test
+    func successfulDownloadUpdatesProgressStatusAndLocalPath() async throws {
+        let (database, tempDir) = try await makeTemporaryDatabase(named: "local-download-success.sqlite")
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let model = makeLocalModel(id: "apple/success-model", displayName: "Success")
+        try await database.saveLocalModel(model)
+
+        let store = LocalModelCatalogStore(database: database)
+        let downloader = ControlledSnapshotDownloader()
+        let service = LocalDownloadService(catalogStore: store, snapshotDownloader: downloader.downloader)
+        let downloadURL = tempDir.appendingPathComponent("downloaded-model", isDirectory: true)
+        try FileManager.default.createDirectory(at: downloadURL, withIntermediateDirectories: true)
+
+        await service.downloadModel(id: model.id)
+        await downloader.waitUntilStarted(repo: model.huggingFaceRepo)
+        downloader.reportProgress(repo: model.huggingFaceRepo, completed: 64, total: 128)
+        let progressed = try await waitForProgress(store: store, id: model.id, minimumProgress: 0.5)
+        #expect(progressed.downloadedBytes == 64)
+        #expect(progressed.totalBytes == 128)
+
+        downloader.complete(repo: model.huggingFaceRepo, url: downloadURL)
+
+        let downloaded = try await waitForStatus(store: store, id: model.id, status: .downloaded)
+        #expect(downloaded.localPath == downloadURL.path)
+
+        for _ in 0..<100 {
+            let state = await service.activeDownloadStateForTesting()
+            if state.modelID == nil {
+                #expect(state.token == nil)
+                return
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        Issue.record("Successful download did not clear active state")
+    }
+
+    @Test
+    func failedDownloadMarksModelFailedAndClearsActiveState() async throws {
+        let (database, tempDir) = try await makeTemporaryDatabase(named: "local-download-failure.sqlite")
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let model = makeLocalModel(id: "apple/failure-model", displayName: "Failure")
+        try await database.saveLocalModel(model)
+
+        let store = LocalModelCatalogStore(database: database)
+        let downloader = ControlledSnapshotDownloader()
+        let service = LocalDownloadService(catalogStore: store, snapshotDownloader: downloader.downloader)
+
+        await service.downloadModel(id: model.id)
+        await downloader.waitUntilStarted(repo: model.huggingFaceRepo)
+        downloader.fail(repo: model.huggingFaceRepo, error: URLError(.badServerResponse))
+
+        _ = try await waitForStatus(store: store, id: model.id, status: .failed)
+
+        for _ in 0..<100 {
+            let state = await service.activeDownloadStateForTesting()
+            if state.modelID == nil {
+                #expect(state.token == nil)
+                return
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        Issue.record("Failed download did not clear active state")
+    }
+
+    @Test
+    func unknownModelDoesNotStartDownloader() async throws {
+        let (database, tempDir) = try await makeTemporaryDatabase(named: "local-download-missing.sqlite")
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let store = LocalModelCatalogStore(database: database)
+        let downloader = ControlledSnapshotDownloader()
+        let service = LocalDownloadService(catalogStore: store, snapshotDownloader: downloader.downloader)
+
+        await service.downloadModel(id: "missing/model")
+
+        #expect(downloader.startCount() == 0)
+        let state = await service.activeDownloadStateForTesting()
+        #expect(state.modelID == nil)
+        #expect(state.token == nil)
+    }
+
+    @Test
+    func cancelNonActiveDownloadIsNoOp() async throws {
+        let (database, tempDir) = try await makeTemporaryDatabase(named: "local-download-cancel-noop.sqlite")
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let store = LocalModelCatalogStore(database: database)
+        let downloader = ControlledSnapshotDownloader()
+        let service = LocalDownloadService(catalogStore: store, snapshotDownloader: downloader.downloader)
+
+        await service.cancelDownload(id: "missing/model")
+
+        #expect(downloader.startCount() == 0)
+        let state = await service.activeDownloadStateForTesting()
+        #expect(state.modelID == nil)
+        #expect(state.token == nil)
+    }
+
+    @Test
+    func deleteModelResetsCatalogStateAndClearsActiveDownload() async throws {
+        let (database, tempDir) = try await makeTemporaryDatabase(named: "local-download-delete.sqlite")
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let model = makeLocalModel(
+            id: "local-delete-\(UUID().uuidString)/model",
+            displayName: "Delete"
+        )
+        try await database.saveLocalModel(model)
+
+        let store = LocalModelCatalogStore(database: database)
+        let downloader = ControlledSnapshotDownloader()
+        let service = LocalDownloadService(catalogStore: store, snapshotDownloader: downloader.downloader)
+
+        await service.downloadModel(id: model.id)
+        await downloader.waitUntilStarted(repo: model.huggingFaceRepo)
+        #expect((await service.activeDownloadStateForTesting()).modelID == model.id)
+
+        await service.deleteModel(id: model.id)
+
+        let reset = try #require(try await store.model(id: model.id))
+        #expect(reset.status == .available)
+        #expect(reset.downloadProgress == 0)
+        #expect(reset.localPath == nil)
+        #expect(reset.partialDownloadPath == nil)
+        #expect((await service.activeDownloadStateForTesting()).modelID == nil)
+
+        downloader.fail(repo: model.huggingFaceRepo, error: CancellationError())
+    }
+
+    @Test
+    func directoryHelpersBuildStableAppAndHubPaths() throws {
+        let appSupport = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let caches = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+
+        let models = LocalDownloadService.modelsDirectoryURL(appSupportDirectory: appSupport)
+        let hubRoot = try #require(LocalDownloadService.hubCacheRootDirectoryURL(cachesDirectory: caches))
+        let repoCache = try #require(LocalDownloadService.hubCacheDirectoryURL(for: "apple/Test-Model", cachesDirectory: caches))
+
+        #expect(models == appSupport.appendingPathComponent("VPStudio/Models", isDirectory: true))
+        #expect(hubRoot == caches.appendingPathComponent("huggingface/hub", isDirectory: true))
+        #expect(repoCache.lastPathComponent == "models--apple--Test-Model")
+        #expect(repoCache.deletingLastPathComponent() == hubRoot)
+    }
+
+    @Test
+    func progressNotifyThrottleAllowsFirstAndThrottlesImmediateRepeat() async {
+        let throttle = ProgressNotifyThrottle()
+
+        #expect(await throttle.shouldNotify(interval: 60))
+        #expect(await throttle.shouldNotify(interval: 60) == false)
+        #expect(await throttle.shouldNotify(interval: 0))
     }
 }

@@ -225,10 +225,18 @@ actor AIAssistantManager {
         configuredModel: String?
     ) -> String {
         if let configuredModel, !configuredModel.isEmpty {
-            return configuredModel
+            return normalizedModelID(provider: provider, modelID: configuredModel)
         }
 
-        return catalogDefault ?? fallbackModelID(for: provider)
+        return normalizedModelID(
+            provider: provider,
+            modelID: catalogDefault ?? fallbackModelID(for: provider)
+        )
+    }
+
+    private nonisolated static func normalizedModelID(provider: AIProviderKind, modelID: String) -> String {
+        guard provider == .openRouter else { return modelID }
+        return AIModelCatalog.providerNativeOpenRouterModelID(modelID)
     }
 
     nonisolated static func fallbackModelID(for provider: AIProviderKind) -> String {

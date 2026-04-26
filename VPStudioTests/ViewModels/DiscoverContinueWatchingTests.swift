@@ -5,6 +5,21 @@ import Testing
 @Suite("DiscoverViewModel - Continue Watching")
 @MainActor
 struct DiscoverContinueWatchingTests {
+    private static func waitUntil(
+        timeout: Duration = .milliseconds(5000),
+        _ condition: @MainActor () -> Bool
+    ) async throws {
+        let deadline = ContinuousClock.now + timeout
+        while !condition() {
+            guard ContinuousClock.now < deadline else {
+                Issue.record("waitUntil timed out after \(timeout)")
+                return
+            }
+            await Task.yield()
+            try await Task.sleep(for: .milliseconds(50))
+        }
+    }
+
     private func makeDB() async throws -> DatabaseManager {
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -158,7 +173,7 @@ struct DiscoverContinueWatchingTests {
         let vm = DiscoverViewModel()
         vm.hasPerformedInitialLoad = true
         vm.configure(database: db)
-        try? await Task.sleep(for: .milliseconds(25))
+        try await Self.waitUntil { vm.continueWatching.count == 1 }
 
         #expect(vm.continueWatching.count == 1)
         #expect(vm.continueWatching.first?.preview.title == "Configured Late")

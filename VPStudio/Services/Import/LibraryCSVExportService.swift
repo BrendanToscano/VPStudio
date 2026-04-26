@@ -310,8 +310,8 @@ actor LibraryCSVExportService {
         guard !value.isEmpty else { return value }
         guard !value.hasPrefix("'") else { return value }
 
-        let trimmedLeading = value.trimmingCharacters(in: .whitespaces)
-        guard let first = trimmedLeading.first else { return value }
+        let trimmedLeadingSpaces = value.drop(while: { $0 == " " })
+        guard let first = trimmedLeadingSpaces.first else { return value }
         let dangerousPrefixes: Set<Character> = ["=", "+", "-", "@", "\t"]
         guard dangerousPrefixes.contains(first) else { return value }
 

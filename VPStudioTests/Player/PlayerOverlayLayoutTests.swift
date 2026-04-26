@@ -1,4 +1,9 @@
 import AVFoundation
+#if os(macOS)
+import AppKit
+import AVKit
+import SwiftUI
+#endif
 import CoreGraphics
 import Testing
 @testable import VPStudio
@@ -17,6 +22,77 @@ struct AVPlayerSurfaceViewGravityTests {
         #expect(expectedGravity != .resize)
     }
 
+    #if os(macOS)
+    @MainActor
+    @Test func surfaceViewStoresDefaultGravityOnConstruction() {
+        let player = AVPlayer()
+        let surface = AVPlayerSurfaceView(player: player)
+
+        #expect(surface.player === player)
+        #expect(surface.videoGravity == .resizeAspectFill)
+    }
+
+    @MainActor
+    @Test func surfaceViewStoresExplicitGravityOnConstruction() {
+        let player = AVPlayer()
+        let surface = AVPlayerSurfaceView(player: player, videoGravity: .resizeAspect)
+
+        #expect(surface.player === player)
+        #expect(surface.videoGravity == .resizeAspect)
+    }
+
+    @MainActor
+    @Test func dismantleClearsAVPlayerFromAppKitSurface() {
+        let player = AVPlayer()
+        let playerView = AVPlayerView()
+        playerView.player = player
+
+        AVPlayerSurfaceView.dismantleNSView(playerView, coordinator: ())
+
+        #expect(playerView.player == nil)
+    }
+
+    @MainActor
+    @Test func hostedSurfaceCreatesAppKitPlayerViewWithConfiguredPlayerAndGravity() {
+        let player = AVPlayer()
+        let host = NSHostingView(rootView: AVPlayerSurfaceView(player: player, videoGravity: .resizeAspect))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 320, height: 180),
+                              styleMask: [.borderless],
+                              backing: .buffered,
+                              defer: false)
+        window.contentView = host
+
+        host.layoutSubtreeIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+
+        let playerView = host.firstSubview(ofType: AVPlayerView.self)
+        #expect(playerView?.player === player)
+        #expect(playerView?.videoGravity == .resizeAspect)
+    }
+
+    @MainActor
+    @Test func hostedSurfaceUpdatesAppKitPlayerViewWhenRootViewChanges() {
+        let originalPlayer = AVPlayer()
+        let replacementPlayer = AVPlayer()
+        let host = NSHostingView(rootView: AVPlayerSurfaceView(player: originalPlayer, videoGravity: .resizeAspect))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 320, height: 180),
+                              styleMask: [.borderless],
+                              backing: .buffered,
+                              defer: false)
+        window.contentView = host
+
+        host.layoutSubtreeIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        host.rootView = AVPlayerSurfaceView(player: replacementPlayer, videoGravity: .resizeAspectFill)
+        host.layoutSubtreeIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+
+        let playerView = host.firstSubview(ofType: AVPlayerView.self)
+        #expect(playerView?.player === replacementPlayer)
+        #expect(playerView?.videoGravity == .resizeAspectFill)
+    }
+    #endif
+
     @Test func autoModeUsesAspectFill() {
         #expect(PlayerAspectRatioPolicy.videoGravity(for: .auto) == .resizeAspectFill)
     }
@@ -31,6 +107,67 @@ struct AVPlayerSurfaceViewGravityTests {
         #expect(PlayerAspectRatioPolicy.videoGravity(for: .freeform) == .resizeAspect)
     }
 }
+
+#if os(macOS)
+@MainActor
+@Suite("Player Window Accessor")
+struct PlayerWindowAccessorTests {
+    @Test func observingViewReportsNilWindowWhenDetached() {
+        let view = WindowObservingView()
+        var observedWindow: NSWindow? = NSWindow()
+        view.onWindowChange = { observedWindow = $0 }
+
+        view.viewDidMoveToWindow()
+
+        #expect(observedWindow == nil)
+    }
+
+    @Test func observingViewCallbackCanBeClearedSafely() {
+        let view = WindowObservingView()
+        view.onWindowChange = nil
+
+        view.viewDidMoveToWindow()
+    }
+
+    @Test func hostedAccessorReportsContainingWindow() {
+        var observedWindow: NSWindow?
+        let accessor = PlayerWindowAccessor(window: Binding(get: {
+            observedWindow
+        }, set: { newValue in
+            observedWindow = newValue
+        }))
+        let host = NSHostingView(rootView: accessor.frame(width: 1, height: 1))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 10, height: 10),
+                              styleMask: [.borderless],
+                              backing: .buffered,
+                              defer: false)
+
+        window.contentView = host
+        host.layoutSubtreeIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+
+        #expect(observedWindow === window)
+    }
+}
+#endif
+
+#if os(macOS)
+private extension NSView {
+    func firstSubview<T: NSView>(ofType type: T.Type) -> T? {
+        if let view = self as? T {
+            return view
+        }
+
+        for subview in subviews {
+            if let match = subview.firstSubview(ofType: type) {
+                return match
+            }
+        }
+
+        return nil
+    }
+}
+#endif
 
 // MARK: - Player Overlay Layer Order Tests
 

@@ -118,7 +118,8 @@ actor DebridLinkService: DebridServiceProtocol {
             return selectedIDs.contains(pair.offset + 1)
         })?.element ?? bestEpisodeMatch(in: torrent.files, request: episodeSelection)
 
-        guard let link = selectedFile?.downloadUrl ?? fallbackSelectedFile(in: torrent.files, request: episodeSelection)?.downloadUrl else {
+        let chosenFile = selectedFile ?? fallbackSelectedFile(in: torrent.files, request: episodeSelection)
+        guard let link = chosenFile?.downloadUrl else {
             selectedFileIDsByTorrent.removeValue(forKey: torrentId)
             episodeSelectionByTorrent.removeValue(forKey: torrentId)
             if episodeSelection != nil {
@@ -129,7 +130,7 @@ actor DebridLinkService: DebridServiceProtocol {
         guard let url = URL(string: link) else { throw DebridError.networkError("Invalid URL") }
         selectedFileIDsByTorrent.removeValue(forKey: torrentId)
         episodeSelectionByTorrent.removeValue(forKey: torrentId)
-        let fileName = selectedFile?.name ?? selectedFile?.downloadUrl.flatMap { URL(string: $0)?.lastPathComponent } ?? torrent.name ?? "Unknown"
+        let fileName = chosenFile?.name ?? chosenFile?.downloadUrl.flatMap { URL(string: $0)?.lastPathComponent } ?? torrent.name ?? "Unknown"
         return StreamInfo(
             streamURL: url,
             quality: VideoQuality.parse(from: fileName),

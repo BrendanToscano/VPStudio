@@ -339,7 +339,6 @@ struct BugFixVerificationTests {
 
             // If there's a retain cycle, the task won't complete properly
             // This test passes if the ViewModel can be deallocated after use
-            #expect(viewModel != nil)
             #expect(viewModel.mediaItem == nil)
             #expect(viewModel.torrents.isEmpty)
         }
@@ -359,7 +358,7 @@ struct BugFixVerificationTests {
             // Brief delay to let async work complete
             try await Task.sleep(for: .milliseconds(100))
 
-            #expect(viewModel != nil)
+            #expect(Bool(true))
         }
     }
 }

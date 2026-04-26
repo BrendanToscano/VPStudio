@@ -311,5 +311,6 @@ struct LibraryFolderSortOrderTests {
         #expect(manualFolders.count == 2)
         #expect(manualFolders[0].name == "Bravo")
         #expect(manualFolders[1].name == "Charlie")
+        #expect(manualFolders[1].id == folderC.id)
     }
 }

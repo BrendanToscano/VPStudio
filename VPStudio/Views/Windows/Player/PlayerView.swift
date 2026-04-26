@@ -36,6 +36,55 @@ enum PlayerLifecyclePolicy {
     }
 }
 
+enum PlayerViewPolicy {
+    static let avPlayerPeriodicObserverIntervalSeconds: TimeInterval = 0.25
+
+    static func playbackStateTitle(for state: PlayerPlaybackState) -> String {
+        switch state {
+        case .preparing:
+            return "Preparing Playback"
+        case .buffering:
+            return "Buffering"
+        case .playing:
+            return "Playing"
+        case .failed:
+            return "Playback Failed"
+        }
+    }
+
+    static func audioTrackRefreshShouldRun(requestedStreamID: String, currentStreamID: String?) -> Bool {
+        currentStreamID == requestedStreamID
+    }
+
+    static func preparePlaybackShouldRun(requestedPreparationID: UUID, activePreparationID: UUID?) -> Bool {
+        activePreparationID == requestedPreparationID
+    }
+
+    static func clampedSeekTarget(currentTime: TimeInterval, offset: TimeInterval, duration: TimeInterval) -> TimeInterval {
+        clampedSeekTarget(time: currentTime + offset, duration: duration)
+    }
+
+    static func clampedSeekTarget(percent: Double, duration: TimeInterval) -> TimeInterval {
+        let clamped = max(0, min(1, percent))
+        return duration * clamped
+    }
+
+    static func clampedSeekTarget(time: TimeInterval, duration: TimeInterval) -> TimeInterval {
+        max(0, min(duration, time))
+    }
+
+    static func scrubberAccessibilityValue(
+        currentTime: TimeInterval,
+        duration: TimeInterval,
+        isScrubbing: Bool,
+        scrubTime: TimeInterval
+    ) -> String {
+        let current = isScrubbing ? scrubTime : currentTime
+        guard duration > 0 else { return current.formattedDuration }
+        return "\(current.formattedDuration) of \(duration.formattedDuration)"
+    }
+}
+
 struct PlayerView: View {
     let stream: StreamInfo
     let availableStreams: [StreamInfo]
@@ -70,6 +119,9 @@ struct PlayerView: View {
     @State private var ksOptions: KSOptions?
 
     @Environment(VPPlayerEngine.self) private var engine
+    #if os(visionOS)
+    @Environment(CinemaSettings.self) private var cinemaSettings
+    #endif
     @State private var isShowingControls = true
     @State private var controlsHideTask: Task<Void, Never>?
     @State private var initialPlayerStateTask: Task<Void, Never>?
@@ -88,6 +140,7 @@ struct PlayerView: View {
     @State private var isShowingAudioPicker = false
     #if os(visionOS)
     @State private var isShowingEnvironmentPicker = false
+    @State private var isShowingCinemaSettings = false
     #endif
     @State private var timeObserverToken: Any?
     @State private var timeObserverPlayer: AVPlayer?
@@ -217,7 +270,10 @@ struct PlayerView: View {
         #if os(visionOS)
         .background(PlayerWindowSceneAccessor(windowScene: $playerWindowScene).frame(width: 0, height: 0))
         .onChange(of: playerWindowScene) { _, _ in applyVisionOSWindowGeometry() }
-        .onChange(of: detectedVideoRatio) { _, _ in applyVisionOSWindowGeometry() }
+        .onChange(of: detectedVideoRatio) { _, newRatio in
+            applyVisionOSWindowGeometry()
+            syncCinemaAspectRatio(newRatio)
+        }
         .onChange(of: aspectRatioSelection) { _, _ in
             applyVisionOSWindowGeometry()
             applyAspectRatioPresentationMode()
@@ -235,13 +291,19 @@ struct PlayerView: View {
         .sheet(isPresented: $isShowingEnvironmentPicker) {
             EnvironmentPickerSheet(
                 onSelect: { asset in
-                    Task { await openEnvironment(asset) }
+                    openEnvironmentAfterMenuDismissal(asset)
                 },
                 onDismiss: {
-                    Task { await dismissImmersiveIfNeeded(reason: .userInitiated) }
+                    dismissEnvironmentAfterMenuDismissal()
+                },
+                onSelectCinema: {
+                    openCinemaEnvironmentAfterMenuDismissal()
                 }
             )
             .environment(appState)
+        }
+        .sheet(isPresented: $isShowingCinemaSettings) {
+            CinemaSettingsPanel(settings: cinemaSettings)
         }
         #endif
     }
@@ -658,16 +720,32 @@ struct PlayerView: View {
 
                     #if os(visionOS)
                     Section("Environment") {
+                        Button {
+                            openCinemaEnvironmentAfterMenuDismissal()
+                        } label: {
+                            Label("Cinema Environment", systemImage: "theatermasks")
+                        }
+                        .disabled(!PlayerCinemaEnvironmentPolicy.canOpen(
+                            activeEngine: activeEngine,
+                            hasAVPlayer: avPlayer != nil
+                        ))
+
+                        Button {
+                            showCinemaSettingsAfterMenuDismissal()
+                        } label: {
+                            Label("Cinema Settings", systemImage: "slider.horizontal.3")
+                        }
+
                         if environmentAssets.isEmpty {
                             Button {
-                                isShowingEnvironmentPicker = true
+                                showEnvironmentPickerAfterMenuDismissal()
                             } label: {
                                 Label("Browse Environments", systemImage: "mountain.2")
                             }
                         } else {
                             ForEach(environmentAssets, id: \.id) { asset in
                                 Button {
-                                    Task { await openEnvironment(asset) }
+                                    openEnvironmentAfterMenuDismissal(asset)
                                 } label: {
                                     HStack {
                                         Text(asset.name)
@@ -681,7 +759,7 @@ struct PlayerView: View {
                         }
                         if appState.isImmersiveSpaceOpen {
                             Button(role: .destructive) {
-                                Task { await dismissImmersiveIfNeeded(reason: .userInitiated) }
+                                dismissEnvironmentAfterMenuDismissal()
                             } label: {
                                 Label("Exit Environment", systemImage: "xmark.circle")
                             }
@@ -760,12 +838,62 @@ struct PlayerView: View {
             #endif
 
             #if os(visionOS)
-            // Environment toggle pill — always visible so users can discover/import environments
-            Button {
-                if appState.isImmersiveSpaceOpen {
-                    Task { await dismissImmersiveIfNeeded(reason: .userInitiated) }
+            // Environment toggle pill — always visible so users can open built-in cinema or imported environments.
+            Menu {
+                Button {
+                    openCinemaEnvironmentAfterMenuDismissal()
+                } label: {
+                    if appState.activeEnvironment == .cinemaEnvironment,
+                       appState.isImmersiveSpaceOpen {
+                        Label("Cinema Environment", systemImage: "checkmark")
+                    } else {
+                        Label("Cinema Environment", systemImage: "theatermasks")
+                    }
+                }
+                .disabled(!PlayerCinemaEnvironmentPolicy.canOpen(
+                    activeEngine: activeEngine,
+                    hasAVPlayer: avPlayer != nil
+                ))
+
+                Button {
+                    showCinemaSettingsAfterMenuDismissal()
+                } label: {
+                    Label("Cinema Settings", systemImage: "slider.horizontal.3")
+                }
+
+                Divider()
+
+                if environmentAssets.isEmpty {
+                    Text("No imported environments")
                 } else {
-                    isShowingEnvironmentPicker = true
+                    ForEach(environmentAssets, id: \.id) { asset in
+                        Button {
+                            openEnvironmentAfterMenuDismissal(asset)
+                        } label: {
+                            if asset.id == appState.selectedEnvironmentAsset?.id,
+                               appState.isImmersiveSpaceOpen,
+                               appState.activeEnvironment != .cinemaEnvironment {
+                                Label(asset.name, systemImage: "checkmark")
+                            } else {
+                                Label(asset.name, systemImage: environmentAssetIcon(asset))
+                            }
+                        }
+                    }
+                }
+
+                Button {
+                    showEnvironmentPickerAfterMenuDismissal()
+                } label: {
+                    Label("Browse Environments", systemImage: "mountain.2")
+                }
+
+                if appState.isImmersiveSpaceOpen {
+                    Divider()
+                    Button(role: .destructive) {
+                        dismissEnvironmentAfterMenuDismissal()
+                    } label: {
+                        Label("Exit Environment", systemImage: "xmark.circle")
+                    }
                 }
             } label: {
                 Image(systemName: appState.isImmersiveSpaceOpen ? "mountain.2.fill" : "mountain.2")
@@ -785,7 +913,7 @@ struct PlayerView: View {
                     }
             }
             .buttonStyle(.plain)
-            .accessibilityLabel(appState.isImmersiveSpaceOpen ? "Leave immersive environment" : "Open immersive environments")
+            .accessibilityLabel("Open immersive environments")
             .hoverEffect(.lift)
             .animation(motionAnimationsEnabled ? .easeInOut(duration: 0.2) : nil, value: appState.isImmersiveSpaceOpen)
 
@@ -1258,16 +1386,7 @@ struct PlayerView: View {
     }
 
     private var playbackStateTitle: String {
-        switch playbackState {
-        case .preparing:
-            return "Preparing Playback"
-        case .buffering:
-            return "Buffering"
-        case .playing:
-            return "Playing"
-        case .failed:
-            return "Playback Failed"
-        }
+        PlayerViewPolicy.playbackStateTitle(for: playbackState)
     }
 
     private var hasNextStream: Bool {
@@ -1759,12 +1878,18 @@ struct PlayerView: View {
         )
     }
 
-    static func audioTrackRefreshShouldRun(requestedStreamID: String, currentStreamID: String?) -> Bool {
-        currentStreamID == requestedStreamID
+    nonisolated static func audioTrackRefreshShouldRun(requestedStreamID: String, currentStreamID: String?) -> Bool {
+        PlayerViewPolicy.audioTrackRefreshShouldRun(
+            requestedStreamID: requestedStreamID,
+            currentStreamID: currentStreamID
+        )
     }
 
-    static func preparePlaybackShouldRun(requestedPreparationID: UUID, activePreparationID: UUID?) -> Bool {
-        activePreparationID == requestedPreparationID
+    nonisolated static func preparePlaybackShouldRun(requestedPreparationID: UUID, activePreparationID: UUID?) -> Bool {
+        PlayerViewPolicy.preparePlaybackShouldRun(
+            requestedPreparationID: requestedPreparationID,
+            activePreparationID: activePreparationID
+        )
     }
 
     private func isCurrentAVPlayer(_ player: AVPlayer) -> Bool {
@@ -1924,7 +2049,7 @@ struct PlayerView: View {
         timeObserverPlayer = player
     }
 
-    static let avPlayerPeriodicObserverIntervalSeconds: TimeInterval = 0.25
+    static let avPlayerPeriodicObserverIntervalSeconds: TimeInterval = PlayerViewPolicy.avPlayerPeriodicObserverIntervalSeconds
 
     @MainActor
     private func detectVideoRatio(from asset: AVAsset, player: AVPlayer) async {
@@ -1947,20 +2072,26 @@ struct PlayerView: View {
     }
 
     private func seekTo(percent: Double) {
-        let clamped = max(0, min(1, percent))
-        let target = engine.duration * clamped
+        let target = PlayerViewPolicy.clampedSeekTarget(percent: percent, duration: engine.duration)
         seek(to: target)
     }
 
     private func seekRelative(_ offset: TimeInterval) {
-        let target = engine.currentTime + offset
+        let target = PlayerViewPolicy.clampedSeekTarget(
+            currentTime: engine.currentTime,
+            offset: offset,
+            duration: engine.duration
+        )
         seek(to: target)
     }
 
     private var scrubberAccessibilityValue: String {
-        let current = isScrubbing ? scrubTime : engine.currentTime
-        guard engine.duration > 0 else { return current.formattedDuration }
-        return "\(current.formattedDuration) of \(engine.durationFormatted)"
+        PlayerViewPolicy.scrubberAccessibilityValue(
+            currentTime: engine.currentTime,
+            duration: engine.duration,
+            isScrubbing: isScrubbing,
+            scrubTime: scrubTime
+        )
     }
 
     private func adjustScrubberAccessibility(_ direction: AccessibilityAdjustmentDirection) {
@@ -1975,7 +2106,7 @@ struct PlayerView: View {
     }
 
     private func seek(to time: TimeInterval) {
-        let target = max(0, min(engine.duration, time))
+        let target = PlayerViewPolicy.clampedSeekTarget(time: time, duration: engine.duration)
         engine.currentTime = target
         engine.updateSubtitleText(at: target)
 
@@ -2261,6 +2392,11 @@ struct PlayerView: View {
     #endif
 
     #if os(visionOS)
+    private func syncCinemaAspectRatio(_ ratio: CGFloat?) {
+        guard let ratio, ratio.isFinite, ratio > 0 else { return }
+        cinemaSettings.videoAspectRatio = Double(ratio)
+    }
+
     private func openEnvironment(_ asset: EnvironmentAsset) async {
         // Skip if this asset is already active and the space is open
         if asset.id == appState.selectedEnvironmentAsset?.id && appState.isImmersiveSpaceOpen {
@@ -2269,6 +2405,76 @@ struct PlayerView: View {
         await dismissImmersiveIfNeeded(reason: .switchingEnvironment)
         await appState.activateEnvironmentAsset(asset)
         await openImmersiveSpaceIfPossible(for: asset)
+    }
+
+    private func environmentAssetIcon(_ asset: EnvironmentAsset) -> String {
+        PlayerCinemaEnvironmentPolicy.iconName(forAssetPath: asset.assetPath)
+    }
+
+    private func openCinemaEnvironmentAfterMenuDismissal() {
+        Task { @MainActor in
+            await waitForMenuDismissal()
+            await openCinemaEnvironment()
+        }
+    }
+
+    private func openEnvironmentAfterMenuDismissal(_ asset: EnvironmentAsset) {
+        Task { @MainActor in
+            await waitForMenuDismissal()
+            await openEnvironment(asset)
+        }
+    }
+
+    private func showEnvironmentPickerAfterMenuDismissal() {
+        Task { @MainActor in
+            await waitForMenuDismissal()
+            guard !isShowingEnvironmentPicker else { return }
+            isShowingEnvironmentPicker = true
+        }
+    }
+
+    private func showCinemaSettingsAfterMenuDismissal() {
+        Task { @MainActor in
+            await waitForMenuDismissal()
+            guard !isShowingCinemaSettings else { return }
+            isShowingCinemaSettings = true
+        }
+    }
+
+    private func dismissEnvironmentAfterMenuDismissal() {
+        Task { @MainActor in
+            await waitForMenuDismissal()
+            await dismissImmersiveIfNeeded(reason: .userInitiated)
+        }
+    }
+
+    private func waitForMenuDismissal() async {
+        await Task.yield()
+        try? await Task.sleep(for: PlayerCinemaEnvironmentPolicy.menuDismissalDelay)
+    }
+
+    private func openCinemaEnvironment() async {
+        guard PlayerCinemaEnvironmentPolicy.canOpen(activeEngine: activeEngine, hasAVPlayer: avPlayer != nil),
+              let player = avPlayer else {
+            playbackMessage = PlayerCinemaEnvironmentPolicy.unavailableMessage
+            return
+        }
+        if appState.activeEnvironment == .cinemaEnvironment && appState.isImmersiveSpaceOpen {
+            return
+        }
+        appState.activeAVPlayer = player
+        await dismissImmersiveIfNeeded(reason: .switchingEnvironment)
+        appState.activeAVPlayer = player
+        guard appState.beginImmersiveTransition() else { return }
+        let result = await openImmersiveSpace(id: EnvironmentType.cinemaEnvironment.immersiveSpaceId)
+        switch result {
+        case .opened:
+            appState.spatialAudioManager.enterImmersiveMode()
+        case .error, .userCancelled:
+            appState.cancelImmersiveTransition()
+        @unknown default:
+            appState.cancelImmersiveTransition()
+        }
     }
 
     private func openImmersiveSpaceIfPossible(for asset: EnvironmentAsset) async {
@@ -2291,6 +2497,7 @@ struct PlayerView: View {
         appState.stageImmersiveDismiss(reason: reason)
         appState.spatialAudioManager.exitImmersiveMode()
         await dismissImmersiveSpace()
+        appState.completeImmersiveDismissIfStillPending()
     }
 
     private func handleScenePhaseChange(_ phase: ScenePhase) async {
@@ -2352,6 +2559,10 @@ struct PlayerView: View {
     private func requestEnvironmentPicker() {
         environmentAssetsTask?.cancel()
         #if os(visionOS)
+        guard !isShowingEnvironmentPicker else {
+            environmentAssetsTask = Task { await loadEnvironmentAssets() }
+            return
+        }
         isShowingEnvironmentPicker = true
         #endif
         environmentAssetsTask = Task { await loadEnvironmentAssets() }
@@ -2486,15 +2697,15 @@ struct PlayerView: View {
         return Locale.preferredLanguages
     }
 
-    static func subtitleMutationShouldRun(requestedStreamID: String, currentStreamID: String?) -> Bool {
+    nonisolated static func subtitleMutationShouldRun(requestedStreamID: String, currentStreamID: String?) -> Bool {
         currentStreamID == requestedStreamID
     }
 
-    static func shouldAnimateForAccessibility(reduceMotion: Bool) -> Bool {
+    nonisolated static func shouldAnimateForAccessibility(reduceMotion: Bool) -> Bool {
         !reduceMotion
     }
 
-    static func automaticSubtitleLanguageCodes(
+    nonisolated static func automaticSubtitleLanguageCodes(
         configuredLanguageSetting: String?,
         systemPreferredLanguages: [String],
         closedCaptioningEnabled: Bool

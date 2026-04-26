@@ -13,6 +13,28 @@ struct SettingsStatusFormatterTests {
     }
 
     @Test
+    func debridStatusWarnsWhenNoServicesAreActive() {
+        var snapshot = SettingsStatusSnapshot()
+        snapshot.activeDebridCount = 0
+
+        let status = SettingsStatusFormatter.status(for: .debrid, snapshot: snapshot)
+
+        #expect(status.kind == .warning)
+        #expect(status.message == "Not configured")
+    }
+
+    @Test
+    func indexerStatusWarnsWhenNoIndexersAreActive() {
+        var snapshot = SettingsStatusSnapshot()
+        snapshot.activeIndexerCount = 0
+
+        let status = SettingsStatusFormatter.status(for: .indexers, snapshot: snapshot)
+
+        #expect(status.kind == .warning)
+        #expect(status.message == "No active indexers")
+    }
+
+    @Test
     func metadataStatusWarnsWhenTMDBMissing() {
         var snapshot = SettingsStatusSnapshot()
         snapshot.hasTMDBKey = false
@@ -20,6 +42,17 @@ struct SettingsStatusFormatterTests {
         let status = SettingsStatusFormatter.status(for: .metadata, snapshot: snapshot)
         #expect(status.kind == .warning)
         #expect(status.message == "API key required")
+    }
+
+    @Test
+    func metadataStatusIsPositiveWhenTMDBIsConfigured() {
+        var snapshot = SettingsStatusSnapshot()
+        snapshot.hasTMDBKey = true
+
+        let status = SettingsStatusFormatter.status(for: .metadata, snapshot: snapshot)
+
+        #expect(status.kind == .positive)
+        #expect(status.message == "API key configured")
     }
 
     @Test
@@ -98,6 +131,39 @@ struct SettingsStatusFormatterTests {
         let status = SettingsStatusFormatter.status(for: .environments, snapshot: snapshot)
         #expect(status.kind == .warning)
         #expect(status.message == "No environments added")
+    }
+
+    @Test
+    func environmentsStatusUsesPluralAssetCount() {
+        var snapshot = SettingsStatusSnapshot()
+        snapshot.environmentAssetCount = 2
+
+        let status = SettingsStatusFormatter.status(for: .environments, snapshot: snapshot)
+
+        #expect(status.kind == .positive)
+        #expect(status.message == "2 assets")
+    }
+
+    @Test
+    func subtitlesStatusFallsBackToLocalOnlyWhenOpenSubtitlesMissing() {
+        var snapshot = SettingsStatusSnapshot()
+        snapshot.hasOpenSubtitlesKey = false
+
+        let status = SettingsStatusFormatter.status(for: .subtitles, snapshot: snapshot)
+
+        #expect(status.kind == .neutral)
+        #expect(status.message == "Local subtitles only")
+    }
+
+    @Test
+    func simklStatusIsNeutralEvenWithoutCredentials() {
+        var snapshot = SettingsStatusSnapshot()
+        snapshot.hasSimklCredentials = false
+
+        let status = SettingsStatusFormatter.status(for: .simkl, snapshot: snapshot)
+
+        #expect(status.kind == .neutral)
+        #expect(status.message == "Unavailable in this build")
     }
 
     @Test

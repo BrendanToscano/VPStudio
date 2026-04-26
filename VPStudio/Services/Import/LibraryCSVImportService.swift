@@ -591,7 +591,8 @@ actor LibraryCSVImportService {
         if let utf8 = String(data: data, encoding: .utf8) {
             return utf8
         }
-        if let utf16 = String(data: data, encoding: .utf16) {
+        if Self.looksLikeUTF16(data),
+           let utf16 = String(data: data, encoding: .utf16) {
             return utf16
         }
         if let latin = String(data: data, encoding: .isoLatin1) {
@@ -599,6 +600,18 @@ actor LibraryCSVImportService {
         }
 
         throw LibraryCSVImportError.unsupportedEncoding
+    }
+
+    private static func looksLikeUTF16(_ data: Data) -> Bool {
+        guard data.count >= 2 else { return false }
+
+        let prefix = Array(data.prefix(64))
+        if prefix.starts(with: [0xFF, 0xFE]) || prefix.starts(with: [0xFE, 0xFF]) {
+            return true
+        }
+
+        let nullCount = prefix.filter { $0 == 0 }.count
+        return nullCount >= max(2, prefix.count / 4)
     }
 
     private static func parseCSVRecords(_ text: String) -> [[String]] {

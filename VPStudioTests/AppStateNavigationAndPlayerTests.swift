@@ -99,10 +99,12 @@ struct AppStatePlayerSessionStateTests {
         let preview = Fixtures.mediaPreview()
         let viewModel = DetailViewModel(appState: appState)
         let request = viewModel.makePlayerSessionRequest(stream: stream, preview: preview)
+        let player = AVPlayer()
+        let renderer = AVSampleBufferVideoRenderer()
         appState.activePlayerSession = request
         appState.fullscreenBySessionID[request.id] = true
-        appState.activeAVPlayer = AVPlayer()
-        appState.activeVideoRenderer = AVSampleBufferVideoRenderer()
+        appState.activeAVPlayer = player
+        appState.activeVideoRenderer = renderer
 
         appState.releasePlayerResources(clearSession: false, sessionID: request.id)
 
@@ -119,10 +121,12 @@ struct AppStatePlayerSessionStateTests {
         let preview = Fixtures.mediaPreview()
         let viewModel = DetailViewModel(appState: appState)
         let request = viewModel.makePlayerSessionRequest(stream: stream, preview: preview)
+        let player = AVPlayer()
+        let renderer = AVSampleBufferVideoRenderer()
         appState.activePlayerSession = request
         appState.fullscreenBySessionID[request.id] = true
-        appState.activeAVPlayer = AVPlayer()
-        appState.activeVideoRenderer = AVSampleBufferVideoRenderer()
+        appState.activeAVPlayer = player
+        appState.activeVideoRenderer = renderer
 
         appState.releasePlayerResources(clearSession: true, sessionID: request.id)
 

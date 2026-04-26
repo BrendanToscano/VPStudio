@@ -227,6 +227,158 @@ struct PlayerResourceTeardownContractTests {
     }
 
     @Test
+    func playerViewExposesCinemaEnvironmentFromBothVisionMenus() throws {
+        let source = try contents(of: "VPStudio/Views/Windows/Player/PlayerView.swift")
+        let topBarMenuSection = try section(
+            from: "#if os(visionOS)\n                    Section(\"Environment\") {",
+            to: "#endif\n                } label: {",
+            in: source
+        )
+        let transportPillSection = try section(
+            from: "#if os(visionOS)\n            // Environment toggle pill",
+            to: ".animation(motionAnimationsEnabled ? .easeInOut(duration: 0.2) : nil, value: appState.isImmersiveSpaceOpen)",
+            in: source
+        )
+
+        for menuSection in [topBarMenuSection, transportPillSection] {
+            #expect(menuSection.contains("openCinemaEnvironmentAfterMenuDismissal()"))
+            #expect(menuSection.contains("Label(\"Cinema Environment\", systemImage: \"theatermasks\")"))
+            #expect(menuSection.contains("PlayerCinemaEnvironmentPolicy.canOpen("))
+            #expect(menuSection.contains("activeEngine: activeEngine"))
+            #expect(menuSection.contains("hasAVPlayer: avPlayer != nil"))
+            #expect(menuSection.contains("Label(\"Cinema Settings\", systemImage: \"slider.horizontal.3\")"))
+        }
+
+        #expect(topBarMenuSection.contains("Label(\"Browse Environments\", systemImage: \"mountain.2\")"))
+        #expect(transportPillSection.contains("Text(\"No imported environments\")"))
+        #expect(transportPillSection.contains("Label(\"Browse Environments\", systemImage: \"mountain.2\")"))
+    }
+
+    @Test
+    func playerViewDefersEnvironmentMenuActionsUntilAfterMenuDismissal() throws {
+        let source = try contents(of: "VPStudio/Views/Windows/Player/PlayerView.swift")
+
+        for functionName in [
+            "openCinemaEnvironmentAfterMenuDismissal",
+            "openEnvironmentAfterMenuDismissal",
+            "showEnvironmentPickerAfterMenuDismissal",
+            "showCinemaSettingsAfterMenuDismissal",
+            "dismissEnvironmentAfterMenuDismissal",
+        ] {
+            let body = try functionBody(named: functionName, in: source)
+            #expect(body.contains("Task { @MainActor in"))
+            #expect(body.contains("await waitForMenuDismissal()"))
+        }
+
+        let waitBody = try functionBody(named: "waitForMenuDismissal", in: source)
+        #expect(waitBody.contains("await Task.yield()"))
+        #expect(waitBody.contains("Task.sleep(for: PlayerCinemaEnvironmentPolicy.menuDismissalDelay)"))
+    }
+
+    @Test
+    func playerEnvironmentPickerDefersActionsUntilAfterSheetDismissal() throws {
+        let source = try contents(of: "VPStudio/Views/Windows/Player/PlayerView.swift")
+        let sheetBody = try section(
+            from: ".sheet(isPresented: $isShowingEnvironmentPicker) {",
+            to: ".sheet(isPresented: $isShowingCinemaSettings) {",
+            in: source
+        )
+
+        #expect(sheetBody.contains("openEnvironmentAfterMenuDismissal(asset)"))
+        #expect(sheetBody.contains("dismissEnvironmentAfterMenuDismissal()"))
+        #expect(sheetBody.contains("openCinemaEnvironmentAfterMenuDismissal()"))
+        #expect(!sheetBody.contains("Task { await openEnvironment(asset) }"))
+        #expect(!sheetBody.contains("Task { await openCinemaEnvironment() }"))
+        #expect(!sheetBody.contains("Task { await dismissImmersiveIfNeeded(reason: .userInitiated) }"))
+    }
+
+    @Test
+    func playerEnvironmentPresentationWritesAreCoalesced() throws {
+        let source = try contents(of: "VPStudio/Views/Windows/Player/PlayerView.swift")
+        let pickerBody = try functionBody(named: "showEnvironmentPickerAfterMenuDismissal", in: source)
+        let settingsBody = try functionBody(named: "showCinemaSettingsAfterMenuDismissal", in: source)
+        let requestBody = try functionBody(named: "requestEnvironmentPicker", in: source)
+
+        #expect(pickerBody.contains("guard !isShowingEnvironmentPicker else { return }"))
+        #expect(settingsBody.contains("guard !isShowingCinemaSettings else { return }"))
+        #expect(requestBody.contains("guard !isShowingEnvironmentPicker else {"))
+        #expect(requestBody.contains("environmentAssetsTask = Task { await loadEnvironmentAssets() }"))
+    }
+
+    @Test
+    func immersiveDismissCompletesLocalStateBeforeSwitchReopen() throws {
+        let playerSource = try contents(of: "VPStudio/Views/Windows/Player/PlayerView.swift")
+        let appStateSource = try contents(of: "VPStudio/App/AppState.swift")
+        let dismissBody = try functionBody(named: "dismissImmersiveIfNeeded", in: playerSource)
+        let completionBody = try functionBody(named: "completeImmersiveDismissIfStillPending", in: appStateSource)
+
+        let dismissRange = try requiredRange(of: "await dismissImmersiveSpace()", in: dismissBody)
+        let completeRange = try requiredRange(of: "appState.completeImmersiveDismissIfStillPending()", in: dismissBody)
+        #expect(dismissRange.lowerBound < completeRange.lowerBound)
+        #expect(completionBody.contains("guard isImmersiveSpaceOpen || isImmersiveTransitionInFlight else { return }"))
+        #expect(completionBody.contains("immersiveSpaceDidDisappear()"))
+    }
+
+    @Test
+    func playerViewOpensAppleCinemaEnvironmentWithCurrentAVPlayerOnly() throws {
+        let source = try contents(of: "VPStudio/Views/Windows/Player/PlayerView.swift")
+        let body = try functionBody(named: "openCinemaEnvironment", in: source)
+
+        #expect(body.contains("PlayerCinemaEnvironmentPolicy.canOpen(activeEngine: activeEngine, hasAVPlayer: avPlayer != nil)"))
+        #expect(body.contains("let player = avPlayer"))
+        #expect(body.contains("playbackMessage = PlayerCinemaEnvironmentPolicy.unavailableMessage"))
+        #expect(body.contains("appState.activeAVPlayer = player"))
+        #expect(body.contains("await dismissImmersiveIfNeeded(reason: .switchingEnvironment)"))
+        #expect(body.contains("appState.beginImmersiveTransition()"))
+        #expect(body.contains("openImmersiveSpace(id: EnvironmentType.cinemaEnvironment.immersiveSpaceId)"))
+        #expect(body.contains("appState.spatialAudioManager.enterImmersiveMode()"))
+        #expect(body.contains("appState.cancelImmersiveTransition()"))
+
+        let firstAVPlayerAssignment = try requiredRange(of: "appState.activeAVPlayer = player", in: body)
+        let openRange = try requiredRange(of: "openImmersiveSpace(id: EnvironmentType.cinemaEnvironment.immersiveSpaceId)", in: body)
+        #expect(firstAVPlayerAssignment.lowerBound < openRange.lowerBound)
+    }
+
+    @Test
+    func isolatedPlayerEnvironmentMenusAlwaysOfferCinemaEnvironment() throws {
+        let source = try contents(of: "VPStudio/Views/Windows/Player/PlayerEnvironmentMenu.swift")
+        let menuSection = try section(
+            from: "struct PlayerEnvironmentMenu: View {",
+            to: "/// Compact environment toggle button",
+            in: source
+        )
+        let buttonSection = try section(
+            from: "struct PlayerEnvironmentButton: View {",
+            to: "#endif",
+            in: source
+        )
+
+        for section in [menuSection, buttonSection] {
+            #expect(section.contains("let onSelectCinema: () -> Void"))
+            #expect(section.contains("onSelectCinema()"))
+            #expect(section.contains("Label(\"Cinema Environment\", systemImage: \"checkmark\")"))
+            #expect(section.contains("Label(\"Cinema Environment\", systemImage: \"theatermasks\")"))
+        }
+
+        #expect(menuSection.contains("ForEach(assets, id: \\.id)"))
+        #expect(buttonSection.contains("Text(\"No environments available\")"))
+    }
+
+    @Test
+    func environmentAssetIconsUseSharedCinemaPolicy() throws {
+        let playerSource = try contents(of: "VPStudio/Views/Windows/Player/PlayerView.swift")
+        let menuSource = try contents(of: "VPStudio/Views/Windows/Player/PlayerEnvironmentMenu.swift")
+
+        let playerHelper = try functionBody(named: "environmentAssetIcon", in: playerSource)
+        let menuHelper = try functionBody(named: "assetIcon", in: menuSource)
+
+        #expect(playerHelper.contains("PlayerCinemaEnvironmentPolicy.iconName(forAssetPath: asset.assetPath)"))
+        #expect(menuHelper.contains("PlayerCinemaEnvironmentPolicy.iconName(forAssetPath: asset.assetPath)"))
+        #expect(!playerHelper.contains("pathExtension.lowercased()"))
+        #expect(!menuHelper.contains("pathExtension.lowercased()"))
+    }
+
+    @Test
     func playerViewCoalescesNotificationDrivenRefreshTasks() throws {
         let source = try contents(of: "VPStudio/Views/Windows/Player/PlayerView.swift")
         #expect(source.contains("@State private var environmentAssetsTask: Task<Void, Never>?"))
@@ -464,7 +616,7 @@ struct PlayerResourceTeardownContractTests {
     }
 
     private func functionBody(named functionName: String, in source: String) throws -> String {
-        guard let signatureRange = source.range(of: "func \(functionName)()") else {
+        guard let signatureRange = source.range(of: "func \(functionName)(") else {
             throw NSError(
                 domain: "PlayerResourceTeardownContractTests",
                 code: 1,

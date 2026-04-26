@@ -178,6 +178,43 @@ struct TMDBIDExtractionTests {
         #expect(state.acceptHeader == "application/json")
     }
 
+    @Test func searchUsesBearerAuthorizationForBareReadAccessToken() async throws {
+        final class RequestState: @unchecked Sendable {
+            var authorizationHeader: String?
+            var queryItems: [URLQueryItem] = []
+        }
+        let state = RequestState()
+
+        let session = makeStubSession { request in
+            state.authorizationHeader = request.value(forHTTPHeaderField: "Authorization")
+            state.queryItems = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            let body = #"{"page":1,"results":[],"total_pages":0,"total_results":0}"#
+            return (response, Data(body.utf8))
+        }
+
+        let token = "aaa.bbb_ccc-ddd.eee"
+        let service = TMDBService(apiKey: token, session: session)
+        _ = try await service.search(query: "Dune", type: .movie)
+
+        #expect(state.authorizationHeader == "Bearer \(token)")
+        #expect(state.queryItems.first(where: { $0.name == "api_key" }) == nil)
+    }
+
+    @Test func blankCredentialThrowsUnauthorizedBeforeNetwork() async {
+        let session = makeStubSession { request in
+            Issue.record("Blank credential should not issue request: \(request)")
+            let response = HTTPURLResponse(url: request.url!, statusCode: 500, httpVersion: nil, headerFields: nil)!
+            return (response, Data())
+        }
+
+        let service = TMDBService(apiKey: "   ", session: session)
+
+        await #expect(throws: TMDBError.unauthorized) {
+            _ = try await service.search(query: "Dune", type: .movie)
+        }
+    }
+
     @Test func searchMultiTypeUsesMultiPath() async throws {
         final class RequestState: @unchecked Sendable { var capturedPath: String? }
         let state = RequestState()
@@ -268,6 +305,98 @@ struct TMDBIDExtractionTests {
         let _ = try await service.discover(type: .series, filters: filters)
 
         #expect(state.queryItems.first(where: { $0.name == "sort_by" })?.value == "name.asc")
+    }
+
+    @Test func trendingAndCategoryUseExpectedPathsAndPagination() async throws {
+        final class RequestState: @unchecked Sendable {
+            var paths: [String] = []
+            var pages: [String?] = []
+        }
+        let state = RequestState()
+
+        let session = makeStubSession { request in
+            let url = try #require(request.url)
+            state.paths.append(url.path)
+            state.pages.append(URLComponents(url: url, resolvingAgainstBaseURL: false)?
+                .queryItems?
+                .first(where: { $0.name == "page" })?
+                .value)
+            let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            let body = #"{"page":2,"results":[],"total_pages":4,"total_results":0}"#
+            return (response, Data(body.utf8))
+        }
+
+        let service = TMDBService(apiKey: "key", session: session)
+        let trending = try await service.getTrending(type: .movie, timeWindow: .day, page: 2)
+        let category = try await service.getCategory(.airingToday, type: .series, page: 3)
+
+        #expect(trending.page == 2)
+        #expect(category.totalPages == 4)
+        #expect(state.paths == ["/3/trending/movie/day", "/3/tv/airing_today"])
+        #expect(state.pages == ["2", "3"])
+    }
+
+    @Test func getDetailUsesExtractedAndNumericTMDBIds() async throws {
+        final class RequestState: @unchecked Sendable { var paths: [String] = [] }
+        let state = RequestState()
+
+        let session = makeStubSession { request in
+            let url = try #require(request.url)
+            state.paths.append(url.path)
+            let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            let body = """
+            {
+                "id": 438631,
+                "title": "Dune",
+                "overview": "A noble family...",
+                "release_date": "2021-09-15",
+                "vote_average": 7.8,
+                "runtime": 155,
+                "status": "Released",
+                "genres": [{"id":878,"name":"Science Fiction"}],
+                "external_ids": {"imdb_id":"tt1160419","tvdb_id":null}
+            }
+            """
+            return (response, Data(body.utf8))
+        }
+
+        let service = TMDBService(apiKey: "key", session: session)
+        let extracted = try await service.getDetail(id: "movie-tmdb-438631", type: .movie)
+        let numeric = try await service.getDetail(id: "438631", type: .movie)
+
+        #expect(extracted.id == "tt1160419")
+        #expect(numeric.tmdbId == 438631)
+        #expect(state.paths == ["/3/movie/438631", "/3/movie/438631"])
+    }
+
+    @Test func getDetailFindsTMDBIdFromIMDbIdAndThrowsWhenMissing() async throws {
+        final class RequestState: @unchecked Sendable { var paths: [String] = [] }
+        let state = RequestState()
+
+        let session = makeStubSession { request in
+            let url = try #require(request.url)
+            state.paths.append(url.path)
+            let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            if url.path.contains("/find/tt1160419") {
+                let body = #"{"movie_results":[{"id":438631,"title":"Dune","media_type":"movie"}],"tv_results":[]}"#
+                return (response, Data(body.utf8))
+            }
+            if url.path.contains("/movie/438631") {
+                let body = #"{"id":438631,"title":"Dune","external_ids":{"imdb_id":"tt1160419"}}"#
+                return (response, Data(body.utf8))
+            }
+            let body = #"{"movie_results":[],"tv_results":[]}"#
+            return (response, Data(body.utf8))
+        }
+
+        let service = TMDBService(apiKey: "key", session: session)
+        let item = try await service.getDetail(id: "tt1160419", type: .movie)
+
+        #expect(item.title == "Dune")
+        #expect(state.paths.prefix(2) == ["/3/find/tt1160419", "/3/movie/438631"])
+        await #expect(throws: TMDBError.notFound("tt0000000")) {
+            _ = try await service.getDetail(id: "tt0000000", type: .movie)
+        }
     }
 
     @Test func searchParsesMovieResults() async throws {
@@ -427,7 +556,7 @@ struct TMDBIDExtractionTests {
 
     @Test func rateLimitedRetriesUsingHttpDateRetryAfterHeaderThenSucceeds() async throws {
         let recorder = AttemptRecorder()
-        let retryAfterDate = Date(timeIntervalSinceNow: 3)
+        let retryAfterDate = Date(timeIntervalSinceNow: 5)
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = TimeZone(secondsFromGMT: 0)
@@ -459,8 +588,8 @@ struct TMDBIDExtractionTests {
         let snapshot = recorder.snapshot()
         #expect(snapshot.attempts == 2)
         let recordedSleep = try #require(snapshot.sleeps.first)
-        #expect(recordedSleep >= 2_000_000_000)
-        #expect(recordedSleep <= 4_000_000_000)
+        #expect(recordedSleep >= 3_000_000_000)
+        #expect(recordedSleep <= 6_000_000_000)
     }
 
     @Test func rateLimitedRetriesWithExponentialBackoffWhenRetryAfterMissing() async throws {
@@ -531,6 +660,37 @@ struct TMDBIDExtractionTests {
         #expect(genres[1].name == "Drama")
     }
 
+    @Test func getSeasonsMapsNilSeasonPayloadToEmptyArray() async throws {
+        let session = makeStubSession { request in
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (response, Data(#"{"id":1399}"#.utf8))
+        }
+
+        let service = TMDBService(apiKey: "key", session: session)
+        let seasons = try await service.getSeasons(tmdbId: 1399)
+
+        #expect(seasons.isEmpty)
+    }
+
+    @Test func getSeasonsReturnsSeasonList() async throws {
+        let session = makeStubSession { request in
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            let body = """
+            {"id":1399,"seasons":[
+                {"id":10,"season_number":1,"name":"Season 1","overview":"Start","poster_path":"/s1.jpg","episode_count":10,"air_date":"2011-04-17"}
+            ]}
+            """
+            return (response, Data(body.utf8))
+        }
+
+        let service = TMDBService(apiKey: "key", session: session)
+        let seasons = try await service.getSeasons(tmdbId: 1399)
+
+        #expect(seasons.count == 1)
+        #expect(seasons[0].seasonNumber == 1)
+        #expect(seasons[0].posterURL?.absoluteString == "https://image.tmdb.org/t/p/w342/s1.jpg")
+    }
+
     @Test func getEpisodesReturnsEpisodeList() async throws {
         let session = makeStubSession { request in
             let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
@@ -552,6 +712,39 @@ struct TMDBIDExtractionTests {
         #expect(episodes[0].episodeNumber == 1)
         #expect(episodes[0].seasonNumber == 1)
         #expect(episodes[1].title == "Second")
+    }
+
+    @Test func getExternalIdsMapsMovieAndSeriesPayloads() async throws {
+        final class RequestState: @unchecked Sendable { var paths: [String] = [] }
+        let state = RequestState()
+
+        let session = makeStubSession { request in
+            let url = try #require(request.url)
+            state.paths.append(url.path)
+            let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (response, Data(#"{"imdb_id":"tt123","tvdb_id":456}"#.utf8))
+        }
+
+        let service = TMDBService(apiKey: "key", session: session)
+        let movieIds = try await service.getExternalIds(tmdbId: 1, type: .movie)
+        let seriesIds = try await service.getExternalIds(tmdbId: 2, type: .series)
+
+        #expect(movieIds.imdbId == "tt123")
+        #expect(seriesIds.tvdbId == 456)
+        #expect(state.paths == ["/3/movie/1/external_ids", "/3/tv/2/external_ids"])
+    }
+
+    @Test func serverErrorsIncludeStatusAndBody() async {
+        let session = makeStubSession { request in
+            let response = HTTPURLResponse(url: request.url!, statusCode: 500, httpVersion: nil, headerFields: nil)!
+            return (response, Data("maintenance".utf8))
+        }
+
+        let service = TMDBService(apiKey: "key", session: session)
+
+        await #expect(throws: TMDBError.httpError(500, "maintenance")) {
+            _ = try await service.search(query: "Test", type: .movie)
+        }
     }
 
     @Test func malformedPathThrowsInvalidURLInsteadOfCrashing() async {

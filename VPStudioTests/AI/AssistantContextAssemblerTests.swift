@@ -317,6 +317,20 @@ struct AssistantContextAssemblerTests {
     // MARK: - Snapshot Persistence
 
     @Test
+    func contextSnapshotDefaultsUseLatestIDAndOneDayStaleness() {
+        let createdAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let record = AIContextSnapshot(snapshotJSON: "{}", createdAt: createdAt)
+
+        #expect(record.id == "latest")
+        #expect(record.createdAt == createdAt)
+        #expect(AIContextSnapshot.databaseTableName == "ai_context_snapshots")
+        #expect(AIContextSnapshot.staleness == 86_400)
+        #expect(AIContextSnapshot.Columns.id.name == "id")
+        #expect(AIContextSnapshot.Columns.snapshotJSON.name == "snapshotJSON")
+        #expect(AIContextSnapshot.Columns.createdAt.name == "createdAt")
+    }
+
+    @Test
     func snapshotPersistsToAndLoadsFromDatabase() async throws {
         let (database, tempDir) = try await makeTemporaryDatabase(named: "assembler-persist.sqlite")
         defer { try? FileManager.default.removeItem(at: tempDir) }
@@ -361,6 +375,15 @@ struct AssistantContextAssemblerTests {
         let decoded = try fetched!.decoded()
         #expect(decoded.contextNotes == ["Second"])
         #expect(decoded.candidateTitles == ["Title"])
+    }
+
+    @Test
+    func contextSnapshotDecodedThrowsForInvalidJSON() {
+        let record = AIContextSnapshot(snapshotJSON: #"{"contextNotes":"not-an-array"}"#)
+
+        #expect(throws: Error.self) {
+            _ = try record.decoded()
+        }
     }
 
     // MARK: - Disliked Titles in Ratings

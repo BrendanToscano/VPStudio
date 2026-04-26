@@ -13,6 +13,7 @@ struct EnvironmentPickerSheet: View {
 
     let onSelect: (EnvironmentAsset) -> Void
     let onDismiss: () -> Void
+    var onSelectCinema: (() -> Void)? = nil
 
     @State private var environments: [EnvironmentAsset] = []
     @State private var isShowingFileImporter = false
@@ -29,10 +30,20 @@ struct EnvironmentPickerSheet: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 32) {
+                    description
+                    CinemaEnvironmentPreviewCard(
+                        isActive: appState.activeEnvironment == .cinemaEnvironment,
+                        isImmersiveOpen: appState.isImmersiveSpaceOpen,
+                        onSelect: {
+                            onSelectCinema?()
+                            dismiss()
+                        }
+                    )
+                    .disabled(onSelectCinema == nil)
+
                     if environments.isEmpty {
-                        emptyState
+                        importPrompt
                     } else {
-                        description
                         cardGrid
                         if appState.isImmersiveSpaceOpen {
                             exitButton
@@ -146,20 +157,20 @@ struct EnvironmentPickerSheet: View {
         .tint(.red)
     }
 
-    private var emptyState: some View {
-        VStack(spacing: 16) {
+    private var importPrompt: some View {
+        VStack(spacing: 12) {
             Image(systemName: "mountain.2")
-                .font(.system(size: 48))
+                .font(.system(size: 34))
                 .foregroundStyle(.secondary)
-            Text("No Environments")
-                .font(.title3.weight(.semibold))
+            Text("No imported environments")
+                .font(.headline)
             Text("Tap the + button to import HDRI (.hdr, .exr) or 3D scene (.usdz, .reality) files.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
         }
         .frame(maxWidth: .infinity)
-        .padding(.top, 60)
+        .padding(.vertical, 24)
     }
 
     private func importErrorBanner(_ message: String) -> some View {
@@ -455,6 +466,93 @@ struct EnvironmentPreviewCard: View {
             kCGImageSourceShouldAllowFloat: true,
         ]
         return CGImageSourceCreateImageAtIndex(source, 0, fullOptions as CFDictionary)
+    }
+}
+
+struct CinemaEnvironmentPreviewCard: View {
+    let isActive: Bool
+    let isImmersiveOpen: Bool
+    let onSelect: () -> Void
+
+    private let cardWidth: CGFloat = 230
+    private let cardHeight: CGFloat = 136
+
+    var body: some View {
+        Button(action: onSelect) {
+            ZStack(alignment: .bottomLeading) {
+                LinearGradient(
+                    colors: [
+                        Color(red: 0.02, green: 0.02, blue: 0.03),
+                        Color(red: 0.16, green: 0.02, blue: 0.07),
+                        Color(red: 0.28, green: 0.22, blue: 0.10),
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+                .overlay {
+                    Image(systemName: "theatermasks.fill")
+                        .font(.system(size: 44))
+                        .foregroundStyle(.white.opacity(0.16))
+                }
+                .frame(width: cardWidth, height: cardHeight)
+                .clipShape(RoundedRectangle(cornerRadius: 16))
+
+                LinearGradient(
+                    stops: [
+                        .init(color: .clear, location: 0.0),
+                        .init(color: .black.opacity(0.45), location: 0.55),
+                        .init(color: .black.opacity(0.82), location: 1.0),
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 16))
+
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack(spacing: 5) {
+                        Image(systemName: "theatermasks")
+                            .font(.caption2)
+                            .foregroundStyle(.white.opacity(0.75))
+                        Text("Built-in")
+                            .font(.caption2)
+                            .foregroundStyle(.white.opacity(0.75))
+                    }
+                    Text("Cinema Environment")
+                        .font(.subheadline)
+                        .fontWeight(.semibold)
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                }
+                .padding(16)
+            }
+            .frame(width: cardWidth, height: cardHeight)
+        }
+        .buttonStyle(.plain)
+        .overlay {
+            RoundedRectangle(cornerRadius: 16)
+                .strokeBorder(
+                    LinearGradient(
+                        colors: [
+                            isActive ? .blue.opacity(0.9) : .white.opacity(0.18),
+                            isActive ? .blue.opacity(0.4) : .white.opacity(0.04),
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ),
+                    lineWidth: isActive ? 2 : 1
+                )
+        }
+        .overlay(alignment: .topTrailing) {
+            if isActive && isImmersiveOpen {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.title3)
+                    .symbolRenderingMode(.palette)
+                    .foregroundStyle(.white, .blue)
+                    .padding(10)
+            }
+        }
+        .shadow(color: .black.opacity(0.16), radius: 18, y: 6)
+        .hoverEffect(.lift)
     }
 }
 #endif

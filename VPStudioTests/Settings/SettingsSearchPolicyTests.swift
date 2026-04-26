@@ -28,6 +28,12 @@ struct SettingsSearchPolicyTests {
     }
 
     @Test
+    func resultsSummaryFallsBackToSettingsCountForBlankQuery() {
+        let summary = SettingsSearchPolicy.resultsSummary(count: 12, query: " \n ")
+        #expect(summary == "12 settings")
+    }
+
+    @Test
     func emptyStateVisibleWhenNoResultsAndQueryPresent() {
         #expect(SettingsSearchPolicy.shouldShowEmptyState(resultCount: 0, query: "xyz") == true)
         #expect(SettingsSearchPolicy.shouldShowEmptyState(resultCount: 0, query: "") == false)

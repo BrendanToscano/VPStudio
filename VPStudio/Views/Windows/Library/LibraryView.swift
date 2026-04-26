@@ -1093,7 +1093,7 @@ struct LibraryView: View {
             do {
                 let removedCount = try await appState.database
                     .dedupeLibraryEntriesByTitleEquivalence(listType: listType)
-                try await appState.database.pruneEmptyManualFolders()
+                _ = try await appState.database.pruneEmptyManualFolders()
 
                 actionError = nil
                 if removedCount == 0 {
