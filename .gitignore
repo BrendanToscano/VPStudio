@@ -1,0 +1,29 @@
+# macOS
+.DS_Store
+
+# SwiftPM
+.build/
+
+# Xcode
+DerivedData/
+*.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+*.xcuserstate
+
+# Local env / secrets
+.env
+.env.*
+
+# Local smoke / markers
+.smoke-runs/
+.publishable_ready
+
+# Build artifacts (SPM checkouts, derived data)
+Build/
+
+# QA test artifacts
+qa-artifacts/
+
+# Codex cache
+.codex-home/

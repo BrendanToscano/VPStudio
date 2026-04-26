@@ -1,0 +1,21 @@
+--- VPStudio/Views/Windows/Player/PlayerView.swift
++++ VPStudio/Views/Windows/Player/PlayerView.swift
+@@ -2011,10 +2011,15 @@
+             guard let liveScene = playerWindowScene,
+                   ObjectIdentifier(liveScene) == trackedSceneID else { return }
+ 
++            // The system requires minimum window dimensions (e.g. ~400pt) and caps maximums.
++            // Out-of-bounds dimensions are clamped, destroying the .uniform aspect-ratio constraint.
++            let safeMinDim: CGFloat = 400
++            let safeMaxDim: CGFloat = 3840
++            let minWidth = max(640, safeMinDim * ratio)
++            let minHeight = max(640 / ratio, safeMinDim)
++            let maxWidth = min(safeMaxDim, safeMaxDim * ratio)
++            let maxHeight = min(safeMaxDim / ratio, safeMaxDim)
+             let relaxed = UIWindowScene.GeometryPreferences.Vision(
+-                minimumSize: CGSize(width: 640, height: 640 / ratio),
+-                maximumSize: CGSize(width: 3840, height: 3840 / ratio),
++                minimumSize: CGSize(width: minWidth, height: minHeight),
++                maximumSize: CGSize(width: maxWidth, height: maxHeight),
+                 resizingRestrictions: .uniform
+             )
